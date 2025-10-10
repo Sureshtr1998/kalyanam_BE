@@ -7,7 +7,7 @@ const userSchema = new Schema(
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     fullName: { type: String },
-    mobile: { type: String },
+    mobile: { type: String, unique: true },
     alternateMob: { type: String },
     dob: { type: Date },
     gender: { type: String },
@@ -16,6 +16,7 @@ const userSchema = new Schema(
     profileCreatedBy: { type: String },
     pincode: { type: String },
     images: [{ type: String }],
+    qualification: { type: String },
   },
   { timestamps: true }
 );
