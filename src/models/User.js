@@ -67,6 +67,18 @@ const userSchema = new Schema(
 
     //Mis
     hasCompleteProfile: { type: Boolean },
+    uniqueId: { type: String, unique: true },
+
+    //Interests
+
+    sent: { type: [String] },
+    received: { type: [String] },
+    accepted: { type: [String] },
+    declined: { type: [String] },
+    invitationStatus: {
+      type: [String],
+      enum: ["accept", "decline", "sent", "received", "pending"],
+    },
   },
   { timestamps: true }
 );

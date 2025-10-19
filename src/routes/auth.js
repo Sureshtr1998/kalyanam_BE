@@ -70,7 +70,7 @@ router.post("/user-register", upload.array("images", 3), async (req, res) => {
       const ageDate = new Date(diff);
       return Math.abs(ageDate.getUTCFullYear() - 1970);
     };
-
+    const uniqueId = await generateUniqueId();
     const newUser = new User({
       email: emailNormalized,
       password: hashedPassword,
@@ -88,13 +88,14 @@ router.post("/user-register", upload.array("images", 3), async (req, res) => {
       qualification,
       images: imageUrls,
       username: email,
+      uniqueId,
     });
 
     await newUser.save();
 
     // JWT token
     const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, {
-      expiresIn: "1d",
+      expiresIn: "12h",
     });
 
     const { password: _, ...userData } = newUser.toObject(); // remove password
@@ -206,7 +207,11 @@ router.post("/my-profile", auth, upload.array("images"), async (req, res) => {
     const finalImageUrls = [...existingUrls, ...uploadedUrls];
 
     // Update other userData fields
-    const updateFields = { ...req.body, images: finalImageUrls };
+    const updateFields = {
+      ...req.body,
+      images: finalImageUrls,
+      hasCompleteProfile: true,
+    };
     delete updateFields.imageUrls;
 
     Object.assign(user, updateFields);
@@ -215,6 +220,148 @@ router.post("/my-profile", auth, upload.array("images"), async (req, res) => {
     res.json({ profile: user });
   } catch (err) {
     res.status(500).json({ msg: "Server error" });
+  }
+});
+
+//POST /api/send-interest
+router.post("/send-interest", auth, async (req, res) => {
+  try {
+    const sender = await User.findById(req.user.id);
+    const { receiverId } = req.body;
+
+    const receiver = await User.findById(receiverId);
+
+    if (!sender || !receiver) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    if (req.user.id === receiverId) {
+      return res.status(400).json({ msg: "Cannot send interest to yourself" });
+    }
+
+    if (sender.sent.includes(receiver._id)) {
+      return res.status(400).json({ msg: "Interest already sent" });
+    }
+
+    // Add interest
+    sender.sent.push(receiver._id);
+    receiver.received.push(sender._id);
+
+    // Save both users
+    await sender.save();
+    await receiver.save();
+
+    res.json({ msg: "Interest sent successfully" });
+  } catch (err) {
+    res.status(500).json({ msg: "Server error" });
+  }
+});
+
+//GET /api/fetch-invitation-status
+
+router.get("/fetch-invitation-status", auth, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user.id);
+
+    if (!currentUser) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    // Combine all IDs
+    const allIds = [
+      ...(currentUser.sent || []),
+      ...(currentUser.received || []),
+      ...(currentUser.accepted || []),
+      ...(currentUser.declined || []),
+    ];
+
+    // Remove duplicates
+    const uniqueIds = [...new Set(allIds.map((id) => id.toString()))];
+
+    // Fetch all users at once
+    const users = await User.find(
+      { _id: { $in: uniqueIds } },
+      "-password -email -mobile -alternateMob -__v"
+    ).lean();
+
+    // Map each user to correct invitationStatus based on priority
+    const combinedList = users.map((user) => {
+      let status = "received"; // default
+
+      if (currentUser.accepted?.includes(user._id.toString())) {
+        status = "accept";
+      } else if (currentUser.declined?.includes(user._id.toString())) {
+        status = "decline";
+      } else if (currentUser.sent?.includes(user._id.toString())) {
+        status = "sent";
+      } else if (currentUser.received?.includes(user._id.toString())) {
+        status = "received";
+      }
+
+      return { ...user, invitationStatus: status };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: combinedList.length,
+      invitations: combinedList,
+    });
+  } catch (err) {
+    console.error("Error fetching invitation status:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+//POST /api/interest-action
+
+router.post("/interest-action", auth, async (req, res) => {
+  try {
+    const { userId, action } = req.body;
+    const currentUserId = req.user.id;
+
+    if (!userId || !["accept", "decline"].includes(action)) {
+      return res.status(400).json({ msg: "Invalid request data" });
+    }
+
+    const currentUser = await User.findById(currentUserId);
+    const otherUser = await User.findById(userId);
+
+    console.log(currentUserId, userId, "userId");
+    if (!currentUser || !otherUser) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    if (action === "accept") {
+      currentUser.accepted = [
+        ...(currentUser.accepted || []),
+        userId.toString(),
+      ];
+      otherUser.accepted = [
+        ...(otherUser.accepted || []),
+        currentUserId.toString(),
+      ];
+    } else if (action === "decline") {
+      currentUser.declined = [
+        ...(currentUser.declined || []),
+        userId.toString(),
+      ];
+      otherUser.declined = [
+        ...(otherUser.declined || []),
+        currentUserId.toString(),
+      ];
+    }
+
+    await currentUser.save();
+    await otherUser.save();
+
+    return res.json({
+      msg: `Interest ${
+        action === "accept" ? "accepted" : "declined"
+      } successfully`,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ msg: "Server error" });
   }
 });
 
