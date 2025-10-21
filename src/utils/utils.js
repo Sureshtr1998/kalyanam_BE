@@ -1,6 +1,4 @@
-export const generateUniqueId = async () => {
-  const userCount = await User.countDocuments();
-
+export const generateUniqueId = async (userCount) => {
   const lettersIndex = Math.floor(userCount / 999);
   const number = (userCount % 999) + 1;
 

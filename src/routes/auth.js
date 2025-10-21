@@ -8,6 +8,7 @@ import cloudinary from "../config/cloudinary.js";
 import { auth } from "../middleware/auth.js";
 import otpGenerator from "otp-generator";
 import transporter from "../config/nodeMailer.js";
+import { generateUniqueId } from "../utils/utils.js";
 
 const router = Router();
 
@@ -52,6 +53,11 @@ router.post("/user-register", upload.array("images", 3), async (req, res) => {
     if (existingUser)
       return res.status(400).json({ msg: "User already exists" });
 
+    const existingMobile = await User.findOne({ mobile });
+    if (existingMobile) {
+      return res.status(400).json({ msg: "Mobile number already registered" });
+    }
+
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -73,7 +79,8 @@ router.post("/user-register", upload.array("images", 3), async (req, res) => {
       const ageDate = new Date(diff);
       return Math.abs(ageDate.getUTCFullYear() - 1970);
     };
-    const uniqueId = await generateUniqueId();
+    const userCount = await User.countDocuments();
+    const uniqueId = await generateUniqueId(userCount);
     const newUser = new User({
       email: emailNormalized,
       password: hashedPassword,
@@ -276,6 +283,28 @@ router.post("/send-interest", auth, async (req, res) => {
     await sender.save();
     await receiver.save();
 
+    await transporter.sendMail({
+      from: `"Seetha Rama Kalyana" <${process.env.EMAIL_USER}>`,
+      to: receiver.email,
+      subject: "New Interest Received on Seetha Rama Kalyana",
+      html: `
+    <div style="font-family:Arial,sans-serif; max-width:600px; margin:auto; border:1px solid #eaeaea; padding:20px; border-radius:10px;">
+      <h2 style="color:#007BFF;">You’ve Received a New Interest 💌</h2>
+      <p>Dear ${receiver.fullName || "User"},</p>
+      <p><b>${
+        sender.fullName
+      }</b> has shown interest in your profile on <b>Seetha Rama Kalyana</b>.</p>
+      <p>Visit your profile Invitation Status to view their details and decide whether to <b>Accept</b> or <b>Decline</b> the interest.</p>
+      <div style="text-align:center; margin-top:20px;">
+        <a href="${
+          process.env.FRONTEND_URL
+        }/invitations" style="background-color:#007BFF; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">View Interest</a>
+      </div>
+      <p style="margin-top:30px;">Thank you for using <b>Seetha Rama Kalyana</b>.</p>
+    </div>
+  `,
+    });
+
     res.json({ msg: "Interest sent successfully" });
   } catch (err) {
     res.status(500).json({ msg: "Server error" });
@@ -306,7 +335,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
     // Fetch all users at once
     const users = await User.find(
       { _id: { $in: uniqueIds } },
-      "-password -email -mobile -alternateMob -__v"
+      "-password -email -__v"
     ).lean();
 
     // Map each user to correct invitationStatus based on priority
@@ -323,7 +352,12 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
         status = "received";
       }
 
-      return { ...user, invitationStatus: status };
+      return {
+        ...user,
+        invitationStatus: status,
+        mobile: status === "accept" ? user.mobile : undefined,
+        alternateMob: status === "accept" ? user.alternateMob : undefined,
+      };
     });
 
     res.status(200).json({
@@ -351,7 +385,6 @@ router.post("/interest-action", auth, async (req, res) => {
     const currentUser = await User.findById(currentUserId);
     const otherUser = await User.findById(userId);
 
-    console.log(currentUserId, userId, "userId");
     if (!currentUser || !otherUser) {
       return res.status(404).json({ msg: "User not found" });
     }
@@ -378,7 +411,30 @@ router.post("/interest-action", auth, async (req, res) => {
 
     await currentUser.save();
     await otherUser.save();
-
+    if (action === "accept") {
+      await transporter.sendMail({
+        from: `"Seetha Rama Kalyana" <${process.env.EMAIL_USER}>`,
+        to: otherUser.email, // original sender of the interest
+        subject: "Your Interest Has Been Accepted 💖",
+        html: `
+    <div style="font-family:Arial,sans-serif; max-width:600px; margin:auto; border:1px solid #eaeaea; padding:20px; border-radius:10px;">
+      <h2 style="color:#28a745;">Good News! Your Interest Was Accepted 💖</h2>
+      <p>Dear ${otherUser.fullName || "User"},</p>
+      <p><b>${
+        currentUser.fullName
+      }</b> has accepted your interest on <b>Seetha Rama Kalyana</b>.</p>
+      <p>You can now view their contact details and continue your conversation.</p>
+      <div style="text-align:center; margin-top:20px;">
+        <a href="${
+          process.env.FRONTEND_URL
+        }/login" style="background-color:#28a745; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">View Profile</a>
+      </div>
+      <p style="margin-top:30px;">We wish you all the best in your journey together!</p>
+      <p>– The <b>Seetha Rama Kalyana</b> Team</p>
+    </div>
+  `,
+      });
+    }
     return res.json({
       msg: `Interest ${
         action === "accept" ? "accepted" : "declined"
