@@ -99,7 +99,15 @@ router.post("/user-register", upload.array("images", 3), async (req, res) => {
     });
 
     const { password: _, ...userData } = newUser.toObject(); // remove password
-    res.json({ token, user: userData });
+    res.json({
+      token,
+      user: {
+        id: userData._id,
+        username: userData.fullName,
+        email: userData.email,
+        isHidden: userData.isHidden,
+      },
+    });
   } catch (error) {
     res.status(500).json({ msg: "Server error", error: error.message });
   }
@@ -122,16 +130,22 @@ router.post("/login", async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ msg: "Invalid credentials" });
 
+    if (user.isHidden) {
+      user.isHidden = false;
+      await user.save();
+    }
+
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "1d",
+      expiresIn: "12h",
     });
 
     res.json({
       token,
       user: {
         id: user._id,
-        username: user.username,
+        username: user.fullName,
         email: user.email,
+        isHidden: user.isHidden,
       },
     });
   } catch (err) {
@@ -150,14 +164,22 @@ router.get("/fetch-profiles", auth, async (req, res) => {
 
     // Determine opposite gender
     const oppositeGender =
-      currentUser.gender.toLowerCase() === "male" ? "male" : "male";
-    //   currentUser.gender.toLowerCase() === "male" ? "female" : "male";
+      currentUser.gender.toLowerCase() === "male" ? "female" : "male";
 
     // Fetch profiles excluding current user
+    const excludedIds = [
+      ...currentUser.accepted,
+      ...currentUser.declined,
+      ...currentUser.hideProfiles,
+      ...currentUser.sent,
+      ...currentUser.received,
+    ];
+
     const profiles = await User.find({
       gender: { $regex: new RegExp(`^${oppositeGender}$`, "i") },
-      _id: { $ne: currentUser._id },
-    }).select("-password -email -username -alternateMob");
+      _id: { $ne: currentUser._id, $nin: excludedIds },
+      isHidden: false, // skip users who have hidden their profile
+    }).select("-password -email -username -alternateMob -mobile");
 
     res.json({ profiles });
   } catch (err) {
@@ -362,6 +384,102 @@ router.post("/interest-action", auth, async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+//DELETE /api/delete-account
+
+router.delete("/delete-account", auth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    if (user.images && user.images.length > 0) {
+      for (const imageUrl of user.images) {
+        try {
+          const parts = imageUrl.split("/");
+          const filename = parts[parts.length - 1];
+          const publicId = filename.split(".")[0];
+
+          await cloudinary.uploader.destroy(publicId);
+        } catch (err) {
+          console.error("Error deleting Cloudinary image:", err.message);
+        }
+      }
+    }
+
+    await User.findByIdAndDelete(userId);
+
+    res.status(200).json({
+      success: true,
+      msg: "Account and images deleted successfully",
+    });
+  } catch (err) {
+    console.error("Error deleting account:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+//POST /api/hide-profile
+
+router.post("/hide-profile", auth, async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    const currentUserId = req.user.id;
+
+    const currentUser = await User.findById(currentUserId);
+    if (!currentUser) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    if (!userId) {
+      currentUser.isHidden = true;
+      await currentUser.save();
+
+      return res.status(200).json({
+        success: true,
+        msg: "Your profile is now hidden",
+      });
+    }
+
+    if (!currentUser.hideProfiles.includes(userId)) {
+      currentUser.hideProfiles.push(userId);
+      await currentUser.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      msg: "User profile hidden successfully",
+      hideProfiles: currentUser.hideProfiles,
+    });
+  } catch (err) {
+    console.error("Error hiding profile:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+//GET /api/user-account
+
+router.get("/user-account", auth, async (req, res) => {
+  try {
+    const currentUserId = req.user.id;
+
+    const currentUser = await User.findById(currentUserId);
+    if (!currentUser) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      isHidden: currentUser.isHidden,
+    });
+  } catch (err) {
+    console.error("Error fetching account details:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
   }
 });
 

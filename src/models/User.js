@@ -68,6 +68,8 @@ const userSchema = new Schema(
     //Mis
     hasCompleteProfile: { type: Boolean },
     uniqueId: { type: String, unique: true },
+    isHidden: { type: Boolean, default: false },
+    hideProfiles: { type: [String], default: [] },
 
     //Interests
 
