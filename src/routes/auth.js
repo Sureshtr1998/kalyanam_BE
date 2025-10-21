@@ -3,8 +3,11 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import upload from "../middleware/upload.js";
+import otpLimiter from "../middleware/otpLimiter.js";
 import cloudinary from "../config/cloudinary.js";
 import { auth } from "../middleware/auth.js";
+import otpGenerator from "otp-generator";
+import transporter from "../config/nodeMailer.js";
 
 const router = Router();
 
@@ -414,6 +417,21 @@ router.delete("/delete-account", auth, async (req, res) => {
 
     await User.findByIdAndDelete(userId);
 
+    await transporter.sendMail({
+      from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
+      to: user.email,
+      subject: "Account Deletion Confirmation",
+      html: `
+    <div style="font-family:Arial,sans-serif;">
+      <h3>Account Deletion</h3>
+      <p>Hello ${user.fullName || ""},</p>
+      <p>Your account has been successfully deleted. We are sorry to see you go!</p>
+      <p>If this was a mistake, please contact our support team immediately.</p>
+      <p>Thank you for using Seetha Rama Kalyana.</p>
+    </div>
+  `,
+    });
+
     res.status(200).json({
       success: true,
       msg: "Account and images deleted successfully",
@@ -439,6 +457,22 @@ router.post("/hide-profile", auth, async (req, res) => {
     if (!userId) {
       currentUser.isHidden = true;
       await currentUser.save();
+
+      await transporter.sendMail({
+        from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
+        to: currentUser.email,
+        subject: "Account Hidden Successfully",
+        html: `
+    <div style="font-family:Arial,sans-serif;">
+      <h3>Account Hidden</h3>
+      <p>Hello ${currentUser.fullName || ""},</p>
+      <p>Your profile has been successfully hidden. You will be logged out.</p>
+      <p>Your profile will automatically become visible again when you log in next time.</p>
+      <p>If you did not request this, please contact our support team.</p>
+      <p>Thank you for using Seetha Rama Kalyana.</p>
+    </div>
+  `,
+      });
 
       return res.status(200).json({
         success: true,
@@ -481,6 +515,97 @@ router.get("/user-account", auth, async (req, res) => {
     console.error("Error fetching account details:", err);
     res.status(500).json({ success: false, msg: "Server error" });
   }
+});
+
+//Password Reset
+
+const otpStore = new Map();
+//POST /api/request-reset
+router.post("/request-reset", otpLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email)
+      return res.status(400).json({ success: false, msg: "Email is required" });
+
+    const user = await User.findOne({ email });
+    if (!user)
+      return res.status(404).json({ success: false, msg: "User not found" });
+
+    // Generate 6-digit OTP
+    const otp = otpGenerator.generate(6, {
+      upperCaseAlphabets: false,
+      specialChars: false,
+      lowerCaseAlphabets: false,
+    });
+
+    otpStore.set(email, { otp, expires: Date.now() + 5 * 60 * 1000 }); // valid for 5 min
+
+    // Send OTP via email
+    await transporter.sendMail({
+      from: `"MyApp Support" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Password Reset OTP from Seetha Rama Kalyana",
+      html: `
+        <div style="font-family:Arial,sans-serif;">
+          <h3>Reset Your Password</h3>
+          <p>Your OTP is:</p>
+          <h2>${otp}</h2>
+          <p>This OTP is valid for <b>5 minutes</b>.</p>
+          <p>If you didn't request this, please ignore this email.</p>
+        </div>
+      `,
+    });
+
+    console.log(`OTP sent to ${email}: ${otp}`); // Debug log
+    return res.json({
+      success: true,
+      msg: "OTP sent to your registered email",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+//POST /api/verify-otp
+
+router.post("/verify-otp", async (req, res) => {
+  const { email, otp } = req.body;
+
+  const record = otpStore.get(email);
+  if (!record)
+    return res
+      .status(400)
+      .json({ success: false, msg: "OTP not found or expired" });
+
+  if (Date.now() > record.expires)
+    return res.status(400).json({ success: false, msg: "OTP expired" });
+
+  if (record.otp !== otp)
+    return res.status(400).json({ success: false, msg: "Invalid OTP" });
+
+  otpStore.delete(email);
+  otpStore.set(email, { verified: true });
+
+  res.json({ success: true, msg: "OTP verified successfully" });
+});
+
+//POST /api/reset-password
+
+router.post("/reset-password", async (req, res) => {
+  const { email, newPassword } = req.body;
+
+  const record = otpStore.get(email);
+  if (!record || !record.verified)
+    return res
+      .status(400)
+      .json({ success: false, msg: "OTP not verified or expired" });
+
+  const hashed = await bcrypt.hash(newPassword, 10);
+  await User.findOneAndUpdate({ email }, { password: hashed });
+
+  otpStore.delete(email);
+  res.json({ success: true, msg: "Password reset successful" });
 });
 
 export default router;
