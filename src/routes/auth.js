@@ -111,13 +111,10 @@ router.post("/user-register", upload.array("images", 3), async (req, res) => {
 
     const { password: _, ...userData } = newUser.toObject(); // remove password
     res.json({
+      id: userData._id,
+      username: userData.fullName,
+      email: userData.email,
       token,
-      user: {
-        id: userData._id,
-        username: userData.fullName,
-        email: userData.email,
-        isHidden: userData.isHidden,
-      },
     });
   } catch (error) {
     res.status(500).json({ msg: "Server error", error: error.message });
@@ -151,13 +148,10 @@ router.post("/login", async (req, res) => {
     });
 
     res.json({
+      id: user._id,
+      username: user.fullName,
+      email: user.email,
       token,
-      user: {
-        id: user._id,
-        username: user.fullName,
-        email: user.email,
-        isHidden: user.isHidden,
-      },
     });
   } catch (err) {
     res.status(500).json({ msg: "Server error" });
@@ -173,11 +167,9 @@ router.get("/fetch-profiles", auth, async (req, res) => {
       return res.status(400).json({ msg: "Current user gender not set" });
     }
 
-    // Determine opposite gender
     const oppositeGender =
       currentUser.gender.toLowerCase() === "male" ? "female" : "male";
 
-    // Fetch profiles excluding current user
     const excludedIds = [
       ...currentUser.accepted,
       ...currentUser.declined,
@@ -186,14 +178,36 @@ router.get("/fetch-profiles", auth, async (req, res) => {
       ...currentUser.received,
     ];
 
+    const page = parseInt(req.query.page) || 1; // default page 1
+    const limit = parseInt(req.query.limit) || 10; // default 10 profiles per page
+    const skip = (page - 1) * limit;
+
+    // Fetch total count for frontend info
+    const totalProfiles = await User.countDocuments({
+      gender: { $regex: new RegExp(`^${oppositeGender}$`, "i") },
+      _id: { $ne: currentUser._id, $nin: excludedIds },
+      isHidden: false,
+    });
+
+    // Fetch paginated profiles
     const profiles = await User.find({
       gender: { $regex: new RegExp(`^${oppositeGender}$`, "i") },
       _id: { $ne: currentUser._id, $nin: excludedIds },
-      isHidden: false, // skip users who have hidden their profile
-    }).select("-password -email -username -alternateMob -mobile");
+      isHidden: false,
+    })
+      .skip(skip)
+      .limit(limit)
+      .select("-password -email -username -alternateMob -mobile");
 
-    res.json({ profiles });
+    res.json({
+      profiles,
+      page,
+      limit,
+      totalPages: Math.ceil(totalProfiles / limit),
+      totalProfiles,
+    });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ msg: "Server error" });
   }
 });
