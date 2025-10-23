@@ -9,6 +9,7 @@ import { auth } from "../middleware/auth.js";
 import otpGenerator from "otp-generator";
 import transporter from "../config/nodeMailer.js";
 import { generateUniqueId } from "../utils/utils.js";
+import twilioClient from "../config/twilio.js";
 
 const router = Router();
 
@@ -598,7 +599,7 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
 
     // Send OTP via email
     await transporter.sendMail({
-      from: `"MyApp Support" <${process.env.EMAIL_USER}>`,
+      from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Password Reset OTP from Seetha Rama Kalyana",
       html: `
@@ -662,6 +663,90 @@ router.post("/reset-password", async (req, res) => {
 
   otpStore.delete(email);
   res.json({ success: true, msg: "Password reset successful" });
+});
+
+// Validations
+
+const validateOtpStore = new Map();
+//POST /api/send-otp
+
+router.post("/send-otp", async (req, res) => {
+  const { email, mobile } = req.body;
+  if (!email || !mobile)
+    return res
+      .status(400)
+      .json({ success: false, msg: "Email and mobile are required" });
+
+  const emailOtp = otpGenerator.generate(6, {
+    upperCaseAlphabets: false,
+    specialChars: false,
+  });
+  const mobileOtp = otpGenerator.generate(6, {
+    upperCaseAlphabets: false,
+    specialChars: false,
+  });
+
+  validateOtpStore.set(email, {
+    emailOtp,
+    mobileOtp,
+    mobile,
+    expires: Date.now() + 5 * 60 * 1000,
+  });
+
+  // Send Email OTP
+  try {
+    await transporter.sendMail({
+      from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Email OTP Verification - Seetha Rama Kalyana",
+      html: `<p>Your email OTP is <b>${emailOtp}</b> (valid for 5 minutes).</p>`,
+    });
+  } catch (err) {
+    console.error("Email error:", err.message);
+    return res
+      .status(500)
+      .json({ success: false, msg: "Failed to send email OTP" });
+  }
+
+  // Send SMS OTP
+  try {
+    await twilioClient.messages.create({
+      body: `Your mobile OTP is ${mobileOtp}. Valid for 5 minutes.`,
+      from: process.env.TWILIO_PHONE,
+      to: `+91${mobile}`,
+    });
+  } catch (err) {
+    console.error("SMS error:", err.message);
+    return res
+      .status(500)
+      .json({ success: false, msg: "Failed to send SMS OTP" });
+  }
+
+  res.json({ success: true, msg: "OTP sent to email and mobile" });
+});
+
+//POST /api/verify-otp
+
+router.post("/verify-otp-registration", async (req, res) => {
+  const { email, emailOtp, mobileOtp } = req.body;
+
+  const record = validateOtpStore.get(email);
+  if (!record)
+    return res.status(400).json({ success: false, msg: "OTP not found" });
+
+  if (record.expires < Date.now())
+    return res.status(400).json({ success: false, msg: "OTP expired" });
+
+  if (record.emailOtp !== emailOtp)
+    return res.status(400).json({ success: false, msg: "Invalid email OTP" });
+
+  if (record.mobileOtp !== mobileOtp)
+    return res.status(400).json({ success: false, msg: "Invalid phone OTP" });
+
+  validateOtpStore.delete(email); // OTPs verified → remove record
+
+  // ✅ Here, you can create a new user or mark registration as complete
+  res.json({ success: true, msg: "Email and phone verified successfully!" });
 });
 
 export default router;
