@@ -10,6 +10,7 @@ import otpGenerator from "otp-generator";
 import transporter from "../config/nodeMailer.js";
 import { generateUniqueId } from "../utils/utils.js";
 import twilioClient from "../config/twilio.js";
+import { arrayFields } from "../utils/constants.js";
 
 const router = Router();
 
@@ -158,17 +159,20 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// GET /api/fetch-profiles
-router.get("/fetch-profiles", auth, async (req, res) => {
+// POST /api/fetch-profiles
+router.post("/fetch-profiles", auth, async (req, res) => {
   try {
     const currentUser = req.user;
-
     if (!currentUser.gender) {
       return res.status(400).json({ msg: "Current user gender not set" });
     }
 
     const oppositeGender =
       currentUser.gender.toLowerCase() === "male" ? "female" : "male";
+
+    const { page = 1, limit = 10, filters = {} } = req.body;
+
+    const skip = (page - 1) * limit;
 
     const excludedIds = [
       ...currentUser.accepted,
@@ -178,37 +182,69 @@ router.get("/fetch-profiles", auth, async (req, res) => {
       ...currentUser.received,
     ];
 
-    const page = parseInt(req.query.page) || 1; // default page 1
-    const limit = parseInt(req.query.limit) || 10; // default 10 profiles per page
-    const skip = (page - 1) * limit;
-
-    // Fetch total count for frontend info
-    const totalProfiles = await User.countDocuments({
+    // --- Build MongoDB query dynamically ---
+    const query = {
       gender: { $regex: new RegExp(`^${oppositeGender}$`, "i") },
       _id: { $ne: currentUser._id, $nin: excludedIds },
       isHidden: false,
-    });
+    };
 
-    // Fetch paginated profiles
-    const profiles = await User.find({
-      gender: { $regex: new RegExp(`^${oppositeGender}$`, "i") },
-      _id: { $ne: currentUser._id, $nin: excludedIds },
-      isHidden: false,
-    })
+    // 🎯 Apply filters only if user selected something
+    const {
+      ageFrom,
+      ageTo,
+      pMartialStatus,
+      heightFrom,
+      heightTo,
+      pSubCaste,
+      pEmployedIn,
+      pQualification,
+      pCountry,
+    } = filters;
+
+    if (ageFrom || ageTo) {
+      query.age = {};
+      if (ageFrom) query.age.$gte = parseInt(ageFrom);
+      if (ageTo) query.age.$lte = parseInt(ageTo);
+    }
+    if (heightFrom || heightTo) {
+      const heightCondition = {};
+      if (heightFrom) heightCondition.$gte = parseFloat(heightFrom);
+      if (heightTo) heightCondition.$lte = parseFloat(heightTo);
+
+      query.$or = [
+        { height: heightCondition },
+        { height: { $exists: false } }, // no height field
+        { height: null }, // explicitly null
+      ];
+    }
+    if (pMartialStatus?.length) query.martialStatus = { $in: pMartialStatus };
+
+    if (pSubCaste?.length) query.subCaste = { $in: pSubCaste };
+
+    if (pEmployedIn?.length) query.employedIn = { $in: pEmployedIn };
+
+    if (pQualification?.length) query.qualification = { $in: pQualification };
+
+    if (pCountry?.length) query.country = { $in: pCountry };
+
+    const totalProfiles = await User.countDocuments(query);
+
+    const profiles = await User.find(query)
       .skip(skip)
       .limit(limit)
       .select("-password -email -username -alternateMob -mobile");
 
-    res.json({
+    return res.json({
       profiles,
+      totalProfiles,
+      totalPages: Math.ceil(totalProfiles / limit),
       page,
       limit,
-      totalPages: Math.ceil(totalProfiles / limit),
-      totalProfiles,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ msg: "Server error" });
+    console.error("Fetch Profiles Error:", err);
+    return res.status(500).json({ msg: "Server error" });
   }
 });
 
@@ -253,6 +289,15 @@ router.post("/my-profile", auth, upload.array("images"), async (req, res) => {
 
     const finalImageUrls = [...existingUrls, ...uploadedUrls];
 
+    for (const [key, value] of Object.entries(req.body)) {
+      if (arrayFields.includes(key)) {
+        if (!value) {
+          req.body[key] = [];
+        } else {
+          req.body[key] = value.split(",");
+        }
+      }
+    }
     // Update other userData fields
     const updateFields = {
       ...req.body,
@@ -266,6 +311,7 @@ router.post("/my-profile", auth, upload.array("images"), async (req, res) => {
 
     res.json({ profile: user });
   } catch (err) {
+    console.log(err, "ERR");
     res.status(500).json({ msg: "Server error" });
   }
 });

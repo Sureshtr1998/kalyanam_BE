@@ -66,21 +66,18 @@ const userSchema = new Schema(
     pNote: { type: String },
 
     //Mis
-    hasCompleteProfile: { type: Boolean },
+    hasCompleteProfile: { type: Boolean, default: false },
     uniqueId: { type: String, unique: true },
     isHidden: { type: Boolean, default: false },
-    hideProfiles: { type: [String], default: [] },
+    hideProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },
 
     //Interests
 
-    sent: { type: [String] },
-    received: { type: [String] },
-    accepted: { type: [String] },
-    declined: { type: [String] },
-    invitationStatus: {
-      type: [String],
-      enum: ["accept", "decline", "sent", "received", "pending"],
-    },
+    sent: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    received: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    accepted: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    declined: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    invitationStatus: { type: [String] },
   },
   { timestamps: true }
 );
