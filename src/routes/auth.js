@@ -11,6 +11,7 @@ import transporter from "../config/nodeMailer.js";
 import { generateUniqueId } from "../utils/utils.js";
 import twilioClient from "../config/twilio.js";
 import { arrayFields } from "../utils/constants.js";
+import redisClient from "../config/redisClient.js";
 
 const router = Router();
 
@@ -636,7 +637,6 @@ router.get("/user-account", auth, async (req, res) => {
 
 //Password Reset
 
-const otpStore = new Map();
 //POST /api/request-reset
 router.post("/request-reset", otpLimiter, async (req, res) => {
   try {
@@ -655,9 +655,10 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
       lowerCaseAlphabets: false,
     });
 
-    otpStore.set(email, { otp, expires: Date.now() + 5 * 60 * 1000 }); // valid for 5 min
+    // Store in Redis with expiry (5 minutes)
+    await redisClient.setEx(`otp:${email}`, 300, otp);
 
-    // Send OTP via email
+    // Send OTP email
     await transporter.sendMail({
       from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
       to: email,
@@ -673,7 +674,7 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
       `,
     });
 
-    console.log(`OTP sent to ${email}: ${otp}`); // Debug log
+    console.log(`OTP sent to ${email}: ${otp}`);
     return res.json({
       success: true,
       msg: "OTP sent to your registered email",
@@ -688,21 +689,19 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
 
 router.post("/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
+  const storedOtp = await redisClient.get(`otp:${email}`);
 
-  const record = otpStore.get(email);
-  if (!record)
+  if (!storedOtp)
     return res
       .status(400)
       .json({ success: false, msg: "OTP not found or expired" });
 
-  if (Date.now() > record.expires)
-    return res.status(400).json({ success: false, msg: "OTP expired" });
-
-  if (record.otp !== otp)
+  if (storedOtp !== otp)
     return res.status(400).json({ success: false, msg: "Invalid OTP" });
 
-  otpStore.delete(email);
-  otpStore.set(email, { verified: true });
+  // Delete old OTP and mark as verified
+  await redisClient.del(`otp:${email}`);
+  await redisClient.setEx(`otp_verified:${email}`, 600, "true"); // valid for 10 minutes
 
   res.json({ success: true, msg: "OTP verified successfully" });
 });
@@ -712,8 +711,8 @@ router.post("/verify-otp", async (req, res) => {
 router.post("/reset-password", async (req, res) => {
   const { email, newPassword } = req.body;
 
-  const record = otpStore.get(email);
-  if (!record || !record.verified)
+  const verified = await redisClient.get(`otp_verified:${email}`);
+  if (!verified)
     return res
       .status(400)
       .json({ success: false, msg: "OTP not verified or expired" });
@@ -721,13 +720,13 @@ router.post("/reset-password", async (req, res) => {
   const hashed = await bcrypt.hash(newPassword, 10);
   await User.findOneAndUpdate({ email }, { password: hashed });
 
-  otpStore.delete(email);
+  await redisClient.del(`otp_verified:${email}`);
+
   res.json({ success: true, msg: "Password reset successful" });
 });
 
 // Validations
 
-const validateOtpStore = new Map();
 //POST /api/send-otp
 
 router.post("/send-otp", async (req, res) => {
@@ -740,49 +739,47 @@ router.post("/send-otp", async (req, res) => {
   const emailOtp = otpGenerator.generate(6, {
     upperCaseAlphabets: false,
     specialChars: false,
+    lowerCaseAlphabets: false,
   });
   const mobileOtp = otpGenerator.generate(6, {
     upperCaseAlphabets: false,
     specialChars: false,
+    lowerCaseAlphabets: false,
   });
 
-  validateOtpStore.set(email, {
+  const otpRecord = {
     emailOtp,
     mobileOtp,
     mobile,
-    expires: Date.now() + 5 * 60 * 1000,
-  });
+    expires: Date.now() + 5 * 60 * 1000, // 5 min
+  };
 
-  // Send Email OTP
   try {
+    // Save to Redis with TTL of 5 minutes
+    await redisClient.set(`otp:${email}`, JSON.stringify(otpRecord), {
+      EX: 300,
+    });
+
+    // Send Email OTP
     await transporter.sendMail({
       from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: "Email OTP Verification - Seetha Rama Kalyana",
       html: `<p>Your email OTP is <b>${emailOtp}</b> (valid for 5 minutes).</p>`,
     });
-  } catch (err) {
-    console.error("Email error:", err.message);
-    return res
-      .status(500)
-      .json({ success: false, msg: "Failed to send email OTP" });
-  }
 
-  // Send SMS OTP
-  try {
+    // Send SMS OTP
     await twilioClient.messages.create({
       body: `Your mobile OTP is ${mobileOtp}. Valid for 5 minutes.`,
       from: process.env.TWILIO_PHONE,
       to: `+91${mobile}`,
     });
-  } catch (err) {
-    console.error("SMS error:", err.message);
-    return res
-      .status(500)
-      .json({ success: false, msg: "Failed to send SMS OTP" });
-  }
 
-  res.json({ success: true, msg: "OTP sent to email and mobile" });
+    res.json({ success: true, msg: "OTP sent to email and mobile" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, msg: "Failed to send OTP" });
+  }
 });
 
 //POST /api/verify-otp
@@ -790,23 +787,30 @@ router.post("/send-otp", async (req, res) => {
 router.post("/verify-otp-registration", async (req, res) => {
   const { email, emailOtp, mobileOtp } = req.body;
 
-  const record = validateOtpStore.get(email);
-  if (!record)
-    return res.status(400).json({ success: false, msg: "OTP not found" });
+  try {
+    const recordStr = await redisClient.get(`otp:${email}`);
+    if (!recordStr)
+      return res
+        .status(400)
+        .json({ success: false, msg: "OTP not found or expired" });
 
-  if (record.expires < Date.now())
-    return res.status(400).json({ success: false, msg: "OTP expired" });
+    const record = JSON.parse(recordStr);
 
-  if (record.emailOtp !== emailOtp)
-    return res.status(400).json({ success: false, msg: "Invalid email OTP" });
+    if (record.emailOtp !== emailOtp)
+      return res.status(400).json({ success: false, msg: "Invalid email OTP" });
 
-  if (record.mobileOtp !== mobileOtp)
-    return res.status(400).json({ success: false, msg: "Invalid phone OTP" });
+    if (record.mobileOtp !== mobileOtp)
+      return res.status(400).json({ success: false, msg: "Invalid phone OTP" });
 
-  validateOtpStore.delete(email); // OTPs verified → remove record
+    // OTPs verified → remove from Redis
+    await redisClient.del(`otp:${email}`);
 
-  // ✅ Here, you can create a new user or mark registration as complete
-  res.json({ success: true, msg: "Email and phone verified successfully!" });
+    // ✅ Continue registration / mark user verified
+    res.json({ success: true, msg: "Email and phone verified successfully!" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
 });
 
 export default router;
