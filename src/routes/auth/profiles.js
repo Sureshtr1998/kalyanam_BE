@@ -11,77 +11,81 @@ router.post("/fetch-profiles", auth, async (req, res) => {
   try {
     // @ts-ignore
     const currentUser = req.user;
-    if (!currentUser.gender) {
+    if (!currentUser.basic?.gender) {
       return res.status(400).json({ msg: "Current user gender not set" });
     }
 
     const oppositeGender =
-      currentUser.gender.toLowerCase() === "male" ? "female" : "male";
+      currentUser.basic.gender.toLowerCase() === "male" ? "female" : "male";
 
     const { page = 1, limit = 10, filters = {} } = req.body;
-
     const skip = (page - 1) * limit;
 
+    // Excluded IDs (users already interacted with)
     const excludedIds = [
-      ...currentUser.accepted,
-      ...currentUser.declined,
+      ...currentUser.interests.accepted,
+      ...currentUser.interests.declined,
       ...currentUser.hideProfiles,
-      ...currentUser.sent,
-      ...currentUser.received,
+      ...currentUser.interests.sent,
+      ...currentUser.interests.received,
     ];
 
-    // --- Build MongoDB query dynamically ---
+    // --- Build query dynamically ---
     const query = {
-      gender: { $regex: new RegExp(`^${oppositeGender}$`, "i") },
+      "basic.gender": { $regex: new RegExp(`^${oppositeGender}$`, "i") },
       _id: { $ne: currentUser._id, $nin: excludedIds },
       isHidden: false,
     };
 
-    // 🎯 Apply filters only if user selected something
+    // Partner filters
     const {
       ageFrom,
       ageTo,
-      pMartialStatus,
+      martialStatus,
       heightFrom,
       heightTo,
-      pSubCaste,
-      pEmployedIn,
-      pQualification,
-      pCountry,
-    } = filters;
+      subCaste,
+      employedIn,
+      qualification,
+      country,
+    } = filters.partner || {};
 
     if (ageFrom || ageTo) {
-      query.age = {};
-      if (ageFrom) query.age.$gte = parseInt(ageFrom);
-      if (ageTo) query.age.$lte = parseInt(ageTo);
+      query["basic.age"] = {};
+      if (ageFrom) query["basic.age"].$gte = parseInt(ageFrom);
+      if (ageTo) query["basic.age"].$lte = parseInt(ageTo);
     }
+
     if (heightFrom || heightTo) {
       const heightCondition = {};
       if (heightFrom) heightCondition.$gte = parseFloat(heightFrom);
       if (heightTo) heightCondition.$lte = parseFloat(heightTo);
 
       query.$or = [
-        { height: heightCondition },
-        { height: { $exists: false } }, // no height field
-        { height: null }, // explicitly null
+        { "personal.height": heightCondition },
+        { "personal.height": { $exists: false } },
+        { "personal.height": null },
       ];
     }
-    if (pMartialStatus?.length) query.martialStatus = { $in: pMartialStatus };
 
-    if (pSubCaste?.length) query.subCaste = { $in: pSubCaste };
+    if (martialStatus?.length)
+      query["basic.martialStatus"] = { $in: martialStatus };
+    if (subCaste?.length) query["basic.subCaste"] = { $in: subCaste };
+    if (employedIn?.length) query["personal.employedIn"] = { $in: employedIn };
+    if (qualification?.length)
+      query["basic.qualification"] = { $in: qualification };
+    if (country?.length) query["personal.country"] = { $in: country };
 
-    if (pEmployedIn?.length) query.employedIn = { $in: pEmployedIn };
-
-    if (pQualification?.length) query.qualification = { $in: pQualification };
-
-    if (pCountry?.length) query.country = { $in: pCountry };
-
+    // Total count
     const totalProfiles = await User.countDocuments(query);
 
+    // Fetch paginated profiles
     const profiles = await User.find(query)
       .skip(skip)
       .limit(limit)
-      .select("-password -email -username -alternateMob -mobile");
+      .select(
+        "-basic.password -basic.email -basic.alternateMob -personal.address"
+      );
 
     return res.json({
       profiles,
@@ -112,56 +116,71 @@ router.get("/my-profile", auth, async (req, res) => {
   }
 });
 
-router.post("/my-profile", auth, upload.array("images"), async (req, res) => {
+router.post("/my-profile", auth, async (req, res) => {
   try {
     // @ts-ignore
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ msg: "User not found" });
 
-    // Existing Cloudinary URLs from frontend
-    const existingUrls = req.body.imageUrls
-      ? Array.isArray(req.body.imageUrls)
-        ? req.body.imageUrls
-        : [req.body.imageUrls]
-      : [];
+    const { basic = {}, partner = {} } = req.body;
 
-    const uploadedFiles = req.files;
-    const fileArray = Array.isArray(uploadedFiles) ? uploadedFiles : [];
-
-    // Upload files to Cloudinary
-    const uploadedUrls = [];
-    for (const file of fileArray) {
-      const result = await streamUpload(file.buffer);
-      uploadedUrls.push(result.secure_url);
-    }
-
-    const finalImageUrls = [...existingUrls, ...uploadedUrls];
-
-    for (const [key, value] of Object.entries(req.body)) {
+    // Process partner array fields
+    for (const [key, value] of Object.entries(partner)) {
       if (arrayFields.includes(key)) {
-        if (!value) {
-          req.body[key] = [];
-        } else {
-          req.body[key] = value.split(",");
-        }
+        partner[key] = Array.isArray(value)
+          ? value
+          : typeof value === "string"
+          ? value.split(",").map((v) => v.trim())
+          : [];
       }
     }
-    // Update other userData fields
+
+    // ✅ Merge existing images with new ones if provided
+    const finalImages = basic.images?.length ? basic.images : user.basic.images;
+
     const updateFields = {
       ...req.body,
-      images: finalImageUrls,
+      basic: {
+        // @ts-ignore
+        ...user.basic.toObject(),
+        ...basic,
+        images: finalImages,
+      },
+      partner,
       hasCompleteProfile: true,
     };
-    delete updateFields.imageUrls;
 
     Object.assign(user, updateFields);
     await user.save();
 
     res.json({ profile: user });
   } catch (err) {
-    console.log(err, "ERR");
+    console.error("Profile Update Error:", err);
     res.status(500).json({ msg: "Server error" });
   }
 });
+
+router.post(
+  "/my-profile/upload-images",
+  auth,
+  upload.array("images"),
+  async (req, res) => {
+    try {
+      const uploadedFiles = req.files || [];
+      const uploadedUrls = [];
+
+      // @ts-ignore
+      for (const file of uploadedFiles) {
+        const result = await streamUpload(file.buffer);
+        uploadedUrls.push(result.secure_url);
+      }
+
+      res.json({ urls: uploadedUrls });
+    } catch (err) {
+      console.error("Image Upload Error:", err);
+      res.status(500).json({ msg: "Image upload failed" });
+    }
+  }
+);
 
 export default router;

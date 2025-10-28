@@ -11,7 +11,7 @@ const router = Router();
 // POST /api/login & POST /api/user-register
 router.use(credentialsRoutes);
 
-// POST /api/fetch-profiles & GET /api/my-profile & POST /api/my-profile
+// POST /api/fetch-profiles & GET /api/my-profile & POST /api/my-profile & /my-profile/upload-images
 router.use(profilesRoutes);
 
 //POST /api/send-interest & GET /api/fetch-invitation-status & POST /api/interest-action

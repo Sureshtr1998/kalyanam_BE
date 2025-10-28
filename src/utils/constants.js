@@ -1,7 +1,9 @@
 export const arrayFields = [
-  "pMartialStatus",
-  "pSubCaste",
-  "pEmployedIn",
-  "pQualification",
-  "pCountry",
+  "martialStatus",
+  "subCaste",
+  "employedIn",
+  "qualification",
+  "country",
 ];
+
+export const expiresIn = "6h";

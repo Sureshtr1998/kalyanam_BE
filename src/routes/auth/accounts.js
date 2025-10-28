@@ -15,7 +15,9 @@ router.delete("/delete-account", auth, async (req, res) => {
       return res.status(404).json({ success: false, msg: "User not found" });
     }
 
+    // @ts-ignore
     if (user.images && user.images.length > 0) {
+      // @ts-ignore
       for (const imageUrl of user.images) {
         try {
           const parts = imageUrl.split("/");
@@ -33,12 +35,12 @@ router.delete("/delete-account", auth, async (req, res) => {
 
     await transporter.sendMail({
       from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
-      to: user.email,
+      to: user.basic.email,
       subject: "Account Deletion Confirmation",
       html: `
     <div style="font-family:Arial,sans-serif;">
       <h3>Account Deletion</h3>
-      <p>Hello ${user.fullName || ""},</p>
+      <p>Hello ${user.basic.fullName || ""},</p>
       <p>Your account has been successfully deleted. We are sorry to see you go!</p>
       <p>If this was a mistake, please contact our support team immediately.</p>
       <p>Thank you for using Seetha Rama Kalyana.</p>
@@ -73,12 +75,12 @@ router.post("/hide-profile", auth, async (req, res) => {
 
       await transporter.sendMail({
         from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
-        to: currentUser.email,
+        to: currentUser.basic.email,
         subject: "Account Hidden Successfully",
         html: `
     <div style="font-family:Arial,sans-serif;">
       <h3>Account Hidden</h3>
-      <p>Hello ${currentUser.fullName || ""},</p>
+      <p>Hello ${currentUser.basic.fullName || ""},</p>
       <p>Your profile has been successfully hidden. You will be logged out.</p>
       <p>Your profile will automatically become visible again when you log in next time.</p>
       <p>If you did not request this, please contact our support team.</p>

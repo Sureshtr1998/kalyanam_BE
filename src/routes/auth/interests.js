@@ -22,13 +22,13 @@ router.post("/send-interest", auth, async (req, res) => {
       return res.status(400).json({ msg: "Cannot send interest to yourself" });
     }
 
-    if (sender.sent.includes(receiver._id)) {
+    if (sender.interests.sent.includes(receiver._id)) {
       return res.status(400).json({ msg: "Interest already sent" });
     }
 
     // Add interest
-    sender.sent.push(receiver._id);
-    receiver.received.push(sender._id);
+    sender.interests.sent.push(receiver._id);
+    receiver.interests.received.push(sender._id);
 
     // Save both users
     await sender.save();
@@ -36,14 +36,14 @@ router.post("/send-interest", auth, async (req, res) => {
 
     await transporter.sendMail({
       from: `"Seetha Rama Kalyana" <${process.env.EMAIL_USER}>`,
-      to: receiver.email,
+      to: receiver.basic.email,
       subject: "New Interest Received on Seetha Rama Kalyana",
       html: `
     <div style="font-family:Arial,sans-serif; max-width:600px; margin:auto; border:1px solid #eaeaea; padding:20px; border-radius:10px;">
       <h2 style="color:#007BFF;">You’ve Received a New Interest 💌</h2>
-      <p>Dear ${receiver.fullName || "User"},</p>
+      <p>Dear ${receiver.basic.fullName || "User"},</p>
       <p><b>${
-        sender.fullName
+        sender.basic.fullName
       }</b> has shown interest in your profile on <b>Seetha Rama Kalyana</b>.</p>
       <p>Visit your profile Invitation Status to view their details and decide whether to <b>Accept</b> or <b>Decline</b> the interest.</p>
       <div style="text-align:center; margin-top:20px;">
@@ -73,10 +73,10 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
     // Combine all IDs
     const allIds = [
-      ...(currentUser.sent || []),
-      ...(currentUser.received || []),
-      ...(currentUser.accepted || []),
-      ...(currentUser.declined || []),
+      ...(currentUser.interests.sent || []),
+      ...(currentUser.interests.received || []),
+      ...(currentUser.interests.accepted || []),
+      ...(currentUser.interests.declined || []),
     ];
 
     // Remove duplicates
@@ -88,29 +88,27 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
       "-password -email -__v"
     ).lean();
 
-    // Map each user to correct invitationStatus based on priority
     const combinedList = users.map((user) => {
-      let status = "received"; // default
+      let status = "received";
 
-      // @ts-ignore
-      if (currentUser.accepted?.includes(user._id.toString())) {
+      if (currentUser.interests.accepted?.includes(user._id)) {
         status = "accept";
-        // @ts-ignore
-      } else if (currentUser.declined?.includes(user._id.toString())) {
+      } else if (currentUser.interests.declined?.includes(user._id)) {
         status = "decline";
-        // @ts-ignore
-      } else if (currentUser.sent?.includes(user._id.toString())) {
+      } else if (currentUser.interests.sent?.includes(user._id)) {
         status = "sent";
-        // @ts-ignore
-      } else if (currentUser.received?.includes(user._id.toString())) {
+      } else if (currentUser.interests.received?.includes(user._id)) {
         status = "received";
       }
 
       return {
         ...user,
-        invitationStatus: status,
-        mobile: status === "accept" ? user.mobile : undefined,
-        alternateMob: status === "accept" ? user.alternateMob : undefined,
+        interests: {
+          ...user.interests,
+          invitationStatus: status,
+        },
+        mobile: status === "accept" ? user.basic.mobile : undefined,
+        alternateMob: status === "accept" ? user.basic.alternateMob : undefined,
       };
     });
 
@@ -143,21 +141,21 @@ router.post("/interest-action", auth, async (req, res) => {
     }
 
     if (action === "accept") {
-      currentUser.accepted = [
-        ...(currentUser.accepted || []),
+      currentUser.interests.accepted = [
+        ...(currentUser.interests.accepted || []),
         userId.toString(),
       ];
-      otherUser.accepted = [
-        ...(otherUser.accepted || []),
+      otherUser.interests.accepted = [
+        ...(otherUser.interests.accepted || []),
         currentUserId.toString(),
       ];
     } else if (action === "decline") {
-      currentUser.declined = [
-        ...(currentUser.declined || []),
+      currentUser.interests.declined = [
+        ...(currentUser.interests.declined || []),
         userId.toString(),
       ];
-      otherUser.declined = [
-        ...(otherUser.declined || []),
+      otherUser.interests.declined = [
+        ...(otherUser.interests.declined || []),
         currentUserId.toString(),
       ];
     }
@@ -167,14 +165,14 @@ router.post("/interest-action", auth, async (req, res) => {
     if (action === "accept") {
       await transporter.sendMail({
         from: `"Seetha Rama Kalyana" <${process.env.EMAIL_USER}>`,
-        to: otherUser.email, // original sender of the interest
+        to: otherUser.basic.email, // original sender of the interest
         subject: "Your Interest Has Been Accepted 💖",
         html: `
     <div style="font-family:Arial,sans-serif; max-width:600px; margin:auto; border:1px solid #eaeaea; padding:20px; border-radius:10px;">
       <h2 style="color:#28a745;">Good News! Your Interest Was Accepted 💖</h2>
-      <p>Dear ${otherUser.fullName || "User"},</p>
+      <p>Dear ${otherUser.basic.fullName || "User"},</p>
       <p><b>${
-        currentUser.fullName
+        currentUser.basic.fullName
       }</b> has accepted your interest on <b>Seetha Rama Kalyana</b>.</p>
       <p>You can now view their contact details and continue your conversation.</p>
       <div style="text-align:center; margin-top:20px;">
