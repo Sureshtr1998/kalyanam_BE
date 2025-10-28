@@ -174,11 +174,11 @@ router.post("/interest-action", auth, async (req, res) => {
       <p><b>${
         currentUser.basic.fullName
       }</b> has accepted your interest on <b>Seetha Rama Kalyana</b>.</p>
-      <p>You can now view their contact details and continue your conversation.</p>
+      <p>You can now view their contact details under Invitation Status and continue your conversation.</p>
       <div style="text-align:center; margin-top:20px;">
         <a href="${
           process.env.FRONTEND_URL
-        }/login" style="background-color:#28a745; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">View Profile</a>
+        }/invitations" style="background-color:#28a745; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">View Profile</a>
       </div>
       <p style="margin-top:30px;">We wish you all the best in your journey together!</p>
       <p>– The <b>Seetha Rama Kalyana</b> Team</p>
