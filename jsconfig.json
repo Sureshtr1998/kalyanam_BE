@@ -3,7 +3,7 @@
     "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "Node",
-    "checkJs": false,
+    "checkJs": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true
   },
