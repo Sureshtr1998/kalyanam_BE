@@ -10,6 +10,7 @@ const userSchema = new Schema(
       qualification: { type: String, required: true },
       password: { type: String, required: true },
       subCaste: { type: String, required: true },
+      caste: { type: String, default: "brahmin" },
       gothra: { type: String, required: true },
       mobile: { type: String, required: true },
       alternateMob: { type: String },

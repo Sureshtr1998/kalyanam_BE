@@ -14,7 +14,7 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
     if (!email)
       return res.status(400).json({ success: false, msg: "Email is required" });
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ "basic.email": email });
     if (!user)
       return res.status(404).json({ success: false, msg: "User not found" });
 
@@ -84,7 +84,10 @@ router.post("/reset-password", async (req, res) => {
       .json({ success: false, msg: "OTP not verified or expired" });
 
   const hashed = await bcrypt.hash(newPassword, 10);
-  await User.findOneAndUpdate({ email }, { password: hashed });
+  await User.findOneAndUpdate(
+    { "basic.email": email },
+    { "basic.password": hashed }
+  );
 
   await redisClient.del(`otp_verified:${email}`);
 

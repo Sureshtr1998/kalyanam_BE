@@ -8,8 +8,15 @@ dotenv.config();
 
 const app = express();
 
+const corsOptions = {
+  origin: ["https://www.seetharamakalyana.in"],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true,
+};
+
 // Middlewares
-app.use(cors());
+// app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.urlencoded({ extended: true }));
 
 app.use(express.json());

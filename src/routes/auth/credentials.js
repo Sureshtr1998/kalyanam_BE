@@ -1,6 +1,6 @@
 import jwt from "jsonwebtoken";
 import { Router } from "express";
-import { generateUniqueId, streamUpload } from "../../utils/utils.js";
+import { generateUniqueId, uploadToImageKit } from "../../utils/utils.js";
 import upload from "../../middleware/upload.js";
 import bcrypt from "bcryptjs";
 import User from "../../models/User.js";
@@ -20,9 +20,9 @@ router.post(
 
       const uploadedUrls = [];
       // @ts-ignore
-      for (const file of files) {
-        const result = await streamUpload(file.buffer);
-        uploadedUrls.push(result.secure_url);
+      for (const file of uploadedFiles) {
+        const result = await uploadToImageKit(file.buffer, file.originalname);
+        uploadedUrls.push({ url: result.url, fileId: result.fileId });
       }
 
       res.json({ urls: uploadedUrls });

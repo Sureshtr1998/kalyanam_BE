@@ -2,8 +2,8 @@ import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import upload from "../../middleware/upload.js";
-import { streamUpload } from "../../utils/utils.js";
 import { arrayFields } from "../../utils/constants.js";
+import { uploadToImageKit } from "../../utils/utils.js";
 
 const router = Router();
 
@@ -84,7 +84,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       .skip(skip)
       .limit(limit)
       .select(
-        "-basic.password -basic.email -basic.alternateMob -personal.address"
+        "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address"
       );
 
     return res.json({
@@ -169,10 +169,9 @@ router.post(
       const uploadedFiles = req.files || [];
       const uploadedUrls = [];
 
-      // @ts-ignore
       for (const file of uploadedFiles) {
-        const result = await streamUpload(file.buffer);
-        uploadedUrls.push(result.secure_url);
+        const result = await uploadToImageKit(file.buffer, file.originalname);
+        uploadedUrls.push({ url: result.url, fileId: result.fileId });
       }
 
       res.json({ urls: uploadedUrls });

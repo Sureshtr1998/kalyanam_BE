@@ -1,4 +1,4 @@
-import cloudinary from "../config/cloudinary.js";
+import imageKit from "../config/imageKit.js";
 
 export const generateUniqueId = async (userCount) => {
   const lettersIndex = Math.floor(userCount / 999);
@@ -12,15 +12,18 @@ export const generateUniqueId = async (userCount) => {
   return `${firstChar}${secondChar}${numberStr}`;
 };
 
-export const streamUpload = (fileBuffer) => {
+export const uploadToImageKit = async (fileBuffer, fileName) => {
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      { resource_type: "image", folder: "user_profiles" },
+    imageKit.upload(
+      {
+        file: fileBuffer.toString("base64"),
+        fileName,
+        folder: "/user_profiles",
+      },
       (error, result) => {
         if (error) reject(error);
         else resolve(result);
       }
     );
-    stream.end(fileBuffer);
   });
 };

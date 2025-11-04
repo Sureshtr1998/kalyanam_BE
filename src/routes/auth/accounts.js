@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
-import cloudinary from "../../config/cloudinary.js";
+import imageKit from "../../config/imageKit.js";
 import transporter from "../../config/nodeMailer.js";
 import User from "../../models/User.js";
 
@@ -18,15 +18,11 @@ router.delete("/delete-account", auth, async (req, res) => {
     // @ts-ignore
     if (user.images && user.images.length > 0) {
       // @ts-ignore
-      for (const imageUrl of user.images) {
+      for (const image of user.images) {
         try {
-          const parts = imageUrl.split("/");
-          const filename = parts[parts.length - 1];
-          const publicId = filename.split(".")[0];
-
-          await cloudinary.uploader.destroy(publicId);
+          await imagekit.deleteFile(image.fileId);
         } catch (err) {
-          console.error("Error deleting Cloudinary image:", err.message);
+          console.error("Error deleting ImageKit image:", err.message);
         }
       }
     }
