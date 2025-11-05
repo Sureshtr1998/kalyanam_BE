@@ -7,6 +7,62 @@ import { uploadToImageKit } from "../../utils/utils.js";
 
 const router = Router();
 
+router.get("/hidden-profiles", auth, async (req, res) => {
+  try {
+    // @ts-ignore
+    const currentUser = await User.findById(req.user.id);
+
+    if (!currentUser) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    const allIds = [...(currentUser.hideProfiles || [])];
+
+    // Fetch all users at once
+    const users = await User.find(
+      { _id: { $in: allIds } },
+      "-basic.password -basic.email -basic.alternateMob -basic.mobile -__v"
+    ).lean();
+
+    res.status(200).json({
+      success: true,
+      count: users.length,
+      hiddenProfiles: users,
+    });
+  } catch (err) {
+    console.error("Error fetching hidden profiles:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+router.post("/unhide-profile", auth, async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    const currentUserId = req.user.id;
+
+    const currentUser = await User.findById(currentUserId);
+    if (!currentUser) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    if (currentUser.hideProfiles.includes(userId)) {
+      currentUser.hideProfiles = currentUser.hideProfiles.filter(
+        (id) => id.toString() !== userId.toString()
+      );
+      await currentUser.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      msg: "User profile will be visible in Home page",
+      hideProfiles: currentUser.hideProfiles,
+    });
+  } catch (err) {
+    console.error("Error unhidding profile:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
 router.post("/fetch-profiles", auth, async (req, res) => {
   try {
     // @ts-ignore

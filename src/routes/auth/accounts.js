@@ -65,6 +65,7 @@ router.post("/hide-profile", auth, async (req, res) => {
       return res.status(404).json({ success: false, msg: "User not found" });
     }
 
+    //Hide current user profile
     if (!userId) {
       currentUser.isHidden = true;
       await currentUser.save();

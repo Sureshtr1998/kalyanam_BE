@@ -58,6 +58,8 @@ router.post("/send-interest", auth, async (req, res) => {
 
     res.json({ msg: "Interest sent successfully" });
   } catch (err) {
+    console.error("Error sending interest:", err);
+
     res.status(500).json({ msg: "Server error" });
   }
 });
@@ -85,7 +87,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
     // Fetch all users at once
     const users = await User.find(
       { _id: { $in: uniqueIds } },
-      "-password -email -__v"
+      "-basic.password -basic.email -basic.alternateMob -basic.mobile -__v"
     ).lean();
 
     const combinedList = users.map((user) => {
