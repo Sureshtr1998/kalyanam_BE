@@ -4,6 +4,7 @@ export const arrayFields = [
   "employedIn",
   "qualification",
   "country",
+  "images",
 ];
 
 export const expiresIn = "6h";

@@ -18,14 +18,14 @@ router.post(
         return res.status(400).json({ msg: "No images uploaded" });
       }
 
-      const uploadedUrls = [];
+      const uploadedMedia = [];
       // @ts-ignore
-      for (const file of uploadedFiles) {
+      for (const file of files) {
         const result = await uploadToImageKit(file.buffer, file.originalname);
-        uploadedUrls.push({ url: result.url, fileId: result.fileId });
+        uploadedMedia.push({ url: result.url, fileId: result.fileId });
       }
 
-      res.json({ urls: uploadedUrls });
+      res.json({ media: uploadedMedia });
     } catch (err) {
       console.error("Image upload error:", err);
       res.status(500).json({ msg: "Image upload failed" });

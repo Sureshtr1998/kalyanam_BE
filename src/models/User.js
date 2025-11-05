@@ -19,7 +19,15 @@ const userSchema = new Schema(
       dob: { type: Date, default: null },
       age: { type: Number },
       profileCreatedBy: { type: String, required: true },
-      images: { type: [String], default: [] },
+      images: {
+        type: [
+          {
+            url: { type: String, required: true },
+            fileId: { type: String, required: true },
+          },
+        ],
+        default: [],
+      },
       note: { type: String },
       uniqueId: { type: String, unique: true },
     },

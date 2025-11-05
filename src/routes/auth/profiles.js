@@ -104,7 +104,9 @@ router.get("/my-profile", auth, async (req, res) => {
   try {
     // Fetch profiles excluding current user
     // @ts-ignore
-    const currentUser = await User.findById(req.user.id);
+    const currentUser = await User.findById(req.user.id).select(
+      "-basic.password"
+    );
 
     if (!currentUser) {
       return res.status(404).json({ msg: "User not found" });
@@ -167,14 +169,14 @@ router.post(
   async (req, res) => {
     try {
       const uploadedFiles = req.files || [];
-      const uploadedUrls = [];
+      const uploadedMedia = [];
 
       for (const file of uploadedFiles) {
         const result = await uploadToImageKit(file.buffer, file.originalname);
-        uploadedUrls.push({ url: result.url, fileId: result.fileId });
+        uploadedMedia.push({ url: result.url, fileId: result.fileId });
       }
 
-      res.json({ urls: uploadedUrls });
+      res.json({ media: uploadedMedia });
     } catch (err) {
       console.error("Image Upload Error:", err);
       res.status(500).json({ msg: "Image upload failed" });
