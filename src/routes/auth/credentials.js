@@ -57,11 +57,11 @@ router.post("/user-register", async (req, res) => {
       return res.status(400).json({ msg: "Please fill all required fields" });
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ "basic.email": email });
     if (existingUser)
       return res.status(400).json({ msg: "User already exists" });
 
-    const existingMobile = await User.findOne({ mobile });
+    const existingMobile = await User.findOne({ "basic.mobile": mobile });
     if (existingMobile)
       return res.status(400).json({ msg: "Mobile number already registered" });
 
