@@ -1,20 +1,5 @@
-import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
-import dotenv from "dotenv";
-import authRoutes from "./routes/auth/index.js";
-
-dotenv.config();
-
-const app = express();
-
-console.log("HELLO");
-// "http://localhost:5173"
-
-// Middlewares
-app.use(cors());
-
-app.use(express.urlencoded({ extended: true }));
 
 app.use(express.json());
 
