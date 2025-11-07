@@ -8,6 +8,7 @@ dotenv.config();
 
 const app = express();
 
+console.log("HELLO");
 // "http://localhost:5173"
 
 // Middlewares
