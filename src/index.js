@@ -2,15 +2,23 @@ import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
 import dotenv from "dotenv";
-import authRoutes from "./routes/auth.js";
+import authRoutes from "./routes/auth/index.js";
 
 dotenv.config();
 
 const app = express();
 
+const corsOptions = {
+  origin: ["https://www.seetharamakalyana.in"],
+  methods: ["GET", "POST", "PUT", "DELETE"],
+};
+
 // Middlewares
 app.use(cors());
+// app.use(cors(corsOptions));
 app.use(express.urlencoded({ extended: true }));
+
+app.use(express.json());
 
 // Routes
 app.use("/api", authRoutes);
@@ -21,8 +29,7 @@ mongoose
   .then(() => console.log("MongoDB connected on", process.env.MONGO_URI))
   .catch((err) => console.error(err));
 
-// Start server
-// const PORT = process.env.PORT || 5000;
-// app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
-export default app;
+// export default app;
