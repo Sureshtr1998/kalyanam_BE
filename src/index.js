@@ -9,7 +9,10 @@ dotenv.config();
 const app = express();
 
 const corsOptions = {
-  origin: ["https://www.seetharamakalyana.in"],
+  origin: [
+    "https://www.seetharamakalyana.in",
+    "https://api.seetharamakalyana.in",
+  ],
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true,
 };
