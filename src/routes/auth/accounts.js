@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
 import imageKit from "../../config/imageKit.js";
-import transporter from "../../config/nodeMailer.js";
 import User from "../../models/User.js";
+import sendEmail from "../../config/msg91Email.js";
 
 const router = Router();
 router.delete("/delete-account", auth, async (req, res) => {
@@ -29,19 +29,12 @@ router.delete("/delete-account", auth, async (req, res) => {
 
     await User.findByIdAndDelete(userId);
 
-    await transporter.sendMail({
-      from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
-      to: user.basic.email,
-      subject: "Account Deletion Confirmation",
-      html: `
-    <div style="font-family:Arial,sans-serif;">
-      <h3>Account Deletion</h3>
-      <p>Hello ${user.basic.fullName || ""},</p>
-      <p>Your account has been successfully deleted. We are sorry to see you go!</p>
-      <p>If this was a mistake, please contact our support team immediately.</p>
-      <p>Thank you for using Seetha Rama Kalyana.</p>
-    </div>
-  `,
+    await sendEmail({
+      to: [{ email: currentUser.basic.email }],
+      template_id: "account_deletion_3", // MSG91 Template ID
+      variables: {
+        user_name: user.basic.fullName || "",
+      },
     });
 
     res.status(200).json({
@@ -70,20 +63,12 @@ router.post("/hide-profile", auth, async (req, res) => {
       currentUser.isHidden = true;
       await currentUser.save();
 
-      await transporter.sendMail({
-        from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
-        to: currentUser.basic.email,
-        subject: "Account Hidden Successfully",
-        html: `
-    <div style="font-family:Arial,sans-serif;">
-      <h3>Account Hidden</h3>
-      <p>Hello ${currentUser.basic.fullName || ""},</p>
-      <p>Your profile has been successfully hidden. You will be logged out.</p>
-      <p>Your profile will automatically become visible again when you log in next time.</p>
-      <p>If you did not request this, please contact our support team.</p>
-      <p>Thank you for using Seetha Rama Kalyana.</p>
-    </div>
-  `,
+      await sendEmail({
+        to: [{ email: currentUser.basic.email }],
+        template_id: "account_hidden", // MSG91 Template ID
+        variables: {
+          user_name: currentUser.basic.fullName || "",
+        },
       });
 
       return res.status(200).json({

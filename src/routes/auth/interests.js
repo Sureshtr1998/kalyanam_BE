@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
-import transporter from "../../config/nodeMailer.js";
+import sendEmail from "../../config/msg91Email.js";
 import User from "../../models/User.js";
 
 const router = Router();
@@ -34,26 +34,13 @@ router.post("/send-interest", auth, async (req, res) => {
     await sender.save();
     await receiver.save();
 
-    await transporter.sendMail({
-      from: `"Seetha Rama Kalyana" <${process.env.EMAIL_USER}>`,
-      to: receiver.basic.email,
-      subject: "New Interest Received on Seetha Rama Kalyana",
-      html: `
-    <div style="font-family:Arial,sans-serif; max-width:600px; margin:auto; border:1px solid #eaeaea; padding:20px; border-radius:10px;">
-      <h2 style="color:#007BFF;">You’ve Received a New Interest 💌</h2>
-      <p>Dear ${receiver.basic.fullName || "User"},</p>
-      <p><b>${
-        sender.basic.fullName
-      }</b> has shown interest in your profile on <b>Seetha Rama Kalyana</b>.</p>
-      <p>Visit your profile Invitation Status to view their details and decide whether to <b>Accept</b> or <b>Decline</b> the interest.</p>
-      <div style="text-align:center; margin-top:20px;">
-        <a href="${
-          process.env.FRONTEND_URL
-        }/invitations" style="background-color:#007BFF; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">View Interest</a>
-      </div>
-      <p style="margin-top:30px;">Thank you for using <b>Seetha Rama Kalyana</b>.</p>
-    </div>
-  `,
+    await sendEmail({
+      to: [{ email: receiver.basic.email }],
+      template_id: "new_interest", // MSG91 Template ID
+      variables: {
+        user_name: receiver.basic.fullName || "",
+        sender_name: sender.basic.fullName || "",
+      },
     });
 
     res.json({ msg: "Interest sent successfully" });
@@ -165,27 +152,13 @@ router.post("/interest-action", auth, async (req, res) => {
     await currentUser.save();
     await otherUser.save();
     if (action === "accept") {
-      await transporter.sendMail({
-        from: `"Seetha Rama Kalyana" <${process.env.EMAIL_USER}>`,
-        to: otherUser.basic.email, // original sender of the interest
-        subject: "Your Interest Has Been Accepted 💖",
-        html: `
-    <div style="font-family:Arial,sans-serif; max-width:600px; margin:auto; border:1px solid #eaeaea; padding:20px; border-radius:10px;">
-      <h2 style="color:#28a745;">Good News! Your Interest Was Accepted 💖</h2>
-      <p>Dear ${otherUser.basic.fullName || "User"},</p>
-      <p><b>${
-        currentUser.basic.fullName
-      }</b> has accepted your interest on <b>Seetha Rama Kalyana</b>.</p>
-      <p>You can now view their contact details under Invitation Status and continue your conversation.</p>
-      <div style="text-align:center; margin-top:20px;">
-        <a href="${
-          process.env.FRONTEND_URL
-        }/invitations" style="background-color:#28a745; color:#fff; padding:10px 20px; text-decoration:none; border-radius:5px;">View Profile</a>
-      </div>
-      <p style="margin-top:30px;">We wish you all the best in your journey together!</p>
-      <p>– The <b>Seetha Rama Kalyana</b> Team</p>
-    </div>
-  `,
+      await sendEmail({
+        to: [{ email: otherUser.basic.email }],
+        template_id: "accepted_interest", // MSG91 Template ID
+        variables: {
+          user_name: otherUser.basic.fullName || "",
+          current_user: currentUser.basic.fullName || "",
+        },
       });
     }
     return res.json({

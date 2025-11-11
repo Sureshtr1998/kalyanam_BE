@@ -1,10 +1,10 @@
 import bcrypt from "bcryptjs";
 import { Router } from "express";
-import transporter from "../../config/nodeMailer.js";
 import redisClient from "../../config/redisClient.js";
 import otpLimiter from "../../middleware/otpLimiter.js";
 import User from "../../models/User.js";
 import otpGenerator from "otp-generator";
+import sendEmail from "../../config/msg91Email.js";
 
 const router = Router();
 
@@ -29,22 +29,14 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
     await redisClient.setEx(`otp:${email}`, 300, otp);
 
     // Send OTP email
-    await transporter.sendMail({
-      from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Password Reset OTP from Seetha Rama Kalyana",
-      html: `
-        <div style="font-family:Arial,sans-serif;">
-          <h3>Reset Your Password</h3>
-          <p>Your OTP is:</p>
-          <h2>${otp}</h2>
-          <p>This OTP is valid for <b>5 minutes</b>.</p>
-          <p>If you didn't request this, please ignore this email.</p>
-        </div>
-      `,
+    await sendEmail({
+      to: [{ email: email }],
+      template_id: "password_reset_28", // MSG91 Template ID
+      variables: {
+        otp: otp,
+      },
     });
 
-    console.log(`OTP sent to ${email}: ${otp}`);
     return res.json({
       success: true,
       msg: "OTP sent to your registered email",

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import otpGenerator from "otp-generator";
-import transporter from "../../config/nodeMailer.js";
+import sendEmail from "../../config/msg91Email.js";
 import redisClient from "../../config/redisClient.js";
 import twilioClient from "../../config/twilio.js";
 
@@ -38,11 +38,13 @@ router.post("/send-otp", async (req, res) => {
     });
 
     // Send Email OTP
-    await transporter.sendMail({
-      from: `"Seetha Rama Kalyana Support" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Email OTP Verification - Seetha Rama Kalyana",
-      html: `<p>Your email OTP is <b>${emailOtp}</b> (valid for 5 minutes).</p>`,
+    await sendEmail({
+      to: [{ email: email }],
+      template_id: "global_otp", // MSG91 Template ID
+      variables: {
+        company_name: "Seetha Rama Kalyana",
+        otp: emailOtp,
+      },
     });
 
     // Send SMS OTP
