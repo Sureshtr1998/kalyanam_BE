@@ -5,6 +5,7 @@ import upload from "../../middleware/upload.js";
 import bcrypt from "bcryptjs";
 import User from "../../models/User.js";
 import { expiresIn } from "../../utils/constants.js";
+import sendEmail from "../../config/msg91Email.js";
 
 const router = Router();
 
@@ -50,6 +51,10 @@ router.post("/user-register", async (req, res) => {
       qualification,
       gothra,
       images = [],
+      //Transaction Details
+      orderId,
+      amountPaid,
+      totalNoOfInterest,
     } = req.body;
 
     // Basic validation
@@ -98,9 +103,30 @@ router.post("/user-register", async (req, res) => {
         images,
         uniqueId,
       },
+      interests: {
+        totalNoOfInterest,
+      },
+      transactions: [
+        {
+          orderId,
+          dateOfTrans: new Date(),
+          amountPaid,
+          noOfInterest: totalNoOfInterest,
+        },
+      ],
     });
 
     await newUser.save();
+
+    await sendEmail({
+      to: [{ email: emailNormalized }],
+      template_id: "welcome_user_2", // MSG91 Template ID
+      variables: {
+        userName: fullName,
+        orderId,
+        amount: amountPaid,
+      },
+    });
 
     const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, {
       expiresIn: expiresIn,
@@ -113,6 +139,7 @@ router.post("/user-register", async (req, res) => {
       id: newUserObj._id,
       fullName: newUserObj.basic.fullName,
       email: newUserObj.basic.email,
+      mobile: newUserObj.basic.mobile,
       token,
     });
   } catch (err) {
@@ -151,6 +178,7 @@ router.post("/login", async (req, res) => {
       fullName: user.basic.fullName,
       email: user.basic.email,
       token,
+      mobile: user.basic.mobile,
     });
   } catch (err) {
     res.status(500).json({ msg: "Server error" });

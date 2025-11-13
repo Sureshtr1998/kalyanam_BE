@@ -1,5 +1,5 @@
 import axios from "axios";
-
+import { SUPPORT_EMAIL } from "../utils/constants.js";
 /**
  * Send email using MSG91 template
  * @param {Object} options
@@ -16,7 +16,10 @@ const sendEmail = async ({ to, template_id, variables = {} }) => {
           {
             to,
             // These are template variables that MSG91 replaces dynamically
-            variables,
+            variables: {
+              ...variables,
+              contactEmail: SUPPORT_EMAIL,
+            },
           },
         ],
         from: {

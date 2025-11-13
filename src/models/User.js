@@ -78,6 +78,7 @@ const userSchema = new Schema(
     interests: {
       sent: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       received: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+      totalNoOfInterest: { type: Number },
       accepted: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       declined: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       invitationStatus: {
@@ -86,12 +87,14 @@ const userSchema = new Schema(
         default: "pending",
       },
     },
-    transactions: {
-      transactionId: { type: String },
-      dateOfTrans: { type: String },
-      amountPaid: { type: Number },
-      noOfInterest: { type: Number },
-    },
+    transactions: [
+      {
+        orderId: { type: String },
+        dateOfTrans: { type: String },
+        amountPaid: { type: Number },
+        noOfInterest: { type: Number },
+      },
+    ],
     hasCompleteProfile: { type: Boolean, default: false },
     isHidden: { type: Boolean, default: false },
     hideProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },

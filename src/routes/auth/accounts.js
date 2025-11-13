@@ -30,7 +30,7 @@ router.delete("/delete-account", auth, async (req, res) => {
     await User.findByIdAndDelete(userId);
 
     await sendEmail({
-      to: [{ email: currentUser.basic.email }],
+      to: [{ email: user.basic.email }],
       template_id: "account_deletion_3", // MSG91 Template ID
       variables: {
         user_name: user.basic.fullName || "",

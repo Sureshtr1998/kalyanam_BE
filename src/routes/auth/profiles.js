@@ -140,7 +140,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       .skip(skip)
       .limit(limit)
       .select(
-        "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address"
+        "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -interests -transactions -updatedAt"
       );
 
     return res.json({

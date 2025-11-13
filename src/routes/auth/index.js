@@ -5,6 +5,7 @@ import interestsRoutes from "./interests.js";
 import accountsRoutes from "./accounts.js";
 import resetPasswordsRoutes from "./resetPwd.js";
 import validationRoutes from "./validations.js";
+import transactionsRoutes from "./transactions.js";
 
 const router = Router();
 
@@ -25,5 +26,8 @@ router.use(resetPasswordsRoutes);
 
 //POST /api/verify-otp & POST /api/send-otp
 router.use(validationRoutes);
+
+//POST /api/create-order
+router.use(transactionsRoutes);
 
 export default router;

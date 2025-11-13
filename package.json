@@ -16,6 +16,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.3",
     "multer": "^2.0.2",
+    "nanoid": "^5.1.6",
     "otp-generator": "^4.0.1",
     "razorpay": "^2.9.6",
     "redis": "^5.9.0",
