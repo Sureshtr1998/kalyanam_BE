@@ -90,6 +90,7 @@ const userSchema = new Schema(
     transactions: [
       {
         orderId: { type: String },
+        note: { type: String },
         dateOfTrans: { type: String },
         amountPaid: { type: Number },
         noOfInterest: { type: Number },

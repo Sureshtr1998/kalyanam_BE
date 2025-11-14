@@ -55,6 +55,7 @@ router.post("/user-register", async (req, res) => {
       orderId,
       amountPaid,
       totalNoOfInterest,
+      note,
     } = req.body;
 
     // Basic validation
@@ -112,6 +113,7 @@ router.post("/user-register", async (req, res) => {
           dateOfTrans: new Date(),
           amountPaid,
           noOfInterest: totalNoOfInterest,
+          note,
         },
       ],
     });

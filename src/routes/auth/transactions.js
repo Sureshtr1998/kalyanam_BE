@@ -54,7 +54,7 @@ router.get("/check-payment-status/:orderId", async (req, res) => {
 
   try {
     const response = await axios.get(
-      `${process.env.CF_BASE_URL}/pg/orders/${orderId}`,
+      `${process.env.CF_BASE_URL}/pg/orders/${orderId}/payments`,
       {
         headers: {
           "Content-Type": "application/json",
@@ -64,11 +64,12 @@ router.get("/check-payment-status/:orderId", async (req, res) => {
         },
       }
     );
-    const order_status = response.data.order_status;
+    const order_status =
+      response.data[response.data.length - 1]?.payment_status;
 
     return res.status(200).json({
       orderId: orderId,
-      status: order_status, // "PAID", "FAILED", "ACTIVE", etc.
+      status: order_status, // "NOT_ATTEMPTED", "FAILED", "SUCCESS", etc.
     });
   } catch (err) {
     console.error(
@@ -84,7 +85,7 @@ router.post("/buy-interest", auth, async (req, res) => {
     // @ts-ignore
     const user = await User.findById(req.user.id);
 
-    const { noOfInterest, orderId, amount } = req.body;
+    const { noOfInterest, orderId, amount, note } = req.body;
 
     if (!user) {
       return res.status(404).json({ msg: "User not found" });
@@ -98,6 +99,7 @@ router.post("/buy-interest", auth, async (req, res) => {
       dateOfTrans: new Date(),
       amountPaid: amount,
       noOfInterest: noOfInterest,
+      note,
     });
 
     await user.save();
