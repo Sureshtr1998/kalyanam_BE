@@ -4,6 +4,8 @@ import { nanoid } from "nanoid";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import sendEmail from "../../config/msg91Email.js";
+import { Cashfree, CFEnvironment } from "cashfree-pg";
+import cf from "../../config/cashfree.js";
 
 const router = Router();
 
@@ -11,6 +13,8 @@ router.post("/create-order", async (req, res) => {
   const { userName, userEmail, userPhone, amount } = req.body;
 
   try {
+    const orderId = "order_" + nanoid();
+
     const payload = {
       orderId: "order_" + nanoid(),
       order_amount: Number(amount),
@@ -25,58 +29,15 @@ router.post("/create-order", async (req, res) => {
       },
     };
 
-    const response = await axios.post(
-      `${process.env.CF_BASE_URL}/pg/orders`,
-      payload,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "x-client-id": process.env.CF_APP_ID,
-          "x-client-secret": process.env.CF_SECRET_KEY,
-          "x-api-version": "2022-01-01",
-        },
-      }
-    );
-    const payment_link = response.data.payment_link;
+    const order = await cf.PGCreateOrder(payload);
 
-    return res.status(200).json({
-      paymentLink: payment_link,
-      orderId: response.data.order_id,
+    return res.json({
+      orderId,
+      cftoken: order.data.payment_session_id,
     });
   } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "Failed to create QR order" });
-  }
-});
-
-router.get("/check-payment-status/:orderId", async (req, res) => {
-  const { orderId } = req.params;
-
-  try {
-    const response = await axios.get(
-      `${process.env.CF_BASE_URL}/pg/orders/${orderId}/payments`,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "x-client-id": process.env.CF_APP_ID,
-          "x-client-secret": process.env.CF_SECRET_KEY,
-          "x-api-version": "2022-01-01",
-        },
-      }
-    );
-    const order_status =
-      response.data[response.data.length - 1]?.payment_status;
-
-    return res.status(200).json({
-      orderId: orderId,
-      status: order_status, // "NOT_ATTEMPTED", "FAILED", "SUCCESS", etc.
-    });
-  } catch (err) {
-    console.error(
-      `Error checking status for ${orderId}:`,
-      err.response?.data || err.message
-    );
-    res.status(500).json({ error: "Failed to fetch order status" });
+    console.error("Error creating order:", err);
+    return res.status(500).json({ error: "Failed to create order" });
   }
 });
 
