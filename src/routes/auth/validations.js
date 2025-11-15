@@ -4,10 +4,11 @@ import sendEmail from "../../config/msg91Email.js";
 import redisClient from "../../config/redisClient.js";
 import twilioClient from "../../config/twilio.js";
 import User from "../../models/User.js";
+import otpLimiter from "../../middleware/otpLimiter.js";
 
 const router = Router();
 
-router.post("/send-otp", async (req, res) => {
+router.post("/send-otp", otpLimiter, async (req, res) => {
   const { email, mobile } = req.body;
   if (!email || !mobile)
     return res

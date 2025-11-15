@@ -14,6 +14,7 @@ export const auth = async (req, res, next) => {
     req.user = user; // attach current user to request
     next();
   } catch (err) {
+    console.error(err);
     res.status(401).json({ msg: "Token is not valid" });
   }
 };

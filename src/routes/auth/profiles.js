@@ -170,6 +170,7 @@ router.get("/my-profile", auth, async (req, res) => {
 
     res.json({ profile: currentUser });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ msg: "Server error" });
   }
 });

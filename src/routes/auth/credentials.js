@@ -183,6 +183,7 @@ router.post("/login", async (req, res) => {
       mobile: user.basic.mobile,
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ msg: "Server error" });
   }
 });

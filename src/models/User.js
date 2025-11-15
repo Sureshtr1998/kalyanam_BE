@@ -12,7 +12,7 @@ const userSchema = new Schema(
       subCaste: { type: String, required: true },
       caste: { type: String, default: "brahmin" },
       gothra: { type: String, required: true },
-      mobile: { type: String, required: true },
+      mobile: { type: String, required: true, unique: true },
       alternateMob: { type: String },
       gender: { type: String, required: true },
       motherTongue: { type: String, required: true },
