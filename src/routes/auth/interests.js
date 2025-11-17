@@ -26,6 +26,14 @@ router.post("/send-interest", auth, async (req, res) => {
       return res.status(400).json({ msg: "Interest already sent" });
     }
 
+    if (
+      (sender.interests.totalNoOfInterest ?? 0) <= sender.interests.sent.length
+    ) {
+      return res.status(400).json({
+        msg: "You have reached your limit of interests. Please purchase more to continue sending.",
+      });
+    }
+
     // Add interest
     sender.interests.sent.push(receiver._id);
     receiver.interests.received.push(sender._id);

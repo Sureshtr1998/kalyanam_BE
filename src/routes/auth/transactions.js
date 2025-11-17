@@ -52,8 +52,10 @@ router.post("/buy-interest", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
+    const increment = Number(noOfInterest) || 0;
+
     user.interests.totalNoOfInterest =
-      user.interests.totalNoOfInterest + noOfInterest;
+      (Number(user.interests.totalNoOfInterest) || 0) + increment;
 
     user.transactions.push({
       orderId,

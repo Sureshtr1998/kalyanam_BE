@@ -91,6 +91,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       "basic.gender": { $regex: new RegExp(`^${oppositeGender}$`, "i") },
       _id: { $ne: currentUser._id, $nin: excludedIds },
       isHidden: false,
+      hideProfiles: { $ne: currentUser._id },
     };
 
     // Partner filters
