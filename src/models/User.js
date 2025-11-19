@@ -76,6 +76,7 @@ const userSchema = new Schema(
       country: { type: [String] },
     },
     interests: {
+      viewed: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       sent: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       received: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       totalNoOfInterest: { type: Number },

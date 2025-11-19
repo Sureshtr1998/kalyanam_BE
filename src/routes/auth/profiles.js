@@ -10,7 +10,9 @@ const router = Router();
 router.get("/hidden-profiles", auth, async (req, res) => {
   try {
     // @ts-ignore
-    const currentUser = await User.findById(req.user.id);
+    const currentUser = await User.findById(req.user.id).select(
+      "-basic.password -transactions"
+    );
 
     if (!currentUser) {
       return res.status(404).json({ msg: "User not found" });
@@ -21,13 +23,14 @@ router.get("/hidden-profiles", auth, async (req, res) => {
     // Fetch all users at once
     const users = await User.find(
       { _id: { $in: allIds } },
-      "-basic.password -basic.email -basic.alternateMob -basic.mobile -__v"
+      "-basic.password -hideProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -__v"
     ).lean();
 
     res.status(200).json({
       success: true,
       count: users.length,
       hiddenProfiles: users,
+      currentUser: currentUser,
     });
   } catch (err) {
     console.error("Error fetching hidden profiles:", err);
@@ -83,6 +86,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       ...currentUser.interests.declined,
       ...currentUser.hideProfiles,
       ...currentUser.interests.sent,
+      ...currentUser.interests.viewed,
       ...currentUser.interests.received,
     ];
 
@@ -141,7 +145,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       .skip(skip)
       .limit(limit)
       .select(
-        "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -interests -transactions -updatedAt"
+        "-createdAt -basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -interests -transactions -updatedAt"
       );
 
     return res.json({
