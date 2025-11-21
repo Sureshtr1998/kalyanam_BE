@@ -1,6 +1,7 @@
 export const arrayFields = [
   "martialStatus",
   "subCaste",
+  "motherTongue",
   "employedIn",
   "qualification",
   "country",

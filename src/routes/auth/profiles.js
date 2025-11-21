@@ -108,6 +108,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       subCaste,
       employedIn,
       qualification,
+      motherTongue,
       country,
     } = filters.partner || {};
 
@@ -132,6 +133,8 @@ router.post("/fetch-profiles", auth, async (req, res) => {
     if (martialStatus?.length)
       query["basic.martialStatus"] = { $in: martialStatus };
     if (subCaste?.length) query["basic.subCaste"] = { $in: subCaste };
+    if (motherTongue?.length)
+      query["basic.motherTongue"] = { $in: motherTongue };
     if (employedIn?.length) query["personal.employedIn"] = { $in: employedIn };
     if (qualification?.length)
       query["basic.qualification"] = { $in: qualification };

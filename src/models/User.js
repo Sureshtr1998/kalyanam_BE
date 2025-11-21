@@ -70,6 +70,7 @@ const userSchema = new Schema(
       heightFrom: { type: String },
       heightTo: { type: String },
       subCaste: { type: [String] },
+      motherTongue: { type: [String] },
       employedIn: { type: [String] },
       note: { type: String },
       qualification: { type: [String] },
