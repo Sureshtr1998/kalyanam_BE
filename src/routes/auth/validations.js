@@ -55,9 +55,9 @@ router.post("/send-otp", otpLimiter, async (req, res) => {
         otp: emailOtp,
       },
     });
-
+    const countryCode = `91${mobile}`;
     // Send SMS OTP
-    await sendWhatsappOTP(mobile, mobileOtp);
+    await sendWhatsappOTP(countryCode, mobileOtp);
 
     res.json({ success: true, msg: "OTP sent to email and mobile" });
   } catch (err) {
