@@ -10,7 +10,7 @@ const app = express();
 
 // http://localhost:5173/
 const corsOptions = {
-  origin: ["https://www.seetharamakalyana.in", "https://seetharamakalyana.in"],
+  origin: ["https://www.seetharamakalyana.in"],
   methods: ["GET", "POST", "PUT", "DELETE"],
 };
 
