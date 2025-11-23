@@ -2,7 +2,7 @@ import { Router } from "express";
 import otpGenerator from "otp-generator";
 import sendEmail from "../../config/msg91Email.js";
 import redisClient from "../../config/redisClient.js";
-import twilioClient from "../../config/twilio.js";
+import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
 import User from "../../models/User.js";
 import otpLimiter from "../../middleware/otpLimiter.js";
 
@@ -57,11 +57,7 @@ router.post("/send-otp", otpLimiter, async (req, res) => {
     });
 
     // Send SMS OTP
-    await twilioClient.messages.create({
-      body: `Your mobile OTP is ${mobileOtp}. Valid for 5 minutes.`,
-      from: process.env.TWILIO_PHONE,
-      to: `+91${mobile}`,
-    });
+    await sendWhatsappOTP(mobile, mobileOtp);
 
     res.json({ success: true, msg: "OTP sent to email and mobile" });
   } catch (err) {
