@@ -104,7 +104,7 @@ const userSchema = new Schema(
   },
   { timestamps: true }
 );
-
+userSchema.index({ createdAt: -1 });
 const User = model("User", userSchema);
 
 export default User;

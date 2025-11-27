@@ -2,7 +2,6 @@ import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import upload from "../../middleware/upload.js";
-import { arrayFields } from "../../utils/constants.js";
 import { uploadToImageKit } from "../../utils/utils.js";
 
 const router = Router();
@@ -18,18 +17,22 @@ router.get("/hidden-profiles", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    const allIds = [...(currentUser.hideProfiles || [])];
+    const orderedIds = [...(currentUser.hideProfiles || [])].reverse();
 
     // Fetch all users at once
     const users = await User.find(
-      { _id: { $in: allIds } },
+      { _id: { $in: orderedIds } },
       "-basic.password -hideProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -__v"
     ).lean();
 
+    const sortedUsers = orderedIds.map((id) =>
+      users.find((u) => u._id.toString() === id.toString())
+    );
+
     res.status(200).json({
       success: true,
-      count: users.length,
-      hiddenProfiles: users,
+      count: sortedUsers.length,
+      hiddenProfiles: sortedUsers,
       currentUser: currentUser,
     });
   } catch (err) {
@@ -145,6 +148,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
     // Fetch paginated profiles
     const profiles = await User.find(query)
+      .sort({ isVerified: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .select(
@@ -190,17 +194,6 @@ router.post("/my-profile", auth, async (req, res) => {
     if (!user) return res.status(404).json({ msg: "User not found" });
 
     const { basic = {}, partner = {} } = req.body;
-
-    // Process partner array fields
-    for (const [key, value] of Object.entries(partner)) {
-      if (arrayFields.includes(key)) {
-        partner[key] = Array.isArray(value)
-          ? value
-          : typeof value === "string"
-          ? value.split(",").map((v) => v.trim())
-          : [];
-      }
-    }
 
     // ✅ Merge existing images with new ones if provided
     const finalImages = basic.images?.length ? basic.images : user.basic.images;

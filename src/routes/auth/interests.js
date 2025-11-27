@@ -76,39 +76,38 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    // Combine all IDs
-    const allIds = [
-      ...(currentUser.interests.sent || []),
-      ...(currentUser.interests.received || []),
-      ...(currentUser.interests.accepted || []),
-      ...(currentUser.interests.declined || []),
+    const { interests } = currentUser;
+
+    // 1. Build ordered list (newest → oldest)
+    const orderedIds = [
+      ...(interests.accepted || []).slice().reverse(),
+      ...(interests.declined || []).slice().reverse(),
+      ...(interests.sent || []).slice().reverse(),
+      ...(interests.received || []).slice().reverse(),
     ];
 
-    // Remove duplicates
-    const uniqueIds = [...new Set(allIds.map((id) => id.toString()))];
+    const uniqueOrdered = [...new Set(orderedIds.map(String))];
 
-    // Fetch all users at once
     const users = await User.find(
-      { _id: { $in: uniqueIds } },
+      { _id: { $in: uniqueOrdered } },
       "-basic.password -transactions -interests -hideProfiles -__v"
     ).lean();
 
-    const combinedList = users.map((user) => {
+    const sortedUsers = uniqueOrdered
+      .map((id) => users.find((u) => u._id.toString() === id))
+      .filter(Boolean);
+
+    const finalList = sortedUsers.map((user) => {
       let status = "received";
 
-      if (currentUser.interests.accepted?.includes(user._id)) {
-        status = "accept";
-      } else if (currentUser.interests.declined?.includes(user._id)) {
-        status = "decline";
-      } else if (currentUser.interests.sent?.includes(user._id)) {
-        status = "sent";
-      } else if (currentUser.interests.received?.includes(user._id)) {
-        status = "received";
-      }
+      if (interests.accepted?.includes(user._id)) status = "accept";
+      else if (interests.declined?.includes(user._id)) status = "decline";
+      else if (interests.sent?.includes(user._id)) status = "sent";
+      else if (interests.received?.includes(user._id)) status = "received";
+
       return {
         ...user,
         interests: {
-          ...user.interests,
           invitationStatus: status,
         },
         basic: {
@@ -123,9 +122,9 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
     res.status(200).json({
       success: true,
-      count: combinedList.length,
-      invitations: combinedList,
-      currentUser: currentUser,
+      count: finalList.length,
+      invitations: finalList,
+      currentUser,
     });
   } catch (err) {
     console.error("Error fetching invitation status:", err);
@@ -237,25 +236,27 @@ router.get("/view-contact", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    // Remove duplicates
-    const uniqueIds = [
-      ...new Set(currentUser.interests.viewed?.map((id) => id.toString())),
-    ];
+    const orderedIds = [...(currentUser.interests.viewed || [])].reverse();
 
-    // Fetch all users at once
+    const uniqueOrdered = [...new Set(orderedIds.map(String))];
+
     const users = await User.find(
-      { _id: { $in: uniqueIds } },
+      { _id: { $in: uniqueOrdered } },
       "-basic.password -transactions -interests -hideProfiles -__v"
     ).lean();
 
+    const sortedUsers = uniqueOrdered
+      .map((id) => users.find((u) => u._id.toString() === id))
+      .filter(Boolean);
+
     res.status(200).json({
       success: true,
-      count: users.length,
-      viewedNums: users,
-      currentUser: currentUser,
+      count: sortedUsers.length,
+      viewedNums: sortedUsers,
+      currentUser,
     });
   } catch (err) {
-    console.error("Error fetching invitation status:", err);
+    console.error("Error fetching viewed contacts:", err);
     res.status(500).json({ success: false, msg: "Server error" });
   }
 });
