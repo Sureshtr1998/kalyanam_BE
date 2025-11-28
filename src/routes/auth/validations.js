@@ -16,7 +16,8 @@ router.post("/send-otp", otpLimiter, async (req, res) => {
       .json({ success: false, msg: "Email and mobile are required" });
 
   const existingUser = await User.findOne({ "basic.email": email });
-  if (existingUser) return res.status(400).json({ msg: "User already exists" });
+  if (existingUser)
+    return res.status(400).json({ msg: "Mail Id already registered" });
 
   const existingMobile = await User.findOne({ "basic.mobile": mobile });
   if (existingMobile)
