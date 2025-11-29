@@ -53,6 +53,7 @@ router.post("/user-register", async (req, res) => {
       images = [],
       //Transaction Details
       orderId,
+      paymentId,
       amountPaid,
       totalNoOfInterest,
       note,
@@ -110,6 +111,7 @@ router.post("/user-register", async (req, res) => {
       transactions: [
         {
           orderId,
+          paymentId,
           dateOfTrans: new Date(),
           amountPaid,
           noOfInterest: totalNoOfInterest,
@@ -126,6 +128,8 @@ router.post("/user-register", async (req, res) => {
       variables: {
         userName: fullName,
         orderId,
+        paymentId,
+        numInterests: totalNoOfInterest,
         amount: amountPaid,
       },
     });

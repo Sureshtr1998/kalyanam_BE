@@ -4,8 +4,7 @@ import { nanoid } from "nanoid";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import sendEmail from "../../config/msg91Email.js";
-import { Cashfree, CFEnvironment } from "cashfree-pg";
-import cf from "../../config/cashfree.js";
+import razorpay from "../../config/razorpay.js";
 
 const router = Router();
 
@@ -13,30 +12,33 @@ router.post("/create-order", async (req, res) => {
   const { userName, userEmail, userPhone, amount } = req.body;
 
   try {
-    const orderId = "order_" + nanoid();
+    const receiptId = "order_" + nanoid();
 
-    const payload = {
-      orderId: "order_" + nanoid(),
-      order_amount: Number(amount),
-      order_currency: "INR",
-      order_note: "Matrimony subscription",
-      payment_modes: ["UPI_QR"],
-      customer_details: {
-        customer_id: `user_${userPhone}`,
+    const options = {
+      amount: Number(amount) * 100,
+      currency: "INR",
+      receipt: receiptId,
+      payment_capture: 1,
+      notes: {
         customer_name: userName,
         customer_email: userEmail,
-        customer_phone: `+91${userPhone}`,
+        customer_phone: userPhone,
+        order_note: "Matrimony subscription",
       },
     };
 
-    const order = await cf.PGCreateOrder(payload);
+    const order = await razorpay.orders.create(options);
 
     return res.json({
-      orderId,
-      cftoken: order.data.payment_session_id,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      userName,
+      userEmail,
+      userPhone,
     });
   } catch (err) {
-    console.error("Error creating order:", err);
+    console.error("Error creating Razorpay order:", err);
     return res.status(500).json({ error: "Failed to create order" });
   }
 });
@@ -46,7 +48,7 @@ router.post("/buy-interest", auth, async (req, res) => {
     // @ts-ignore
     const user = await User.findById(req.user.id);
 
-    const { noOfInterest, orderId, amount, note } = req.body;
+    const { noOfInterest, orderId, amount, note, paymentId } = req.body;
 
     if (!user) {
       return res.status(404).json({ msg: "User not found" });
@@ -59,6 +61,7 @@ router.post("/buy-interest", auth, async (req, res) => {
 
     user.transactions.push({
       orderId,
+      paymentId,
       dateOfTrans: new Date(),
       amountPaid: amount,
       noOfInterest: noOfInterest,
@@ -73,6 +76,7 @@ router.post("/buy-interest", auth, async (req, res) => {
       variables: {
         userName: user.basic.fullName || "",
         orderId,
+        paymentId,
         amount,
         numInterests: noOfInterest,
       },
