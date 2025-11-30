@@ -50,7 +50,7 @@ router.post("/send-otp", otpLimiter, async (req, res) => {
     // Send Email OTP
     await sendEmail({
       to: [{ email: email }],
-      template_id: "otp_offers", // MSG91 Template ID
+      template_id: "otp_verify_2", // MSG91 Template ID
       variables: {
         otp: emailOtp,
       },
