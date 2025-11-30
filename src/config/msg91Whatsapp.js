@@ -34,7 +34,6 @@ const sendWhatsappOTP = async (mobile, mobileOtp) => {
         },
       },
     };
-    console.log(data, "data");
     const response = await axios.post(process.env.MSG91_WHATSAPP_API, data, {
       headers: {
         authkey: process.env.MSG91_AUTHKEY,
@@ -42,7 +41,6 @@ const sendWhatsappOTP = async (mobile, mobileOtp) => {
       },
     });
 
-    console.log("MSG91 Response:", response.data);
     return response.data;
   } catch (error) {
     console.error(
