@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import cors from "cors";
 import dotenv from "dotenv";
 import authRoutes from "./routes/auth/index.js";
-
+import dbConnect from "./utils/dbConnect.js";
 dotenv.config();
 
 const app = express();
@@ -15,20 +15,24 @@ const corsOptions = {
 };
 
 // Middlewares
+// app.use(cors());
 app.use(cors(corsOptions));
-// app.use(cors(corsOptions));
 app.use(express.urlencoded({ extended: true }));
 
 app.use(express.json());
 
+app.use(async (req, res, next) => {
+  try {
+    await dbConnect();
+    next();
+  } catch (err) {
+    console.error("MongoDB connection failed:", err);
+    res.status(500).send("Database connection error");
+  }
+});
+
 // Routes
 app.use("/api", authRoutes);
-
-// Connect MongoDB
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDB connected on", process.env.MONGO_URI))
-  .catch((err) => console.error(err));
 
 // const PORT = process.env.PORT || 5000;
 // app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
