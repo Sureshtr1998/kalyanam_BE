@@ -5,11 +5,14 @@ import otpLimiter from "../../middleware/otpLimiter.js";
 import User from "../../models/User.js";
 import otpGenerator from "otp-generator";
 import sendEmail from "../../config/msg91Email.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
 router.post("/request-reset", otpLimiter, async (req, res) => {
   try {
+    await dbConnect();
+
     const { email } = req.body;
     if (!email)
       return res.status(400).json({ success: false, msg: "Email is required" });
@@ -49,41 +52,55 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
 
 router.post("/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
-  const storedOtp = await redisClient.get(`otp:${email}`);
+  try {
+    await dbConnect();
 
-  if (!storedOtp)
-    return res
-      .status(400)
-      .json({ success: false, msg: "OTP not found or expired" });
+    const storedOtp = await redisClient.get(`otp:${email}`);
 
-  if (storedOtp !== otp)
-    return res.status(400).json({ success: false, msg: "Invalid OTP" });
+    if (!storedOtp)
+      return res
+        .status(400)
+        .json({ success: false, msg: "OTP not found or expired" });
 
-  // Delete old OTP and mark as verified
-  await redisClient.del(`otp:${email}`);
-  await redisClient.setEx(`otp_verified:${email}`, 600, "true"); // valid for 10 minutes
+    if (storedOtp !== otp)
+      return res.status(400).json({ success: false, msg: "Invalid OTP" });
 
-  res.json({ success: true, msg: "OTP verified successfully" });
+    // Delete old OTP and mark as verified
+    await redisClient.del(`otp:${email}`);
+    await redisClient.setEx(`otp_verified:${email}`, 600, "true"); // valid for 10 minutes
+
+    res.json({ success: true, msg: "OTP verified successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
 });
 
 router.post("/reset-password", async (req, res) => {
   const { email, newPassword } = req.body;
 
-  const verified = await redisClient.get(`otp_verified:${email}`);
-  if (!verified)
-    return res
-      .status(400)
-      .json({ success: false, msg: "OTP not verified or expired" });
+  try {
+    await dbConnect();
 
-  const hashed = await bcrypt.hash(newPassword, 10);
-  await User.findOneAndUpdate(
-    { "basic.email": email },
-    { "basic.password": hashed }
-  );
+    const verified = await redisClient.get(`otp_verified:${email}`);
+    if (!verified)
+      return res
+        .status(400)
+        .json({ success: false, msg: "OTP not verified or expired" });
 
-  await redisClient.del(`otp_verified:${email}`);
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await User.findOneAndUpdate(
+      { "basic.email": email },
+      { "basic.password": hashed }
+    );
 
-  res.json({ success: true, msg: "Password reset successful" });
+    await redisClient.del(`otp_verified:${email}`);
+
+    res.json({ success: true, msg: "Password reset successful" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
 });
 
 export default router;

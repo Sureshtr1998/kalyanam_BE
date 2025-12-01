@@ -5,6 +5,7 @@ import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import sendEmail from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
@@ -12,6 +13,8 @@ router.post("/create-order", async (req, res) => {
   const { userName, userEmail, userPhone, amount } = req.body;
 
   try {
+    await dbConnect();
+
     const receiptId = "order_" + nanoid();
 
     const options = {
@@ -45,6 +48,8 @@ router.post("/create-order", async (req, res) => {
 
 router.post("/buy-interest", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const user = await User.findById(req.user.id);
 

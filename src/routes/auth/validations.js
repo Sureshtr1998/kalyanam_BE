@@ -5,6 +5,7 @@ import redisClient from "../../config/redisClient.js";
 import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
 import User from "../../models/User.js";
 import otpLimiter from "../../middleware/otpLimiter.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
@@ -42,6 +43,8 @@ router.post("/send-otp", otpLimiter, async (req, res) => {
   };
 
   try {
+    await dbConnect();
+
     // Save to Redis with TTL of 5 minutes
     await redisClient.set(`otp:${email}`, JSON.stringify(otpRecord), {
       EX: 300,
@@ -70,6 +73,8 @@ router.post("/verify-otp-registration", async (req, res) => {
   const { email, emailOtp, mobileOtp } = req.body;
 
   try {
+    await dbConnect();
+
     const recordStr = await redisClient.get(`otp:${email}`);
     if (!recordStr)
       return res

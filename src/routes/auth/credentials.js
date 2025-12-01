@@ -6,6 +6,7 @@ import bcrypt from "bcryptjs";
 import User from "../../models/User.js";
 import { expiresIn } from "../../utils/constants.js";
 import sendEmail from "../../config/msg91Email.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
@@ -14,6 +15,7 @@ router.post(
   upload.array("images", 3),
   async (req, res) => {
     try {
+      await dbConnect();
       const files = req.files || [];
       if (files.length === 0) {
         return res.status(400).json({ msg: "No images uploaded" });
@@ -36,6 +38,8 @@ router.post(
 
 router.post("/user-register", async (req, res) => {
   try {
+    await dbConnect();
+
     const {
       email,
       password,
@@ -156,6 +160,8 @@ router.post("/user-register", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   try {
+    await dbConnect();
+
     let { email, password } = req.body;
 
     if (!email || !password) {

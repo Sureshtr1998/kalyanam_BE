@@ -2,6 +2,7 @@ import { Router } from "express";
 import { auth } from "../../middleware/auth.js";
 import sendEmail from "../../config/msg91Email.js";
 import User from "../../models/User.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
@@ -15,6 +16,8 @@ const remainingInterests = (user) => {
 
 router.post("/send-interest", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const sender = await User.findById(req.user.id);
     const { receiverId } = req.body;
@@ -67,6 +70,8 @@ router.post("/send-interest", auth, async (req, res) => {
 
 router.get("/fetch-invitation-status", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const currentUser = await User.findById(req.user.id).select(
       "-basic.password -transactions"
@@ -134,6 +139,8 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
 router.post("/interest-action", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     const { userId, action } = req.body;
     // @ts-ignore
     const currentUserId = req.user.id;
@@ -194,6 +201,8 @@ router.post("/interest-action", auth, async (req, res) => {
 
 router.post("/view-contact", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const sender = await User.findById(req.user.id);
     const { receiverId } = req.body;
@@ -227,6 +236,8 @@ router.post("/view-contact", auth, async (req, res) => {
 
 router.get("/view-contact", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const currentUser = await User.findById(req.user.id).select(
       "-basic.password"

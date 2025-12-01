@@ -3,11 +3,14 @@ import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import upload from "../../middleware/upload.js";
 import { uploadToImageKit } from "../../utils/utils.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
 router.get("/hidden-profiles", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const currentUser = await User.findById(req.user.id).select(
       "-basic.password -transactions"
@@ -43,6 +46,8 @@ router.get("/hidden-profiles", auth, async (req, res) => {
 
 router.post("/unhide-profile", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     const { userId } = req.body || {};
     const currentUserId = req.user.id;
 
@@ -71,6 +76,8 @@ router.post("/unhide-profile", auth, async (req, res) => {
 
 router.post("/fetch-profiles", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const currentUser = req.user;
     if (!currentUser.basic?.gender) {
@@ -170,6 +177,8 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
 router.get("/my-profile", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // Fetch profiles excluding current user
     // @ts-ignore
     const currentUser = await User.findById(req.user.id).select(
@@ -189,6 +198,8 @@ router.get("/my-profile", auth, async (req, res) => {
 
 router.post("/my-profile", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     // @ts-ignore
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ msg: "User not found" });
@@ -226,6 +237,8 @@ router.post(
   upload.array("images"),
   async (req, res) => {
     try {
+      await dbConnect();
+
       const uploadedFiles = req.files || [];
       const uploadedMedia = [];
 

@@ -3,10 +3,12 @@ import { auth } from "../../middleware/auth.js";
 import imageKit from "../../config/imageKit.js";
 import User from "../../models/User.js";
 import sendEmail from "../../config/msg91Email.js";
+import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 router.delete("/delete-account", auth, async (req, res) => {
   try {
+    await dbConnect();
     // @ts-ignore
     const userId = req.user.id;
 
@@ -49,6 +51,8 @@ router.delete("/delete-account", auth, async (req, res) => {
 
 router.post("/hide-profile", auth, async (req, res) => {
   try {
+    await dbConnect();
+
     const { userId } = req.body || {};
     // @ts-ignore
     const currentUserId = req.user.id;
@@ -95,6 +99,7 @@ router.post("/hide-profile", auth, async (req, res) => {
 
 router.get("/user-account", auth, async (req, res) => {
   try {
+    await dbConnect();
     // @ts-ignore
     const currentUserId = req.user.id;
 
