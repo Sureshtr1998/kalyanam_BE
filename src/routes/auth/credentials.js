@@ -10,6 +10,31 @@ import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
 
+router.get("/user-validation", async (req, res) => {
+  try {
+    const { email, mobile } = req.query;
+
+    if (!email && !mobile) {
+      return res.status(400).json({ msg: "Email or Mobile is required" });
+    }
+
+    await dbConnect();
+
+    const existingUser = await User.findOne({ "basic.email": email });
+    if (existingUser)
+      return res.status(400).json({ msg: "Email already exists" });
+
+    const existingMobile = await User.findOne({ "basic.mobile": mobile });
+    if (existingMobile)
+      return res.status(400).json({ msg: "Mobile number already registered" });
+
+    return res.json({ success: true, msg: "Valid" });
+  } catch (err) {
+    console.error("User Validation Error:", err);
+    res.status(500).json({ msg: "Server error" });
+  }
+});
+
 router.post(
   "/user-register/upload-images",
   upload.array("images", 3),
@@ -68,27 +93,10 @@ router.post("/user-register", async (req, res) => {
       return res.status(400).json({ msg: "Please fill all required fields" });
     }
 
-    const existingUser = await User.findOne({ "basic.email": email });
-    if (existingUser)
-      return res.status(400).json({ msg: "User already exists" });
-
-    const existingMobile = await User.findOne({ "basic.mobile": mobile });
-    if (existingMobile)
-      return res.status(400).json({ msg: "Mobile number already registered" });
-
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const calculateAge = (dob) => {
-      if (!dob) return -1;
-      const birthDate = new Date(dob);
-      const diff = Date.now() - birthDate.getTime();
-      const ageDate = new Date(diff);
-      return Math.abs(ageDate.getUTCFullYear() - 1970);
-    };
-
     const emailNormalized = email.trim().toLowerCase();
-    const userCount = await User.countDocuments();
-    const uniqueId = await generateUniqueId(userCount);
+    const uniqueId = await generateUniqueId();
 
     const newUser = new User({
       basic: {
@@ -98,7 +106,6 @@ router.post("/user-register", async (req, res) => {
         mobile,
         alternateMob,
         dob,
-        age: calculateAge(dob),
         gender,
         motherTongue,
         martialStatus,

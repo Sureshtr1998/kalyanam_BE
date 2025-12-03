@@ -123,9 +123,28 @@ router.post("/fetch-profiles", auth, async (req, res) => {
     } = filters.partner || {};
 
     if (ageFrom || ageTo) {
-      query["basic.age"] = {};
-      if (ageFrom) query["basic.age"].$gte = parseInt(ageFrom);
-      if (ageTo) query["basic.age"].$lte = parseInt(ageTo);
+      const today = new Date();
+      const dobQuery = {};
+
+      if (ageFrom) {
+        const maxDOB = new Date(
+          today.getFullYear() - parseInt(ageFrom),
+          today.getMonth(),
+          today.getDate()
+        );
+        dobQuery.$lte = maxDOB.toISOString();
+      }
+
+      if (ageTo) {
+        const minDOB = new Date(
+          today.getFullYear() - parseInt(ageTo) - 1,
+          today.getMonth(),
+          today.getDate() + 1
+        );
+        dobQuery.$gte = minDOB.toISOString();
+      }
+
+      query["basic.dob"] = dobQuery;
     }
 
     if (heightFrom || heightTo) {
@@ -208,7 +227,8 @@ router.post("/my-profile", auth, async (req, res) => {
 
     // ✅ Merge existing images with new ones if provided
     const finalImages = basic.images?.length ? basic.images : user.basic.images;
-
+    const protectedFields = ["fullName", "dob", "mobile", "uniqueId"];
+    protectedFields.forEach((field) => delete basic[field]);
     const updateFields = {
       ...req.body,
       basic: {
@@ -219,6 +239,7 @@ router.post("/my-profile", auth, async (req, res) => {
       },
       partner,
       hasCompleteProfile: true,
+      isVerified: true,
     };
 
     Object.assign(user, updateFields);

@@ -17,7 +17,6 @@ const userSchema = new Schema(
       gender: { type: String, required: true },
       motherTongue: { type: String, required: true },
       dob: { type: Date, default: null },
-      age: { type: Number },
       profileCreatedBy: { type: String, required: true },
       images: {
         type: [
@@ -100,6 +99,7 @@ const userSchema = new Schema(
       },
     ],
     hasCompleteProfile: { type: Boolean, default: false },
+    isVerified: { type: Boolean, default: false },
     isHidden: { type: Boolean, default: false },
     hideProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },
   },

@@ -6,23 +6,17 @@ import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
 import User from "../../models/User.js";
 import otpLimiter from "../../middleware/otpLimiter.js";
 import dbConnect from "../../utils/dbConnect.js";
+import { auth } from "../../middleware/auth.js";
 
 const router = Router();
 
-router.post("/send-otp", otpLimiter, async (req, res) => {
+router.post("/send-otp", otpLimiter, auth, async (req, res) => {
+  const userId = req.user.id;
   const { email, mobile } = req.body;
   if (!email || !mobile)
     return res
       .status(400)
       .json({ success: false, msg: "Email and mobile are required" });
-
-  const existingUser = await User.findOne({ "basic.email": email });
-  if (existingUser)
-    return res.status(400).json({ msg: "Mail Id already registered" });
-
-  const existingMobile = await User.findOne({ "basic.mobile": mobile });
-  if (existingMobile)
-    return res.status(400).json({ msg: "Mobile number already registered" });
 
   const emailOtp = otpGenerator.generate(6, {
     upperCaseAlphabets: false,

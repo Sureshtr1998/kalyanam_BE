@@ -1,9 +1,9 @@
 import imageKit from "../config/imageKit.js";
-import { nanoid } from "nanoid";
+import { customAlphabet } from "nanoid";
 
-export const generateUniqueId = async (userCount) => {
-  return nanoid(6);
-};
+const nanoidCustom = customAlphabet("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 6);
+
+export const generateUniqueId = async () => nanoidCustom();
 
 export const uploadToImageKit = async (fileBuffer, fileName) => {
   return new Promise((resolve, reject) => {

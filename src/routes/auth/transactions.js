@@ -6,6 +6,7 @@ import User from "../../models/User.js";
 import sendEmail from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
 import dbConnect from "../../utils/dbConnect.js";
+import { SUPPORT_EMAIL } from "../../utils/constants.js";
 
 const router = Router();
 
@@ -16,6 +17,14 @@ router.post("/create-order", async (req, res) => {
     await dbConnect();
 
     const receiptId = "order_" + nanoid();
+
+    await sendEmail({
+      to: [{ email: SUPPORT_EMAIL }],
+      template_id: "user_register_2",
+      variables: {
+        payload: req.body,
+      },
+    });
 
     const options = {
       amount: Number(amount) * 100,
