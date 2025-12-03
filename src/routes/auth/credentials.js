@@ -22,7 +22,7 @@ router.get("/user-validation", async (req, res) => {
       to: [{ email: SUPPORT_EMAIL }],
       template_id: "user_register_2",
       variables: {
-        payload: "USER VALIDATION: " + JSON.stringify(req.body),
+        payload: "USER VALIDATION: " + JSON.stringify(req.query),
       },
     });
     await dbConnect();
