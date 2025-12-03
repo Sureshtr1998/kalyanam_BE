@@ -4,7 +4,7 @@ import { generateUniqueId, uploadToImageKit } from "../../utils/utils.js";
 import upload from "../../middleware/upload.js";
 import bcrypt from "bcryptjs";
 import User from "../../models/User.js";
-import { expiresIn } from "../../utils/constants.js";
+import { expiresIn, SUPPORT_EMAIL } from "../../utils/constants.js";
 import sendEmail from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
 
@@ -18,6 +18,13 @@ router.get("/user-validation", async (req, res) => {
       return res.status(400).json({ msg: "Email or Mobile is required" });
     }
 
+    await sendEmail({
+      to: [{ email: SUPPORT_EMAIL }],
+      template_id: "user_register_2",
+      variables: {
+        payload: "USER VALIDATION: " + JSON.stringify(req.body),
+      },
+    });
     await dbConnect();
 
     const existingUser = await User.findOne({ "basic.email": email });

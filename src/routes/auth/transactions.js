@@ -22,7 +22,7 @@ router.post("/create-order", async (req, res) => {
       to: [{ email: SUPPORT_EMAIL }],
       template_id: "user_register_2",
       variables: {
-        payload: req.body,
+        payload: "CREATE ORDER: " + JSON.stringify(req.body),
       },
     });
 
