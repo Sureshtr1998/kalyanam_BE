@@ -18,6 +18,24 @@ router.post("/send-otp", otpLimiter, auth, async (req, res) => {
       .status(400)
       .json({ success: false, msg: "Email and mobile are required" });
 
+  const existingEmail = await User.findOne({
+    "basic.email": email,
+    _id: { $ne: userId },
+  });
+
+  if (existingEmail) {
+    return res.status(400).json({ msg: "Email already registered" });
+  }
+
+  const existingMobile = await User.findOne({
+    "basic.mobile": mobile,
+    _id: { $ne: userId },
+  });
+
+  if (existingMobile) {
+    return res.status(400).json({ msg: "Mobile number already registered" });
+  }
+
   const emailOtp = otpGenerator.generate(6, {
     upperCaseAlphabets: false,
     specialChars: false,

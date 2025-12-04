@@ -227,7 +227,7 @@ router.post("/my-profile", auth, async (req, res) => {
 
     // ✅ Merge existing images with new ones if provided
     const finalImages = basic.images?.length ? basic.images : user.basic.images;
-    const protectedFields = ["fullName", "dob", "mobile", "uniqueId"];
+    const protectedFields = ["fullName", "dob", "uniqueId"];
     protectedFields.forEach((field) => delete basic[field]);
     const updateFields = {
       ...req.body,
