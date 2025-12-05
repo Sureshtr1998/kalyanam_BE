@@ -86,9 +86,11 @@ router.post("/razorpay-webhook", async (req, res) => {
     const orderId = payment.order_id;
     const paymentId = payment.id;
 
+    console.log("WEB HOOK");
     // Wait 20 seconds before fallback
     setTimeout(async () => {
       try {
+        console.log("TIME OUT");
         const email = req.body.payload.payment.entity.notes?.customer_email;
         if (!email) return;
 
@@ -101,6 +103,8 @@ router.post("/razorpay-webhook", async (req, res) => {
 
         // Check if user already exists in DB
         const existingUser = await User.findOne({ "basic.email": email });
+        console.log("WEB existingUser", existingUser);
+
         if (existingUser) return;
 
         //Only if FE fails then only below data would be created from Razorpay
