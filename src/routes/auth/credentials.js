@@ -100,6 +100,22 @@ router.post("/user-register", async (req, res) => {
       return res.status(400).json({ msg: "Please fill all required fields" });
     }
 
+    const existingEmail = await User.findOne({
+      "basic.email": email,
+    });
+
+    if (existingEmail) {
+      return res.status(400).json({ msg: "Email already registered" });
+    }
+
+    const existingMobile = await User.findOne({
+      "basic.mobile": mobile,
+    });
+
+    if (existingMobile) {
+      return res.status(400).json({ msg: "Mobile number already registered" });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const emailNormalized = email.trim().toLowerCase();
