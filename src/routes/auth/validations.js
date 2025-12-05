@@ -1,7 +1,7 @@
 import { Router } from "express";
 import otpGenerator from "otp-generator";
 import sendEmail from "../../config/msg91Email.js";
-import redisClient from "../../config/redisClient.js";
+import upStash from "../../config/upStash.js";
 import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
 import User from "../../models/User.js";
 import otpLimiter from "../../middleware/otpLimiter.js";
@@ -58,9 +58,7 @@ router.post("/send-otp", otpLimiter, auth, async (req, res) => {
     await dbConnect();
 
     // Save to Redis with TTL of 5 minutes
-    await redisClient.set(`otp:${email}`, JSON.stringify(otpRecord), {
-      EX: 300,
-    });
+    await upStash.set(`otp:${email}`, JSON.stringify(otpRecord), { ex: 300 });
 
     // Send Email OTP
     await sendEmail({
@@ -87,14 +85,13 @@ router.post("/verify-otp-registration", async (req, res) => {
   try {
     await dbConnect();
 
-    const recordStr = await redisClient.get(`otp:${email}`);
-    if (!recordStr)
+    const record = await upStash.get(`otp:${email}`);
+    if (!record)
       return res
         .status(400)
         .json({ success: false, msg: "OTP not found or expired" });
 
     // @ts-ignore
-    const record = JSON.parse(recordStr);
 
     if (record.emailOtp !== emailOtp)
       return res.status(400).json({ success: false, msg: "Invalid email OTP" });
@@ -103,7 +100,7 @@ router.post("/verify-otp-registration", async (req, res) => {
       return res.status(400).json({ success: false, msg: "Invalid phone OTP" });
 
     // OTPs verified → remove from Redis
-    await redisClient.del(`otp:${email}`);
+    await upStash.del(`otp:${email}`);
 
     // ✅ Continue registration / mark user verified
     res.json({ success: true, msg: "Email and phone verified successfully!" });

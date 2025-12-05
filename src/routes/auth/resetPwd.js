@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { Router } from "express";
-import redisClient from "../../config/redisClient.js";
+import upStash from "../../config/upStash.js";
 import otpLimiter from "../../middleware/otpLimiter.js";
 import User from "../../models/User.js";
 import otpGenerator from "otp-generator";
@@ -29,7 +29,7 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
     });
 
     // Store in Redis with expiry (5 minutes)
-    await redisClient.setEx(`otp:${email}`, 300, otp);
+    await upStash.set(`otp:${email}`, otp, { ex: 300 });
 
     // Send OTP email
     await sendEmail({
@@ -55,19 +55,19 @@ router.post("/verify-otp", async (req, res) => {
   try {
     await dbConnect();
 
-    const storedOtp = await redisClient.get(`otp:${email}`);
+    const storedOtp = await upStash.get(`otp:${email}`);
 
     if (!storedOtp)
       return res
         .status(400)
         .json({ success: false, msg: "OTP not found or expired" });
 
-    if (storedOtp !== otp)
+    if (String(storedOtp) !== String(otp))
       return res.status(400).json({ success: false, msg: "Invalid OTP" });
 
     // Delete old OTP and mark as verified
-    await redisClient.del(`otp:${email}`);
-    await redisClient.setEx(`otp_verified:${email}`, 600, "true"); // valid for 10 minutes
+    await upStash.del(`otp:${email}`);
+    await upStash.set(`otp_verified:${email}`, "true", { ex: 600 });
 
     res.json({ success: true, msg: "OTP verified successfully" });
   } catch (err) {
@@ -82,7 +82,7 @@ router.post("/reset-password", async (req, res) => {
   try {
     await dbConnect();
 
-    const verified = await redisClient.get(`otp_verified:${email}`);
+    const verified = await upStash.get(`otp_verified:${email}`);
     if (!verified)
       return res
         .status(400)
@@ -93,8 +93,7 @@ router.post("/reset-password", async (req, res) => {
       { "basic.email": email },
       { "basic.password": hashed }
     );
-
-    await redisClient.del(`otp_verified:${email}`);
+    await upStash.del(`otp_verified:${email}`);
 
     res.json({ success: true, msg: "Password reset successful" });
   } catch (err) {

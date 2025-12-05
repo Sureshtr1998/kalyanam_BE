@@ -4,9 +4,14 @@ import { generateUniqueId, uploadToImageKit } from "../../utils/utils.js";
 import upload from "../../middleware/upload.js";
 import bcrypt from "bcryptjs";
 import User from "../../models/User.js";
-import { expiresIn, SUPPORT_EMAIL } from "../../utils/constants.js";
+import {
+  expiresIn,
+  PENDING_REG,
+  SUPPORT_EMAIL,
+} from "../../utils/constants.js";
 import sendEmail from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
+import upStash from "../../config/upStash.js";
 
 const router = Router();
 
@@ -71,7 +76,6 @@ router.post(
 router.post("/user-register", async (req, res) => {
   try {
     await dbConnect();
-
     const {
       email,
       password,
@@ -155,6 +159,7 @@ router.post("/user-register", async (req, res) => {
     });
 
     await newUser.save();
+    await upStash.del(`${PENDING_REG}${emailNormalized}`);
 
     await sendEmail({
       to: [{ email: emailNormalized }],

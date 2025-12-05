@@ -5,9 +5,9 @@ import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import sendEmail from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
-import redisClient from "../../config/redisClient.js";
+import upStash, { publishQStash } from "../../config/upStash.js";
 import dbConnect from "../../utils/dbConnect.js";
-import { SUPPORT_EMAIL } from "../../utils/constants.js";
+import { PENDING_REG, SUPPORT_EMAIL } from "../../utils/constants.js";
 import bcrypt from "bcryptjs";
 import { generateUniqueId } from "../../utils/utils.js";
 
@@ -19,18 +19,6 @@ router.post("/create-order", async (req, res) => {
     await dbConnect();
 
     const receiptId = "order_" + nanoid();
-
-    if (newUserPayload?.email) {
-      const redisKey = `pending_registration:${newUserPayload.email}`;
-      await redisClient.set(
-        redisKey,
-        JSON.stringify({
-          ...newUserPayload,
-          orderId: receiptId, // temp orderId before Razorpay assigns actual
-        }),
-        { EX: 120 } // expires in 120 seconds
-      );
-    }
 
     await sendEmail({
       to: [{ email: SUPPORT_EMAIL }],
@@ -56,8 +44,8 @@ router.post("/create-order", async (req, res) => {
     const order = await razorpay.orders.create(options);
 
     if (newUserPayload?.email) {
-      await redisClient.set(
-        `pending_registration:${newUserPayload.email}`,
+      await upStash.set(
+        `${PENDING_REG}${newUserPayload.email}`,
         JSON.stringify({
           ...newUserPayload,
           orderId: order.id,
@@ -85,110 +73,22 @@ router.post("/razorpay-webhook", async (req, res) => {
     const payment = req.body.payload.payment.entity;
     const orderId = payment.order_id;
     const paymentId = payment.id;
+    const email = payment.notes?.customer_email;
 
-    console.log("WEB HOOK");
+    //Add user registration condition
+    const redisKey = `${PENDING_REG}${email}`;
+    const data = await upStash.get(redisKey);
+
+    if (!data) return;
+
+    // Check if user already exists in DB
+    const existingUser = await User.findOne({ "basic.email": email });
+    if (existingUser) return;
+
     // Wait 20 seconds before fallback
-    setTimeout(async () => {
-      try {
-        console.log("TIME OUT");
-        const email = req.body.payload.payment.entity.notes?.customer_email;
-        if (!email) return;
+    await publishQStash("user-register", { ...data, paymentId });
 
-        const redisKey = `pending_registration:${email}`;
-        const pendingData = await redisClient.get(redisKey);
-
-        if (!pendingData) return;
-
-        const data = JSON.parse(pendingData);
-
-        // Check if user already exists in DB
-        const existingUser = await User.findOne({ "basic.email": email });
-        console.log("WEB existingUser", existingUser);
-
-        if (existingUser) return;
-
-        //Only if FE fails then only below data would be created from Razorpay
-        const {
-          password,
-          fullName,
-          mobile,
-          alternateMob,
-          dob,
-          gender,
-          motherTongue,
-          martialStatus,
-          profileCreatedBy,
-          subCaste,
-          qualification,
-          gothra,
-          images = [],
-          //Transaction Details
-          orderId: orderId,
-          paymentId: paymentId,
-          amountPaid,
-          totalNoOfInterest,
-          note,
-        } = data;
-
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        const emailNormalized = email.trim().toLowerCase();
-        const uniqueId = await generateUniqueId();
-
-        const newUser = new User({
-          basic: {
-            email: emailNormalized,
-            password: hashedPassword,
-            fullName,
-            mobile,
-            alternateMob,
-            dob,
-            gender,
-            motherTongue,
-            martialStatus,
-            profileCreatedBy,
-            subCaste,
-            gothra,
-            qualification,
-            images,
-            uniqueId,
-          },
-          interests: {
-            totalNoOfInterest,
-          },
-          transactions: [
-            {
-              orderId,
-              paymentId,
-              dateOfTrans: new Date(),
-              amountPaid,
-              noOfInterest: totalNoOfInterest,
-              note,
-            },
-          ],
-        });
-
-        await newUser.save();
-
-        await sendEmail({
-          to: [{ email: emailNormalized }],
-          template_id: "welcome_user_2", // MSG91 Template ID
-          variables: {
-            userName: fullName,
-            orderId,
-            paymentId,
-            numInterests: totalNoOfInterest,
-            amount: amountPaid,
-          },
-        });
-
-        await redisClient.del(redisKey); // optional cleanup
-      } catch (err) {
-        console.error("Webhook fallback error:", err);
-      }
-    }, 20000);
-
-    res.status(200).json({ status: "ok" });
+    res.status(200).json({ status: "queued" });
   } catch (err) {
     console.error("Webhook error:", err);
     res.status(500).json({ status: "error" });
