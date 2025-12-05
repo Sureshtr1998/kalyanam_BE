@@ -20,7 +20,7 @@ router.post("/create-order", async (req, res) => {
 
     const receiptId = "order_" + nanoid();
 
-    if (newUserPayload.email) {
+    if (newUserPayload?.email) {
       const redisKey = `pending_registration:${newUserPayload.email}`;
       await redisClient.set(
         redisKey,
@@ -55,7 +55,7 @@ router.post("/create-order", async (req, res) => {
 
     const order = await razorpay.orders.create(options);
 
-    if (newUserPayload.email) {
+    if (newUserPayload?.email) {
       await redisClient.set(
         `pending_registration:${newUserPayload.email}`,
         JSON.stringify({
