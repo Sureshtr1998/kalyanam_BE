@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import User from "../../models/User.js";
 import {
   expiresIn,
-  PENDING_REG,
+  PENDING_PAYMENT,
   SUPPORT_EMAIL,
 } from "../../utils/constants.js";
 import sendEmail from "../../config/msg91Email.js";
@@ -159,7 +159,7 @@ router.post("/user-register", async (req, res) => {
     });
 
     await newUser.save();
-    await upStash.del(`${PENDING_REG}${emailNormalized}`);
+    await upStash.del(`${PENDING_PAYMENT}${emailNormalized}`);
 
     await sendEmail({
       to: [{ email: emailNormalized }],

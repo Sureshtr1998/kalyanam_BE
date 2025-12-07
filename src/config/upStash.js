@@ -23,6 +23,7 @@ export const publishQStash = async (endpoint, payload, delay = "20s") => {
       headers: {
         Authorization: `Bearer ${process.env.QSTASH_TOKEN}`,
         "Upstash-Delay": delay,
+        "Upstash-Forward-x-internal-secret": process.env.INTERNAL_ROUTE_SECRET,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),

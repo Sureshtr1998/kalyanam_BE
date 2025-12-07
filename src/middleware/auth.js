@@ -2,19 +2,30 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 
 export const auth = async (req, res, next) => {
-  const token = req.header("x-auth-token");
-  if (!token)
-    return res.status(401).json({ msg: "No token, authorization denied" });
-
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id);
-    if (!user) return res.status(401).json({ msg: "User not found" });
+    const token = req.header("x-auth-token");
+    const secretHeader = req.header("x-internal-secret");
 
-    req.user = user; // attach current user to request
-    next();
+    // Case 1: Normal JWT flow (frontend)
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const user = await User.findById(decoded.id);
+      if (!user) return res.status(401).json({ msg: "User not found" });
+      req.user = user;
+      return next();
+    }
+
+    // Case 2: Internal (QStash) flow
+    if (secretHeader === process.env.INTERNAL_ROUTE_SECRET) {
+      const user = await User.findOne({ "basic.email": req.body.email });
+      if (!user) return res.status(404).json({ msg: "User not found" });
+      req.user = user;
+      return next();
+    }
+
+    return res.status(401).json({ msg: "Unauthorized" });
   } catch (err) {
     console.error(err);
-    res.status(401).json({ msg: "Token is not valid" });
+    return res.status(401).json({ msg: "Token or secret is not valid" });
   }
 };

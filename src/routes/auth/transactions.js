@@ -7,14 +7,14 @@ import sendEmail from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
 import upStash, { publishQStash } from "../../config/upStash.js";
 import dbConnect from "../../utils/dbConnect.js";
-import { PENDING_REG, SUPPORT_EMAIL } from "../../utils/constants.js";
+import { PENDING_PAYMENT, SUPPORT_EMAIL } from "../../utils/constants.js";
 import bcrypt from "bcryptjs";
 import { generateUniqueId } from "../../utils/utils.js";
 
 const router = Router();
 
 router.post("/create-order", async (req, res) => {
-  const { userName, userEmail, userPhone, amount, newUserPayload } = req.body;
+  const { userName, userEmail, userPhone, amount, payload } = req.body;
   try {
     await dbConnect();
 
@@ -43,16 +43,14 @@ router.post("/create-order", async (req, res) => {
 
     const order = await razorpay.orders.create(options);
 
-    if (newUserPayload?.email) {
-      await upStash.set(
-        `${PENDING_REG}${newUserPayload.email}`,
-        JSON.stringify({
-          ...newUserPayload,
-          orderId: order.id,
-        }),
-        { EX: 120 }
-      );
-    }
+    await upStash.set(
+      `${PENDING_PAYMENT}${userEmail}`,
+      JSON.stringify({
+        ...payload,
+        orderId: order.id,
+      }),
+      { EX: 120 }
+    );
 
     return res.json({
       orderId: order.id,
@@ -76,17 +74,13 @@ router.post("/razorpay-webhook", async (req, res) => {
     const email = payment.notes?.customer_email;
 
     //Add user registration condition
-    const redisKey = `${PENDING_REG}${email}`;
+    const redisKey = `${PENDING_PAYMENT}${email}`;
     const data = await upStash.get(redisKey);
 
     if (!data) return;
 
-    // Check if user already exists in DB
-    const existingUser = await User.findOne({ "basic.email": email });
-    if (existingUser) return;
-
     // Wait 20 seconds before fallback
-    await publishQStash("user-register", { ...data, paymentId });
+    await publishQStash(data.endpoint, { ...data, paymentId, email });
 
     res.status(200).json({ status: "queued" });
   } catch (err) {
@@ -101,7 +95,6 @@ router.post("/buy-interest", auth, async (req, res) => {
 
     // @ts-ignore
     const user = await User.findById(req.user.id);
-
     const { noOfInterest, orderId, amount, note, paymentId } = req.body;
 
     if (!user) {
@@ -123,6 +116,7 @@ router.post("/buy-interest", auth, async (req, res) => {
     });
 
     await user.save();
+    await upStash.del(`${PENDING_PAYMENT}${user.basic.email}`);
 
     await sendEmail({
       to: [{ email: user.basic.email }],
