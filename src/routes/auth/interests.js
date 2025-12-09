@@ -209,6 +209,7 @@ router.post("/view-contact", auth, async (req, res) => {
 
     const receiver = await User.findById(receiverId);
 
+    // @ts-ignore
     if (!sender || !receiver || req.user.id === receiverId) {
       return res.status(404).json({ msg: "User not found" });
     }

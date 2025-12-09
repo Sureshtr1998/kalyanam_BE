@@ -1,5 +1,4 @@
 import { Router } from "express";
-import axios from "axios";
 import { nanoid } from "nanoid";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
@@ -8,8 +7,6 @@ import razorpay from "../../config/razorpay.js";
 import upStash, { publishQStash } from "../../config/upStash.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { PENDING_PAYMENT, SUPPORT_EMAIL } from "../../utils/constants.js";
-import bcrypt from "bcryptjs";
-import { generateUniqueId } from "../../utils/utils.js";
 
 const router = Router();
 
@@ -49,7 +46,7 @@ router.post("/create-order", async (req, res) => {
         ...payload,
         orderId: order.id,
       }),
-      { EX: 120 }
+      { ex: 120 }
     );
 
     return res.json({

@@ -11,6 +11,7 @@ import { auth } from "../../middleware/auth.js";
 const router = Router();
 
 router.post("/send-otp", otpLimiter, auth, async (req, res) => {
+  // @ts-ignore
   const userId = req.user.id;
   const { email, mobile } = req.body;
   if (!email || !mobile)

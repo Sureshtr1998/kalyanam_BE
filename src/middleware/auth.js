@@ -8,7 +8,9 @@ export const auth = async (req, res, next) => {
 
     // Case 1: Normal JWT flow (frontend)
     if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const decoded = /** @type {import("jsonwebtoken").JwtPayload} */ (
+        jwt.verify(token, process.env.JWT_SECRET)
+      );
       const user = await User.findById(decoded.id);
       if (!user) return res.status(401).json({ msg: "User not found" });
       req.user = user;

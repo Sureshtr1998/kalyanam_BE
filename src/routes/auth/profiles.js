@@ -49,6 +49,7 @@ router.post("/unhide-profile", auth, async (req, res) => {
     await dbConnect();
 
     const { userId } = req.body || {};
+    // @ts-ignore
     const currentUserId = req.user.id;
 
     const currentUser = await User.findById(currentUserId);

@@ -22,6 +22,7 @@ router.delete("/delete-account", auth, async (req, res) => {
       // @ts-ignore
       for (const image of user.images) {
         try {
+          // @ts-ignore
           await imagekit.deleteFile(image.fileId);
         } catch (err) {
           console.error("Error deleting ImageKit image:", err.message);
