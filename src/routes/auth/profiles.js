@@ -35,7 +35,7 @@ router.get("/hidden-profiles", auth, async (req, res) => {
     res.status(200).json({
       success: true,
       count: sortedUsers.length,
-      hiddenProfiles: sortedUsers,
+      activities: sortedUsers,
       currentUser: currentUser,
     });
   } catch (err) {

@@ -128,7 +128,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
     res.status(200).json({
       success: true,
       count: finalList.length,
-      invitations: finalList,
+      activities: finalList,
       currentUser,
     });
   } catch (err) {
@@ -263,7 +263,7 @@ router.get("/view-contact", auth, async (req, res) => {
     res.status(200).json({
       success: true,
       count: sortedUsers.length,
-      viewedNums: sortedUsers,
+      activities: sortedUsers,
       currentUser,
     });
   } catch (err) {
