@@ -88,7 +88,7 @@ router.post("/astro-data", auth, async (req, res) => {
     await currentUser.save();
     await upStash.del(`${PENDING_PAYMENT}${email}`);
     const delay =
-      currentUser.basic.fullName === "Suresh TR" ? "10s" : getAstrologyDelay();
+      currentUser.basic.fullName === "Suresh TR" ? "1m" : getAstrologyDelay();
 
     await publishQStash("astrology", { uniqueId, email }, delay);
 
