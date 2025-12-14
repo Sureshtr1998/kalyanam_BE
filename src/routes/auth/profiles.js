@@ -20,7 +20,7 @@ router.get("/hidden-profiles", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    const orderedIds = [...(currentUser.hideProfiles || [])].reverse();
+    const orderedIds = [...(currentUser.hideProfiles || [])];
 
     // Fetch all users at once
     const users = await User.find(
@@ -28,7 +28,7 @@ router.get("/hidden-profiles", auth, async (req, res) => {
       "-basic.password -hideProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -__v"
     ).lean();
 
-    const sortedUsers = orderedIds.map((id) =>
+    const sortedUsers = orderedIds?.map((id) =>
       users.find((u) => u._id.toString() === id.toString())
     );
 
@@ -199,11 +199,10 @@ router.get("/my-profile", auth, async (req, res) => {
   try {
     await dbConnect();
 
-    // Fetch profiles excluding current user
     // @ts-ignore
-    const currentUser = await User.findById(req.user.id).select(
-      "-basic.password"
-    );
+    const currentUser = await User.findById(req.user.id)
+      .select("-basic.password")
+      .lean();
 
     if (!currentUser) {
       return res.status(404).json({ msg: "User not found" });
@@ -264,6 +263,7 @@ router.post(
       const uploadedFiles = req.files || [];
       const uploadedMedia = [];
 
+      // @ts-ignore
       for (const file of uploadedFiles) {
         const result = await uploadToImageKit(file.buffer, file.originalname);
         uploadedMedia.push({ url: result.url, fileId: result.fileId });

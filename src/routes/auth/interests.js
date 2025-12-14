@@ -44,8 +44,8 @@ router.post("/send-interest", auth, async (req, res) => {
     }
 
     // Add interest
-    sender.interests.sent.push(receiver._id);
-    receiver.interests.received.push(sender._id);
+    sender.interests.sent.unshift(receiver._id);
+    receiver.interests.received.unshift(sender._id);
 
     // Save both users
     await sender.save();
@@ -85,13 +85,13 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
     // 1. Build ordered list (newest → oldest)
     const orderedIds = [
-      ...(interests.accepted || []).slice().reverse(),
-      ...(interests.declined || []).slice().reverse(),
-      ...(interests.sent || []).slice().reverse(),
-      ...(interests.received || []).slice().reverse(),
+      ...(interests.accepted || []),
+      ...(interests.declined || []),
+      ...(interests.sent || []),
+      ...(interests.received || []),
     ];
 
-    const uniqueOrdered = [...new Set(orderedIds.map(String))];
+    const uniqueOrdered = [...new Set(orderedIds?.map(String))];
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
@@ -158,21 +158,21 @@ router.post("/interest-action", auth, async (req, res) => {
 
     if (action === "accept") {
       currentUser.interests.accepted = [
-        ...(currentUser.interests.accepted || []),
         userId.toString(),
+        ...(currentUser.interests.accepted || []),
       ];
       otherUser.interests.accepted = [
-        ...(otherUser.interests.accepted || []),
         currentUserId.toString(),
+        ...(otherUser.interests.accepted || []),
       ];
     } else if (action === "decline") {
       currentUser.interests.declined = [
-        ...(currentUser.interests.declined || []),
         userId.toString(),
+        ...(currentUser.interests.declined || []),
       ];
       otherUser.interests.declined = [
-        ...(otherUser.interests.declined || []),
         currentUserId.toString(),
+        ...(otherUser.interests.declined || []),
       ];
     }
 
@@ -223,7 +223,7 @@ router.post("/view-contact", auth, async (req, res) => {
       });
     }
 
-    sender.interests.viewed.push(receiver._id);
+    sender.interests.viewed.unshift(receiver._id);
 
     await sender.save();
 
@@ -248,9 +248,9 @@ router.get("/view-contact", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    const orderedIds = [...(currentUser.interests.viewed || [])].reverse();
+    const orderedIds = [...(currentUser.interests.viewed || [])];
 
-    const uniqueOrdered = [...new Set(orderedIds.map(String))];
+    const uniqueOrdered = [...new Set(orderedIds?.map(String))];
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },

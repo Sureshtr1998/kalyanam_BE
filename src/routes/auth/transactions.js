@@ -7,6 +7,7 @@ import razorpay from "../../config/razorpay.js";
 import upStash, { publishQStash } from "../../config/upStash.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { PENDING_PAYMENT, SUPPORT_EMAIL } from "../../utils/constants.js";
+import { isTransactionExists } from "../../utils/utils.js";
 
 const router = Router();
 
@@ -66,7 +67,6 @@ router.post("/create-order", async (req, res) => {
 router.post("/razorpay-webhook", async (req, res) => {
   try {
     const payment = req.body.payload.payment.entity;
-    const orderId = payment.order_id;
     const paymentId = payment.id;
     const email = payment.notes?.customer_email;
 
@@ -94,6 +94,14 @@ router.post("/buy-interest", auth, async (req, res) => {
     const user = await User.findById(req.user.id);
     const { noOfInterest, orderId, amount, note, paymentId } = req.body;
 
+    const exists = isTransactionExists(user.transactions, orderId);
+    if (exists) {
+      return res.status(200).json({
+        success: false,
+        msg: "Transaction data already exists",
+      });
+    }
+
     if (!user) {
       return res.status(404).json({ msg: "User not found" });
     }
@@ -103,10 +111,9 @@ router.post("/buy-interest", auth, async (req, res) => {
     user.interests.totalNoOfInterest =
       (Number(user.interests.totalNoOfInterest) || 0) + increment;
 
-    user.transactions.push({
+    user.transactions.unshift({
       orderId,
       paymentId,
-      dateOfTrans: new Date(),
       amountPaid: amount,
       noOfInterest: noOfInterest,
       note,

@@ -6,28 +6,24 @@ import accountsRoutes from "./accounts.js";
 import resetPasswordsRoutes from "./resetPwd.js";
 import validationRoutes from "./validations.js";
 import transactionsRoutes from "./transactions.js";
+import astrologyRoutes from "./astrology.js";
 
 const router = Router();
 
-// POST /api/login & POST /api/user-register
 router.use(credentialsRoutes);
 
-// POST /api/fetch-profiles & GET /api/my-profile & POST /api/my-profile & /my-profile/upload-images
 router.use(profilesRoutes);
 
-//POST /api/send-interest & GET /api/fetch-invitation-status & POST /api/interest-action
 router.use(interestsRoutes);
 
-//DELETE /api/delete-account & GET /api/user-account & POST /api/hide-profile
 router.use(accountsRoutes);
 
-//POST /api/request-reset & POST /api/reset-password & POST /api/verify-otp
 router.use(resetPasswordsRoutes);
 
-//POST /api/verify-otp & POST /api/send-otp
 router.use(validationRoutes);
 
-//POST /api/create-order
 router.use(transactionsRoutes);
+
+router.use(astrologyRoutes);
 
 export default router;

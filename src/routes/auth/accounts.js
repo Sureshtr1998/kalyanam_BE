@@ -83,7 +83,7 @@ router.post("/hide-profile", auth, async (req, res) => {
     }
 
     if (!currentUser.hideProfiles.includes(userId)) {
-      currentUser.hideProfiles.push(userId);
+      currentUser.hideProfiles.unshift(userId);
       await currentUser.save();
     }
 
