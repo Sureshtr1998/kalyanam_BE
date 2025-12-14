@@ -52,7 +52,11 @@ router.post("/astro-data", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    const exists = isTransactionExists(currentUser.transactions, orderId);
+    const exists = isTransactionExists(
+      currentUser.transactions,
+      orderId,
+      paymentId
+    );
     if (exists) {
       return res.status(200).json({
         success: false,

@@ -21,6 +21,8 @@ export const uploadToImageKit = async (fileBuffer, fileName) => {
   });
 };
 
-export const isTransactionExists = (transactions = [], orderId) => {
-  return transactions.some((txn) => txn?.orderId === orderId);
+export const isTransactionExists = (transactions = [], orderId, paymentId) => {
+  return transactions.some(
+    (txn) => txn?.orderId === orderId || txn?.paymentId === paymentId
+  );
 };

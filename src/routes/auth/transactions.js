@@ -94,7 +94,7 @@ router.post("/buy-interest", auth, async (req, res) => {
     const user = await User.findById(req.user.id);
     const { noOfInterest, orderId, amount, note, paymentId } = req.body;
 
-    const exists = isTransactionExists(user.transactions, orderId);
+    const exists = isTransactionExists(user.transactions, orderId, paymentId);
     if (exists) {
       return res.status(200).json({
         success: false,
