@@ -218,7 +218,7 @@ router.get("/my-profile", auth, async (req, res) => {
 router.post("/my-profile", auth, async (req, res) => {
   try {
     await dbConnect();
-
+    console.log(req, "My profile ");
     // @ts-ignore
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ msg: "User not found" });
@@ -258,6 +258,7 @@ router.post(
   upload.array("images"),
   async (req, res) => {
     try {
+      console.log(req, "Image Request");
       await dbConnect();
 
       const uploadedFiles = req.files || [];
