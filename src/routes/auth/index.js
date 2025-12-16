@@ -7,6 +7,7 @@ import resetPasswordsRoutes from "./resetPwd.js";
 import validationRoutes from "./validations.js";
 import transactionsRoutes from "./transactions.js";
 import astrologyRoutes from "./astrology.js";
+import reportRoutes from "./report.js";
 
 const router = Router();
 
@@ -25,5 +26,7 @@ router.use(validationRoutes);
 router.use(transactionsRoutes);
 
 router.use(astrologyRoutes);
+
+router.use(reportRoutes);
 
 export default router;
