@@ -77,6 +77,7 @@ router.post("/user-register", async (req, res) => {
       martialStatus,
       profileCreatedBy,
       subCaste,
+      caste,
       qualification,
       gothra,
       images = [],
@@ -127,6 +128,7 @@ router.post("/user-register", async (req, res) => {
         martialStatus,
         profileCreatedBy,
         subCaste,
+        caste,
         gothra,
         qualification,
         images,
@@ -134,6 +136,9 @@ router.post("/user-register", async (req, res) => {
       },
       interests: {
         totalNoOfInterest,
+      },
+      partner: {
+        caste: [caste],
       },
       transactions: [
         {

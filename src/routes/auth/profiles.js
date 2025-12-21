@@ -116,7 +116,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       martialStatus,
       heightFrom,
       heightTo,
-      subCaste,
+      caste,
       employedIn,
       qualification,
       motherTongue,
@@ -162,7 +162,12 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
     if (martialStatus?.length)
       query["basic.martialStatus"] = { $in: martialStatus };
-    if (subCaste?.length) query["basic.subCaste"] = { $in: subCaste };
+    if (caste?.length) {
+      query.$and = [
+        { "basic.caste": { $in: caste } },
+        { "partner.caste": currentUser.basic.caste },
+      ];
+    }
     if (motherTongue?.length)
       query["basic.motherTongue"] = { $in: motherTongue };
     if (employedIn?.length) query["personal.employedIn"] = { $in: employedIn };
