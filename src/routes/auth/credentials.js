@@ -135,6 +135,7 @@ router.post("/user-register", async (req, res) => {
       interests: {
         totalNoOfInterest,
       },
+      isVerified: true,
       transactions: [
         {
           orderId,
