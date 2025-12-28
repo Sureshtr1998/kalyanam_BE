@@ -151,13 +151,9 @@ router.post("/user-register", async (req, res) => {
 
     await sendEmail({
       to: [{ email: emailNormalized }],
-      template_id: "welcome_user_2", // MSG91 Template ID
+      template_id: "apology_user",
       variables: {
-        userName: fullName,
-        orderId,
-        paymentId,
-        numInterests: totalNoOfInterest,
-        amount: amountPaid,
+        user_name: fullName,
       },
     });
 
