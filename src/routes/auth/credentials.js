@@ -135,7 +135,6 @@ router.post("/user-register", async (req, res) => {
       interests: {
         totalNoOfInterest,
       },
-      isVerified: true,
       transactions: [
         {
           orderId,
@@ -152,9 +151,13 @@ router.post("/user-register", async (req, res) => {
 
     await sendEmail({
       to: [{ email: emailNormalized }],
-      template_id: "apology_user_int",
+      template_id: "welcome_user_2", // MSG91 Template ID
       variables: {
-        user_name: fullName,
+        userName: fullName,
+        orderId,
+        paymentId,
+        numInterests: totalNoOfInterest,
+        amount: amountPaid,
       },
     });
 
