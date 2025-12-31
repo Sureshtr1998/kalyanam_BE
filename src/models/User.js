@@ -11,7 +11,7 @@ const userSchema = new Schema(
       password: { type: String, required: true },
       subCaste: { type: String },
       caste: { type: String, required: true },
-      gothra: { type: String, required: true },
+      gothra: { type: String },
       mobile: { type: String, required: true, unique: true },
       alternateMob: { type: String },
       gender: { type: String, required: true },
@@ -29,6 +29,7 @@ const userSchema = new Schema(
       },
       note: { type: String },
       uniqueId: { type: String, unique: true },
+      referralId: { type: String },
     },
     personal: {
       height: { type: String },

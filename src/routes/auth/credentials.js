@@ -8,6 +8,7 @@ import { expiresIn, PENDING_PAYMENT } from "../../utils/constants.js";
 import sendEmail from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
 import upStash from "../../config/upStash.js";
+import Broker from "../../models/Broker.js";
 
 const router = Router();
 
@@ -81,6 +82,7 @@ router.post("/user-register", async (req, res) => {
       qualification,
       gothra,
       images = [],
+      referralId,
       //Transaction Details
       orderId,
       paymentId,
@@ -133,12 +135,14 @@ router.post("/user-register", async (req, res) => {
         qualification,
         images,
         uniqueId,
+        referralId,
       },
       interests: {
         totalNoOfInterest,
       },
       partner: {
         caste: [caste],
+        motherTongue: [motherTongue],
       },
       transactions: [
         {
@@ -166,9 +170,13 @@ router.post("/user-register", async (req, res) => {
       },
     });
 
-    const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, {
-      expiresIn: expiresIn,
-    });
+    const token = jwt.sign(
+      { id: newUser._id, role: "USER" },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: expiresIn,
+      }
+    );
 
     const newUserObj = newUser.toObject();
     if (newUserObj.basic) delete newUserObj.basic.password;
@@ -190,7 +198,7 @@ router.post("/login", async (req, res) => {
   try {
     await dbConnect();
 
-    let { email, password } = req.body;
+    let { email, password, isPartner } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ msg: "Email and password are required" });
@@ -198,30 +206,77 @@ router.post("/login", async (req, res) => {
 
     email = email.trim().toLowerCase();
 
-    const user = await User.findOne({ "basic.email": email });
-    if (!user) return res.status(400).json({ msg: "Invalid credentials" });
+    let account;
+    let accountType;
 
-    const isMatch = await bcrypt.compare(password, user.basic.password);
-    if (!isMatch) return res.status(400).json({ msg: "Invalid credentials" });
-
-    if (user.isHidden) {
-      user.isHidden = false;
-      await user.save();
+    if (isPartner) {
+      account = await Broker.findOne({ email }).select("+password");
+      accountType = "BROKER";
+    } else {
+      account = await User.findOne({ "basic.email": email }).select(
+        "+basic.password"
+      );
+      accountType = "USER";
     }
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-      expiresIn: expiresIn,
-    });
+    if (!account) {
+      return res.status(400).json({ msg: "Invalid credentials" });
+    }
 
-    res.json({
-      id: user._id,
-      fullName: user.basic.fullName,
-      email: user.basic.email,
+    const hashedPassword = isPartner
+      ? // @ts-ignore
+        account.password
+      : // @ts-ignore
+        account.basic.password;
+
+    const isMatch = await bcrypt.compare(password, hashedPassword);
+    if (!isMatch) {
+      return res.status(400).json({ msg: "Invalid credentials" });
+    }
+
+    // @ts-ignore
+    if (!isPartner && account.isHidden) {
+      // @ts-ignore
+      account.isHidden = false;
+      await account.save();
+    }
+
+    const token = jwt.sign(
+      {
+        id: account._id,
+        role: accountType,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn }
+    );
+
+    if (isPartner) {
+      return res.json({
+        id: account._id,
+        // @ts-ignore
+        name: account.name,
+        // @ts-ignore
+        email: account.email,
+        // @ts-ignore
+        referralId: account.referralId,
+        role: "BROKER",
+        token,
+      });
+    }
+
+    return res.json({
+      id: account._id,
+      // @ts-ignore
+      fullName: account.basic.fullName,
+      // @ts-ignore
+      email: account.basic.email,
+      // @ts-ignore
+      mobile: account.basic.mobile,
+      role: "USER",
       token,
-      mobile: user.basic.mobile,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Login error:", err);
     res.status(500).json({ msg: "Server error" });
   }
 });
