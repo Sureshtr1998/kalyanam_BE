@@ -251,6 +251,12 @@ router.post("/login", async (req, res) => {
     );
 
     if (isPartner) {
+      // @ts-ignore
+      if (!account?.referralId) {
+        return res.status(403).json({
+          msg: "Your profile is currently under review. You will receive an email once it has been verified.",
+        });
+      }
       return res.json({
         id: account._id,
         // @ts-ignore

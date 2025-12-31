@@ -27,8 +27,9 @@ router.post("/broker-register", async (req, res) => {
       idProofs, // [{ url, fileId }]
       motherTongue,
       // Transactions
+      // orderId,
       paymentId,
-      amountPaid,
+      amount,
     } = req.body;
 
     if (!name || !email || !phone || !password || !confirmPassword) {
@@ -70,7 +71,7 @@ router.post("/broker-register", async (req, res) => {
       variables: {
         userName: name,
         paymentId: paymentId,
-        amount: amountPaid,
+        amount: amount,
       },
     });
 

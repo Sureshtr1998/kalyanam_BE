@@ -207,30 +207,40 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       // Two way bindings for Mother Tongue and Caste
       query.$and = [];
 
-      if (caste?.length) {
-        query.$and.push(
-          { "basic.caste": { $in: caste } },
-          {
-            $or: [
-              { "partner.caste": currentUser.basic.caste },
-              { "partner.caste": { $exists: false } },
-              { "partner.caste": { $size: 0 } },
-            ],
-          }
-        );
+      /* ===================== CASTE ===================== */
+
+      // 1️⃣ Other user must accept my caste (always)
+      query.$and.push({
+        $or: [
+          { "partner.caste": currentUser.basic.caste },
+          { "partner.caste": { $exists: false } },
+          { "partner.caste": { $size: 0 } },
+        ],
+      });
+
+      // 2️⃣ I must accept their caste (only if I selected caste)
+      if (caste?.length > 0) {
+        query.$and.push({
+          "basic.caste": { $in: caste },
+        });
       }
 
-      if (motherTongue?.length) {
-        query.$and.push(
-          { "basic.motherTongue": { $in: motherTongue } },
-          {
-            $or: [
-              { "partner.motherTongue": currentUser.basic.motherTongue },
-              { "partner.motherTongue": { $exists: false } },
-              { "partner.motherTongue": { $size: 0 } },
-            ],
-          }
-        );
+      /* ================= MOTHER TONGUE ================= */
+
+      // 1️⃣ Other user must accept my mother tongue (always)
+      query.$and.push({
+        $or: [
+          { "partner.motherTongue": currentUser.basic.motherTongue },
+          { "partner.motherTongue": { $exists: false } },
+          { "partner.motherTongue": { $size: 0 } },
+        ],
+      });
+
+      // 2️⃣ I must accept their mother tongue (only if I selected it)
+      if (motherTongue?.length > 0) {
+        query.$and.push({
+          "basic.motherTongue": { $in: motherTongue },
+        });
       }
 
       if (!query.$and.length) delete query.$and;
