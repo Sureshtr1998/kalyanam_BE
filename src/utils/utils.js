@@ -35,7 +35,7 @@ export const generateBrokerId = (name) => {
     .slice(0, 3)
     .padEnd(3, "X");
 
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let randomCode = "";
 
   for (let i = 0; i < 4; i++) {
