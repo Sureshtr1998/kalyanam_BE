@@ -74,7 +74,7 @@ router.post("/broker-register", async (req, res) => {
       },
     });
 
-    const delay = name === "Suresh TR" ? "1m" : "5h";
+    const delay = name === "Suresh TR" ? "1m" : "5h31m";
 
     await publishQStash("broker-completion", { email, role: "BROKER" }, delay);
     return res.status(201).json({
