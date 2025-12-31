@@ -4,6 +4,7 @@ import User from "../../models/User.js";
 import upload from "../../middleware/upload.js";
 import { uploadToImageKit } from "../../utils/utils.js";
 import dbConnect from "../../utils/dbConnect.js";
+import Broker from "../../models/Broker.js";
 
 const router = Router();
 
@@ -81,33 +82,14 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
     // @ts-ignore
     const currentUser = req.user;
-    if (!currentUser.basic?.gender) {
-      return res.status(400).json({ msg: "Current user gender not set" });
-    }
-
-    const oppositeGender =
-      currentUser.basic.gender.toLowerCase() === "male" ? "female" : "male";
+    // @ts-ignore
+    const userRole = req.role;
 
     const { page = 1, limit = 10, filters = {} } = req.body;
     const skip = (page - 1) * limit;
 
-    // Excluded IDs (users already interacted with)
-    const excludedIds = [
-      ...currentUser.interests.accepted,
-      ...currentUser.interests.declined,
-      ...currentUser.hideProfiles,
-      ...currentUser.interests.sent,
-      ...currentUser.interests.viewed,
-      ...currentUser.interests.received,
-    ];
-
     // --- Build query dynamically ---
-    const query = {
-      "basic.gender": { $regex: new RegExp(`^${oppositeGender}$`, "i") },
-      _id: { $ne: currentUser._id, $nin: excludedIds },
-      isHidden: false,
-      hideProfiles: { $ne: currentUser._id },
-    };
+    const query = {};
 
     // Partner filters
     const {
@@ -116,11 +98,12 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       martialStatus,
       heightFrom,
       heightTo,
-      subCaste,
+      caste,
       employedIn,
       qualification,
       motherTongue,
       country,
+      genderBrokerFilter,
     } = filters.partner || {};
 
     if (ageFrom || ageTo) {
@@ -162,7 +145,6 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
     if (martialStatus?.length)
       query["basic.martialStatus"] = { $in: martialStatus };
-    if (subCaste?.length) query["basic.subCaste"] = { $in: subCaste };
     if (motherTongue?.length)
       query["basic.motherTongue"] = { $in: motherTongue };
     if (employedIn?.length) query["personal.employedIn"] = { $in: employedIn };
@@ -170,25 +152,127 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       query["basic.qualification"] = { $in: qualification };
     if (country?.length) query["personal.country"] = { $in: country };
 
-    // Total count
-    const totalProfiles = await User.countDocuments(query);
+    if (userRole === "BROKER") {
+      if (!currentUser.referralId) {
+        return res.status(403).json({ msg: "Invalid broker account" });
+      }
 
-    // Fetch paginated profiles
-    const profiles = await User.find(query)
-      .sort({ isVerified: -1, createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .select(
-        "-createdAt -basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -interests -transactions -updatedAt"
-      );
+      if (genderBrokerFilter?.length)
+        query["basic.gender"] = { $in: genderBrokerFilter };
 
-    return res.json({
-      profiles,
-      totalProfiles,
-      totalPages: Math.ceil(totalProfiles / limit),
-      page,
-      limit,
-    });
+      const brokerQuery = {
+        ...query,
+        "basic.referralId": currentUser.referralId,
+        ...(caste?.length && {
+          "basic.caste": { $in: caste },
+        }),
+        ...(motherTongue?.length && {
+          "basic.motherTongue": { $in: motherTongue },
+        }),
+      };
+
+      const profiles = await User.find(brokerQuery)
+        .sort({ isVerified: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select(
+          "-createdAt -basic.password -personal.address -hideProfiles -interests -transactions -updatedAt"
+        )
+        .lean();
+
+      const totalProfiles = await User.countDocuments(brokerQuery);
+
+      return res.json({
+        profiles,
+        totalProfiles,
+        totalPages: Math.ceil(totalProfiles / limit),
+        page,
+        limit,
+      });
+    } else {
+      // For Users
+      const oppositeGender =
+        currentUser.basic.gender.toLowerCase() === "male" ? "female" : "male";
+
+      // Excluded IDs (users already interacted with)
+      const excludedIds = [
+        ...currentUser.interests.accepted,
+        ...currentUser.interests.declined,
+        ...currentUser.hideProfiles,
+        ...currentUser.interests.sent,
+        ...currentUser.interests.viewed,
+        ...currentUser.interests.received,
+      ];
+
+      // Two way bindings for Mother Tongue and Caste
+      query.$and = [];
+
+      /* ===================== CASTE ===================== */
+
+      // 1️⃣ Other user must accept my caste (always)
+      query.$and.push({
+        $or: [
+          { "partner.caste": currentUser.basic.caste },
+          { "partner.caste": { $exists: false } },
+          { "partner.caste": { $size: 0 } },
+        ],
+      });
+
+      // 2️⃣ I must accept their caste (only if I selected caste)
+      if (caste?.length > 0) {
+        query.$and.push({
+          "basic.caste": { $in: caste },
+        });
+      }
+
+      /* ================= MOTHER TONGUE ================= */
+
+      // 1️⃣ Other user must accept my mother tongue (always)
+      query.$and.push({
+        $or: [
+          { "partner.motherTongue": currentUser.basic.motherTongue },
+          { "partner.motherTongue": { $exists: false } },
+          { "partner.motherTongue": { $size: 0 } },
+        ],
+      });
+
+      // 2️⃣ I must accept their mother tongue (only if I selected it)
+      if (motherTongue?.length > 0) {
+        query.$and.push({
+          "basic.motherTongue": { $in: motherTongue },
+        });
+      }
+
+      if (!query.$and.length) delete query.$and;
+
+      const userSpecificQuery = {
+        ...query,
+        "basic.gender": { $regex: new RegExp(`^${oppositeGender}$`, "i") },
+        _id: { $ne: currentUser._id, $nin: excludedIds },
+        isHidden: false,
+        hideProfiles: { $ne: currentUser._id },
+      };
+
+      const totalProfiles = await User.countDocuments(userSpecificQuery);
+
+      // Fetch paginated profiles
+      const profiles = await User.find(userSpecificQuery)
+        .sort({ isVerified: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select(
+          "-createdAt -basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -interests -transactions -updatedAt"
+        )
+        .lean();
+
+      return res.json({
+        profiles,
+        totalProfiles,
+        totalPages: Math.ceil(totalProfiles / limit),
+        page,
+        limit,
+      });
+    }
   } catch (err) {
     console.error("Fetch Profiles Error:", err);
     return res.status(500).json({ msg: "Server error" });
@@ -200,15 +284,33 @@ router.get("/my-profile", auth, async (req, res) => {
     await dbConnect();
 
     // @ts-ignore
-    const currentUser = await User.findById(req.user.id)
-      .select("-basic.password")
-      .lean();
+    const userRole = req.role;
+    // @ts-ignore
+    const userId = req.user.id;
 
-    if (!currentUser) {
-      return res.status(404).json({ msg: "User not found" });
+    let profile;
+    if (userRole === "BROKER") {
+      const broker = await Broker.findById(userId).lean();
+      if (!broker) {
+        return res.status(404).json({ msg: "Broker not found" });
+      }
+
+      const usersReferredCount = await User.countDocuments({
+        "basic.referralId": broker.referralId,
+      });
+
+      profile = {
+        ...broker,
+        usersReferred: usersReferredCount,
+      };
+    } else {
+      profile = await User.findById(userId).select("-basic.password").lean();
     }
 
-    res.json({ profile: currentUser });
+    if (!profile) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+    return res.json({ profile });
   } catch (err) {
     console.error(err);
     res.status(500).json({ msg: "Server error" });
@@ -218,7 +320,6 @@ router.get("/my-profile", auth, async (req, res) => {
 router.post("/my-profile", auth, async (req, res) => {
   try {
     await dbConnect();
-    console.log(req, "My profile ");
     // @ts-ignore
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ msg: "User not found" });
@@ -258,7 +359,6 @@ router.post(
   upload.array("images"),
   async (req, res) => {
     try {
-      console.log(req, "Image Request");
       await dbConnect();
 
       const uploadedFiles = req.files || [];

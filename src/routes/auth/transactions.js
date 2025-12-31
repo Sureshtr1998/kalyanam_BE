@@ -12,7 +12,7 @@ import { isTransactionExists } from "../../utils/utils.js";
 const router = Router();
 
 router.post("/create-order", async (req, res) => {
-  const { userName, userEmail, userPhone, amount, payload } = req.body;
+  const { userName, userEmail, userPhone, amount, payload, role } = req.body;
   try {
     await dbConnect();
 
@@ -46,6 +46,7 @@ router.post("/create-order", async (req, res) => {
       `${PENDING_PAYMENT}${userEmail}`,
       JSON.stringify({
         ...payload,
+        role,
         orderId: order.id,
       }),
       { ex: 120 }
@@ -70,7 +71,7 @@ router.post("/razorpay-webhook", async (req, res) => {
     const payment = req.body.payload.payment.entity;
     const paymentId = payment.id;
     const email = payment.notes?.customer_email;
-
+    const role = req.body.role;
     //Add user registration condition
     const redisKey = `${PENDING_PAYMENT}${email}`;
     const data = await upStash.get(redisKey);
@@ -78,7 +79,12 @@ router.post("/razorpay-webhook", async (req, res) => {
     if (!data) return;
 
     // Wait 20 seconds before fallback
-    await publishQStash(data.endpoint, { ...data, paymentId, email });
+    await publishQStash(data.endpoint, {
+      ...data,
+      paymentId,
+      email,
+      role,
+    });
 
     res.status(200).json({ status: "queued" });
   } catch (err) {

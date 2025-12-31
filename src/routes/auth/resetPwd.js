@@ -6,6 +6,7 @@ import User from "../../models/User.js";
 import otpGenerator from "otp-generator";
 import sendEmail from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
+import Broker from "../../models/Broker.js";
 
 const router = Router();
 
@@ -13,30 +14,42 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
   try {
     await dbConnect();
 
-    const { email } = req.body;
-    if (!email)
+    const { email, isPartner } = req.body;
+
+    if (!email) {
       return res.status(400).json({ success: false, msg: "Email is required" });
+    }
 
-    const user = await User.findOne({ "basic.email": email });
-    if (!user)
-      return res.status(404).json({ success: false, msg: "User not found" });
+    const normalizedEmail = email.trim().toLowerCase();
 
-    // Generate 6-digit OTP
+    let account;
+
+    if (isPartner) {
+      account = await Broker.findOne({ email: normalizedEmail });
+    } else {
+      account = await User.findOne({ "basic.email": normalizedEmail });
+    }
+
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        msg: isPartner ? "Partner not found" : "User not found",
+      });
+    }
+
     const otp = otpGenerator.generate(6, {
       upperCaseAlphabets: false,
-      specialChars: false,
       lowerCaseAlphabets: false,
+      specialChars: false,
     });
 
-    // Store in Redis with expiry (5 minutes)
-    await upStash.set(`otp:${email}`, otp, { ex: 300 });
+    await upStash.set(`otp:${email}`, otp, { ex: 300 }); // 5 minutes
 
-    // Send OTP email
     await sendEmail({
-      to: [{ email: email }],
-      template_id: "password_reset_28", // MSG91 Template ID
+      to: [{ email: normalizedEmail }],
+      template_id: "password_reset_28",
       variables: {
-        otp: otp,
+        otp,
       },
     });
 
@@ -45,8 +58,11 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
       msg: "OTP sent to your registered email",
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, msg: "Server error" });
+    console.error("Request reset error:", err);
+    res.status(500).json({
+      success: false,
+      msg: "Server error",
+    });
   }
 });
 
@@ -75,29 +91,60 @@ router.post("/verify-otp", async (req, res) => {
     res.status(500).json({ success: false, msg: "Server error" });
   }
 });
-
 router.post("/reset-password", async (req, res) => {
-  const { email, newPassword } = req.body;
+  const { email, newPassword, isPartner } = req.body;
+
+  if (!email || !newPassword) {
+    return res
+      .status(400)
+      .json({ success: false, msg: "Email and new password are required" });
+  }
 
   try {
     await dbConnect();
 
     const verified = await upStash.get(`otp_verified:${email}`);
-    if (!verified)
+    if (!verified) {
       return res
         .status(400)
         .json({ success: false, msg: "OTP not verified or expired" });
+    }
 
-    const hashed = await bcrypt.hash(newPassword, 10);
-    await User.findOneAndUpdate(
-      { "basic.email": email },
-      { "basic.password": hashed }
-    );
+    // Hash password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    if (isPartner) {
+      // 🔐 Reset Broker password
+      const broker = await Broker.findOneAndUpdate(
+        { email: email.toLowerCase().trim() },
+        { password: hashedPassword }
+      );
+
+      if (!broker) {
+        return res
+          .status(404)
+          .json({ success: false, msg: "Partner not found" });
+      }
+    } else {
+      // 🔐 Reset User password
+      const user = await User.findOneAndUpdate(
+        { "basic.email": email.toLowerCase().trim() },
+        { "basic.password": hashedPassword }
+      );
+
+      if (!user) {
+        return res.status(404).json({ success: false, msg: "User not found" });
+      }
+    }
+
     await upStash.del(`otp_verified:${email}`);
 
-    res.json({ success: true, msg: "Password reset successful" });
+    res.json({
+      success: true,
+      msg: "Password reset successful",
+    });
   } catch (err) {
-    console.error(err);
+    console.error("Reset password error:", err);
     res.status(500).json({ success: false, msg: "Server error" });
   }
 });

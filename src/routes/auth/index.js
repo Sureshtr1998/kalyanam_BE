@@ -8,6 +8,7 @@ import validationRoutes from "./validations.js";
 import transactionsRoutes from "./transactions.js";
 import astrologyRoutes from "./astrology.js";
 import reportRoutes from "./report.js";
+import brokerRoutes from "./broker.js";
 
 const router = Router();
 
@@ -28,5 +29,7 @@ router.use(transactionsRoutes);
 router.use(astrologyRoutes);
 
 router.use(reportRoutes);
+
+router.use(brokerRoutes);
 
 export default router;

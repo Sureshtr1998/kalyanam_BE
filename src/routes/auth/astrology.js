@@ -94,7 +94,7 @@ router.post("/astro-data", auth, async (req, res) => {
     const delay =
       currentUser.basic.fullName === "Suresh TR" ? "1m" : getAstrologyDelay();
 
-    await publishQStash("astrology", { uniqueId, email }, delay);
+    await publishQStash("astrology", { uniqueId, email, role: "USER" }, delay);
 
     return res.status(201).json({
       msg: "Astrology data saved successfully",
