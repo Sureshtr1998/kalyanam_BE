@@ -9,6 +9,7 @@ import transactionsRoutes from "./transactions.js";
 import astrologyRoutes from "./astrology.js";
 import reportRoutes from "./report.js";
 import brokerRoutes from "./broker.js";
+import adminRoutes from "./admin.js";
 
 const router = Router();
 
@@ -31,5 +32,7 @@ router.use(astrologyRoutes);
 router.use(reportRoutes);
 
 router.use(brokerRoutes);
+
+router.use(adminRoutes);
 
 export default router;

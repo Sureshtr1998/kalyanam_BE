@@ -144,31 +144,43 @@ router.post("/user-register", async (req, res) => {
         caste: [caste],
         motherTongue: [motherTongue],
       },
-      transactions: [
-        {
-          orderId,
-          paymentId,
-          amountPaid,
-          noOfInterest: totalNoOfInterest,
-          note,
-        },
-      ],
+      transactions: [],
     });
+
+    if (orderId) {
+      newUser.transactions.push({
+        orderId,
+        paymentId,
+        amountPaid,
+        noOfInterest: totalNoOfInterest,
+        note,
+      });
+    }
 
     await newUser.save();
     await upStash.del(`${PENDING_PAYMENT}${emailNormalized}`);
 
-    await sendEmail({
-      to: [{ email: emailNormalized }],
-      template_id: "welcome_user_2", // MSG91 Template ID
-      variables: {
-        userName: fullName,
-        orderId,
-        paymentId,
-        numInterests: totalNoOfInterest,
-        amount: amountPaid,
-      },
-    });
+    if (orderId) {
+      await sendEmail({
+        to: [{ email: emailNormalized }],
+        template_id: "welcome_user_2", // MSG91 Template ID
+        variables: {
+          userName: fullName,
+          orderId,
+          paymentId,
+          numInterests: totalNoOfInterest,
+          amount: amountPaid,
+        },
+      });
+    } else {
+      await sendEmail({
+        to: [{ email: emailNormalized }],
+        template_id: "welcome_free_user", // MSG91 Template ID
+        variables: {
+          userName: fullName,
+        },
+      });
+    }
 
     const token = jwt.sign(
       { id: newUser._id, role: "USER" },
@@ -270,6 +282,12 @@ router.post("/login", async (req, res) => {
       });
     }
 
+    // @ts-ignore
+    if (account?.isCorrupted) {
+      return res.status(403).json({
+        msg: "Your profile has violated our policy. Contact admin to review your account.",
+      });
+    }
     return res.json({
       id: account._id,
       // @ts-ignore
@@ -279,6 +297,8 @@ router.post("/login", async (req, res) => {
       // @ts-ignore
       mobile: account.basic.mobile,
       role: "USER",
+      // @ts-ignore
+      isAdmin: account.isAdmin,
       token,
     });
   } catch (err) {

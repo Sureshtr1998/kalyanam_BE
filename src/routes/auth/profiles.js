@@ -190,6 +190,25 @@ router.post("/fetch-profiles", auth, async (req, res) => {
         limit,
       });
     } else {
+      // ADMIN USERS
+      if (currentUser.isAdmin) {
+        const totalProfiles = await User.countDocuments();
+
+        // Fetch paginated profiles
+        const profiles = await User.find()
+          .sort({ isVerified: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean();
+
+        return res.json({
+          profiles,
+          totalProfiles,
+          totalPages: Math.ceil(totalProfiles / limit),
+          page,
+          limit,
+        });
+      }
       // For Users
       const oppositeGender =
         currentUser.basic.gender.toLowerCase() === "male" ? "female" : "male";
@@ -250,6 +269,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
         "basic.gender": { $regex: new RegExp(`^${oppositeGender}$`, "i") },
         _id: { $ne: currentUser._id, $nin: excludedIds },
         isHidden: false,
+        isCorrupted: { $ne: true },
         hideProfiles: { $ne: currentUser._id },
       };
 

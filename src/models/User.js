@@ -121,6 +121,8 @@ const userSchema = new Schema(
     ],
     hasCompleteProfile: { type: Boolean, default: false },
     isVerified: { type: Boolean, default: false },
+    isAdmin: { type: Boolean, default: false },
+    isCorrupted: { type: Boolean, default: false },
     isHidden: { type: Boolean, default: false },
     hideProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },
   },
