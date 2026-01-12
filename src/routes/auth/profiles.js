@@ -196,7 +196,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
         // Fetch paginated profiles
         const profiles = await User.find()
-          .sort({ isVerified: -1, createdAt: -1 })
+          .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
           .lean();
