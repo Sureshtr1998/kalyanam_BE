@@ -10,12 +10,11 @@ async function dbConnect() {
   if (cached.conn) return cached.conn;
 
   if (!cached.promise) {
-    cached.promise = mongoose
-      .connect(process.env.MONGO_URI, {
-        bufferCommands: false, // avoid buffering when connection fails
-        serverSelectionTimeoutMS: 10000, // wait max 10s
-      })
-      .then((mongoose) => mongoose);
+    cached.promise = mongoose.connect(process.env.MONGO_URI, {
+      bufferCommands: false, // avoid buffering when connection fails
+      serverSelectionTimeoutMS: 10000, // wait max 10s
+      maxPoolSize: 5,
+    });
   }
 
   cached.conn = await cached.promise;
