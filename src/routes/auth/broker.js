@@ -8,10 +8,7 @@ import { brokerAuth } from "../../middleware/auth.js";
 import { notify } from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { uploadToImageKit } from "../../utils/utils.js";
-import {
-  SUPPORT_EMAIL,
-  normalizeEmail,
-} from "../../utils/constants.js";
+import { normalizeEmail } from "../../utils/constants.js";
 import {
   HttpError,
   resolvePaidOrder,
@@ -71,7 +68,7 @@ router.post(
       const media = [];
       for (const file of files) {
         const result = /** @type {any} */ (
-          await uploadToImageKit(file.buffer, file.originalname, "/broker_id_proofs")
+          await uploadToImageKit(file.buffer, file.originalname, "/broker_id_proofs", true)
         );
         media.push({ url: result.url, fileId: result.fileId });
       }
@@ -142,11 +139,12 @@ router.post("/broker-register", async (req, res) => {
     });
 
     notify({
-      to: [{ email: SUPPORT_EMAIL }],
-      template_id: "user_register_2",
+      to: [{ email: data.email }],
+      template_id: "broker_registration",
       variables: {
-        note: "New partner registration",
-        payload: `PARTNER: ${data.name} | ${data.email} | ${data.phone} | ₹${record.amountCharged} | ${paymentId}. Approve it in the admin panel.`,
+        userName: data.name,
+        paymentId,
+        amount: record.amountCharged,
       },
     });
 

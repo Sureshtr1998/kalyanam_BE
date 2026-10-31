@@ -8,7 +8,6 @@ import { SUPPORT_EMAIL } from "../utils/constants.js";
  * @param {Object} options.variables - dynamic variables for the template
  */
 const sendEmail = async ({ to, template_id, variables = {} }) => {
-  if (template_id === "user_register_2") return;
   try {
     const response = await axios.post(
       process.env.MSG91_EMAIL_API,

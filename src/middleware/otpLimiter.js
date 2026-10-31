@@ -116,8 +116,6 @@ export const orderLimiter = limiter(
 
 export const verifyOtpLimiter = limiter("verify-otp", 10 * 60 * 1000, 20, "Too many attempts. Try again later.");
 
-export const reportLimiter = limiter("report", 10 * 60 * 1000, 5, "Too many reports. Try again later.");
-
 // Email / phone availability checks, to slow down account enumeration.
 export const lookupLimiter = limiter("lookup", 10 * 60 * 1000, 40, "Too many requests. Try again later.");
 

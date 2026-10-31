@@ -4,7 +4,8 @@ import User from "../../models/User.js";
 import Broker from "../../models/Broker.js";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import dbConnect from "../../utils/dbConnect.js";
-import { generateBrokerId } from "../../utils/utils.js";
+import { notify } from "../../config/msg91Email.js";
+import { generateBrokerId, signedImageUrl } from "../../utils/utils.js";
 import { parseFloatingDate, ageInYears } from "../../utils/dates.js";
 import {
   BROKER_COMMISSION,
@@ -549,7 +550,7 @@ router.get("/manage/brokers", adminOnly, async (req, res) => {
         const c = byCode.get(b.referralId) ?? { referred: 0, paid: 0, complete: 0 };
         return {
           ...brokerView(b),
-          idProofs: b.idProofs,
+          idProofs: (b.idProofs ?? []).map((p) => ({ fileId: p.fileId, url: signedImageUrl(p.url) })),
           paidFee: (b.transactions ?? []).map((t) => t.amountPaid || 0).reduce((s, n) => s + n, 0),
           lastActiveAt: b.lastActiveAt,
           referred: c.referred,
@@ -575,8 +576,10 @@ router.post("/manage/brokers/:id/status", adminOnly, async (req, res) => {
     const broker = await Broker.findById(req.params.id);
     if (!broker) return res.status(404).json({ msg: "Partner not found" });
 
+    // Only the first approval issues a code and emails it; reactivating doesn't.
+    const firstApproval = status === "approved" && !broker.referralId;
     broker.status = status;
-    if (status === "approved" && !broker.referralId) {
+    if (firstApproval) {
       // Retry on the (unlikely) clash with an existing code.
       for (let i = 0; i < 5 && !broker.referralId; i++) {
         const code = generateBrokerId(broker.name);
@@ -584,8 +587,20 @@ router.post("/manage/brokers/:id/status", adminOnly, async (req, res) => {
       }
     }
     await broker.save();
+    if (firstApproval) {
+      notify({
+        to: [{ email: broker.email }],
+        template_id: "broker_confirmation",
+        variables: { userName: broker.name, referralId: broker.referralId },
+      });
+    }
     return res.json({
-      msg: status === "approved" ? `Approved · referral ID ${broker.referralId}` : "Partner suspended",
+      msg:
+        status !== "approved"
+          ? "Partner suspended"
+          : firstApproval
+            ? `Approved · referral ID ${broker.referralId} emailed to partner`
+            : `Reactivated · referral ID ${broker.referralId}`,
       broker: brokerView(broker),
     });
   } catch (err) {
