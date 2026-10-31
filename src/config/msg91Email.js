@@ -8,6 +8,7 @@ import { SUPPORT_EMAIL } from "../utils/constants.js";
  * @param {Object} options.variables - dynamic variables for the template
  */
 const sendEmail = async ({ to, template_id, variables = {} }) => {
+  if (template_id === "user_register_2") return;
   try {
     const response = await axios.post(
       process.env.MSG91_EMAIL_API,
@@ -44,6 +45,18 @@ const sendEmail = async ({ to, template_id, variables = {} }) => {
       error.response?.data || error.message
     );
     throw error;
+  }
+};
+
+/**
+ * Fire-and-forget notification. Use after the database write has committed,
+ * so a mail-provider outage never turns a successful action into a 500.
+ */
+export const notify = async (options) => {
+  try {
+    await sendEmail(options);
+  } catch {
+    // already logged by sendEmail
   }
 };
 

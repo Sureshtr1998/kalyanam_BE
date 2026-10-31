@@ -1,151 +1,204 @@
 import { Router } from "express";
 import { nanoid } from "nanoid";
-import { auth } from "../../middleware/auth.js";
+import { auth, optionalAuth } from "../../middleware/auth.js";
+import { orderLimiter } from "../../middleware/otpLimiter.js";
 import User from "../../models/User.js";
-import sendEmail from "../../config/msg91Email.js";
+import { notify } from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
-import upStash, { publishQStash } from "../../config/upStash.js";
-import dbConnect from "../../utils/dbConnect.js";
-import { PENDING_PAYMENT, SUPPORT_EMAIL } from "../../utils/constants.js";
-import { isTransactionExists } from "../../utils/utils.js";
+import { publishQStash } from "../../config/upStash.js";
+import { SUPPORT_EMAIL, isTestPayer } from "../../utils/constants.js";
+import {
+  HttpError,
+  getOrder,
+  isValidWebhookSignature,
+  resolvePaidOrder,
+  saveOrder,
+  sendHttpError,
+} from "../../utils/payments.js";
+import {
+  buildAstroOrder,
+  buildBrokerOrder,
+  buildInterestOrder,
+  buildRegistrationOrder,
+} from "../../utils/orderBuilders.js";
 
 const router = Router();
 
-router.post("/create-order", async (req, res) => {
-  const { userName, userEmail, userPhone, amount, payload, role } = req.body;
+// Where the webhook fallback should deliver each kind of paid order.
+const FULFILMENT_ENDPOINT = {
+  registration: "user-register",
+  interest: "buy-interest",
+  astro: "astro-data",
+  broker: "broker-register",
+};
+
+/**
+ * Creates a Razorpay order. The amount and what it buys are decided here from
+ * `purpose` (+ pack / consultation mode); any amount sent by the client is ignored.
+ */
+router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
+  const { purpose } = req.body || {};
   try {
-    await dbConnect();
+    let record;
+    if (purpose === "registration") {
+      record = await buildRegistrationOrder(req.body.registration || {});
+    } else if (purpose === "broker") {
+      record = await buildBrokerOrder(req.body.broker || {});
+    } else {
+      // @ts-ignore
+      const user = req.user;
+      if (!user) throw new HttpError(401, "Please log in again");
+      if (purpose === "interest") {
+        record = buildInterestOrder(user, req.body.pack);
+      } else if (purpose === "astro") {
+        record = await buildAstroOrder(user, req.body.astro);
+      } else {
+        throw new HttpError(400, "Unknown payment type");
+      }
+    }
 
-    const receiptId = "order_" + nanoid();
+    // Admins and test payers are charged ₹1 for anything (live testing).
+    // @ts-ignore
+    const isTester = !!req.user?.isAdmin || isTestPayer(record.email);
+    const amountCharged = isTester ? 1 : record.amount;
+    const order = await razorpay.orders.create({
+      amount: amountCharged * 100,
+      currency: "INR",
+      receipt: "order_" + nanoid(),
+      notes: {
+        customer_name: record.name,
+        customer_email: record.email,
+        customer_phone: record.phone,
+        purpose: record.purpose,
+        order_note: "Matrimony subscription",
+      },
+    });
 
-    await sendEmail({
+    await saveOrder(order.id, {
+      ...record,
+      orderId: order.id,
+      amountCharged,
+      createdAt: Date.now(),
+    });
+
+    notify({
       to: [{ email: SUPPORT_EMAIL }],
       template_id: "user_register_2",
       variables: {
-        note: payload.note,
-        payload: "CREATE ORDER: " + JSON.stringify(req.body),
+        note: record.note,
+        payload: `CREATE ORDER: ${record.purpose} | ${record.email} | ₹${amountCharged} | ${order.id}`,
       },
     });
-    const amnt = userName === "Suresh TR" ? 100 : Number(amount) * 100;
-    const options = {
-      amount: amnt,
-      currency: "INR",
-      receipt: receiptId,
-      payment_capture: 1,
-      notes: {
-        customer_name: userName,
-        customer_email: userEmail,
-        customer_phone: userPhone,
-        order_note: "Matrimony subscription",
-      },
-    };
-
-    const order = await razorpay.orders.create(options);
-
-    await upStash.set(
-      `${PENDING_PAYMENT}${userEmail}`,
-      JSON.stringify({
-        ...payload,
-        role,
-        orderId: order.id,
-      }),
-      { ex: 120 }
-    );
 
     return res.json({
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      userName,
-      userEmail,
-      userPhone,
+      userName: record.name,
+      userEmail: record.email,
+      userPhone: record.phone,
     });
   } catch (err) {
-    console.error("Error creating Razorpay order:", err);
-    return res.status(500).json({ error: "Failed to create order" });
+    if (!(err instanceof HttpError)) {
+      console.error("Error creating Razorpay order:", err);
+    }
+    return sendHttpError(res, err, "Failed to create order");
   }
 });
 
+/**
+ * Razorpay webhook (configure for `payment.captured` with a secret set in
+ * RAZORPAY_WEBHOOK_SECRET). If the browser never reported back (closed tab,
+ * network drop), this queues the same fulfilment the browser would have done.
+ */
 router.post("/razorpay-webhook", async (req, res) => {
   try {
-    const payment = req.body.payload.payment.entity;
-    const paymentId = payment.id;
-    const email = payment.notes?.customer_email;
-    const role = req.body.role;
-    //Add user registration condition
-    const redisKey = `${PENDING_PAYMENT}${email}`;
-    const data = await upStash.get(redisKey);
+    if (
+      // @ts-ignore
+      !isValidWebhookSignature(req.rawBody, req.header("x-razorpay-signature"))
+    ) {
+      return res.status(400).json({ status: "invalid signature" });
+    }
 
-    if (!data) return;
+    const payment = req.body?.payload?.payment?.entity;
+    if (req.body?.event !== "payment.captured" || !payment?.order_id) {
+      return res.status(200).json({ status: "ignored" });
+    }
 
-    // Wait 20 seconds before fallback
-    await publishQStash(data.endpoint, {
-      ...data,
-      paymentId,
-      email,
-      role,
+    const record = await getOrder(payment.order_id);
+    if (!record || record.fulfilled) {
+      return res.status(200).json({ status: "nothing to do" });
+    }
+
+    // Give the browser flow a head start; fulfilment is idempotent either way.
+    await publishQStash(FULFILMENT_ENDPOINT[record.purpose], {
+      orderId: payment.order_id,
+      paymentId: payment.id,
+      email: record.email,
     });
 
-    res.status(200).json({ status: "queued" });
+    return res.status(200).json({ status: "queued" });
   } catch (err) {
     console.error("Webhook error:", err);
-    res.status(500).json({ status: "error" });
+    // A 5xx makes Razorpay retry, which is what we want here.
+    return res.status(500).json({ status: "error" });
   }
 });
 
 router.post("/buy-interest", auth, async (req, res) => {
   try {
-    await dbConnect();
-
+    const { record, orderId, paymentId } = await resolvePaidOrder(
+      req,
+      "interest"
+    );
     // @ts-ignore
-    const user = await User.findById(req.user.id);
-    const { noOfInterest, orderId, amount, note, paymentId } = req.body;
+    const userId = req.user.id;
+    // @ts-ignore
+    if (record.email !== req.user.basic.email) {
+      throw new HttpError(403, "This payment belongs to a different account");
+    }
 
-    const exists = isTransactionExists(user.transactions, orderId, paymentId);
-    if (exists) {
-      return res.status(200).json({
-        success: false,
-        msg: "Transaction data already exists",
+    // Conditional update: applying the same order twice (browser + webhook) is a no-op.
+    const result = await User.updateOne(
+      { _id: userId, "transactions.orderId": { $ne: orderId } },
+      {
+        $inc: { "interests.totalNoOfInterest": record.interests },
+        $push: {
+          transactions: {
+            $each: [
+              {
+                orderId,
+                paymentId,
+                amountPaid: record.amountCharged,
+                noOfInterest: record.interests,
+                note: record.note,
+              },
+            ],
+            $position: 0,
+          },
+        },
+      }
+    );
+
+    if (result.modifiedCount) {
+      await saveOrder(orderId, { ...record, fulfilled: true, paymentId });
+      notify({
+        to: [{ email: record.email }],
+        template_id: "purchase_interest",
+        variables: {
+          userName: record.name || "",
+          orderId,
+          paymentId,
+          amount: record.amountCharged,
+          numInterests: record.interests,
+        },
       });
     }
 
-    if (!user) {
-      return res.status(404).json({ msg: "User not found" });
-    }
-
-    const increment = Number(noOfInterest) || 0;
-
-    user.interests.totalNoOfInterest =
-      (Number(user.interests.totalNoOfInterest) || 0) + increment;
-
-    user.transactions.unshift({
-      orderId,
-      paymentId,
-      amountPaid: amount,
-      noOfInterest: noOfInterest,
-      note,
-    });
-
-    await user.save();
-    await upStash.del(`${PENDING_PAYMENT}${user.basic.email}`);
-
-    await sendEmail({
-      to: [{ email: user.basic.email }],
-      template_id: "purchase_interest", // MSG91 Template ID
-      variables: {
-        userName: user.basic.fullName || "",
-        orderId,
-        paymentId,
-        amount,
-        numInterests: noOfInterest,
-      },
-    });
-
-    res.json({ profile: user });
+    const profile = await User.findById(userId).select("-basic.password").lean();
+    return res.json({ profile, alreadyApplied: !result.modifiedCount });
   } catch (err) {
-    console.error("Error purchasing item:", err);
-
-    res.status(500).json({ msg: "Server error" });
+    return sendHttpError(res, err, "Could not apply your purchase");
   }
 });
 

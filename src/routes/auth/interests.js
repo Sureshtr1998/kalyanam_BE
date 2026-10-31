@@ -1,8 +1,10 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { auth } from "../../middleware/auth.js";
-import sendEmail from "../../config/msg91Email.js";
+import { notify } from "../../config/msg91Email.js";
 import User from "../../models/User.js";
 import dbConnect from "../../utils/dbConnect.js";
+import { canView, isBlocked } from "../../utils/matching.js";
 
 const router = Router();
 
@@ -14,18 +16,15 @@ const remainingInterests = (user) => {
   return total - (sent + viewed);
 };
 
+const hasId = (list = [], id) => list.some((x) => x.equals(id));
+
 router.post("/send-interest", auth, async (req, res) => {
   try {
     await dbConnect();
 
-    // @ts-ignore
-    const sender = await User.findById(req.user.id);
-    const { receiverId } = req.body;
-
-    const receiver = await User.findById(receiverId);
-
-    if (!sender || !receiver) {
-      return res.status(404).json({ msg: "User not found" });
+    const { receiverId } = req.body || {};
+    if (!mongoose.isValidObjectId(receiverId)) {
+      return res.status(400).json({ msg: "Invalid profile" });
     }
 
     // @ts-ignore
@@ -33,8 +32,23 @@ router.post("/send-interest", auth, async (req, res) => {
       return res.status(400).json({ msg: "Cannot send interest to yourself" });
     }
 
-    if (sender.interests.sent.includes(receiver._id)) {
+    // @ts-ignore
+    const sender = await User.findById(req.user.id);
+    const receiver = await User.findById(receiverId);
+
+    if (!sender || !receiver) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    if (hasId(sender.interests.sent, receiver._id)) {
       return res.status(400).json({ msg: "Interest already sent" });
+    }
+
+    // Two-way matching: you can only reach members whose preferences
+    // include you (unless they reached out to you first).
+    const theyReachedOut = hasId(sender.interests.received, receiver._id);
+    if (isBlocked(sender, receiver) || (!theyReachedOut && !canView(sender, receiver))) {
+      return res.status(403).json({ msg: "This profile is not available" });
     }
 
     if (remainingInterests(sender) < 1) {
@@ -45,13 +59,15 @@ router.post("/send-interest", auth, async (req, res) => {
 
     // Add interest
     sender.interests.sent.unshift(receiver._id);
-    receiver.interests.received.unshift(sender._id);
+    if (!hasId(receiver.interests.received, sender._id)) {
+      receiver.interests.received.unshift(sender._id);
+    }
 
     // Save both users
     await sender.save();
     await receiver.save();
 
-    await sendEmail({
+    notify({
       to: [{ email: receiver.basic.email }],
       template_id: "new_interest", // MSG91 Template ID
       variables: {
@@ -95,7 +111,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
-      "-basic.password -transactions -interests -hideProfiles -__v"
+      "-basic.password -transactions -interests -hideProfiles -astrology -shortlisted -profileViews -__v"
     ).lean();
 
     const sortedUsers = uniqueOrdered
@@ -105,11 +121,14 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
     const finalList = sortedUsers.map((user) => {
       let status = "received";
 
-      if (interests.accepted?.includes(user._id)) status = "accept";
-      else if (interests.declined?.includes(user._id)) status = "decline";
-      else if (interests.sent?.includes(user._id)) status = "sent";
-      else if (interests.received?.includes(user._id)) status = "received";
+      if (hasId(interests.accepted, user._id)) status = "accept";
+      else if (hasId(interests.declined, user._id)) status = "decline";
+      else if (hasId(interests.sent, user._id)) status = "sent";
+      else if (hasId(interests.received, user._id)) status = "received";
 
+      // Contact is shared once an interest is accepted, or if it was unlocked with credits.
+      const showContact =
+        status === "accept" || hasId(interests.viewed, user._id);
       return {
         ...user,
         interests: {
@@ -117,10 +136,9 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
         },
         basic: {
           ...user.basic,
-          mobile: status === "accept" ? user.basic.mobile : undefined,
-          alternateMob:
-            status === "accept" ? user.basic.alternateMob : undefined,
-          email: status === "accept" ? user.basic.email : undefined,
+          mobile: showContact ? user.basic.mobile : undefined,
+          alternateMob: showContact ? user.basic.alternateMob : undefined,
+          email: showContact ? user.basic.email : undefined,
         },
       };
     });
@@ -141,11 +159,14 @@ router.post("/interest-action", auth, async (req, res) => {
   try {
     await dbConnect();
 
-    const { userId, action } = req.body;
+    const { userId, action } = req.body || {};
     // @ts-ignore
     const currentUserId = req.user.id;
 
-    if (!userId || !["accept", "decline"].includes(action)) {
+    if (
+      !mongoose.isValidObjectId(userId) ||
+      !["accept", "decline"].includes(action)
+    ) {
       return res.status(400).json({ msg: "Invalid request data" });
     }
 
@@ -156,30 +177,32 @@ router.post("/interest-action", auth, async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    if (action === "accept") {
-      currentUser.interests.accepted = [
-        userId.toString(),
-        ...(currentUser.interests.accepted || []),
-      ];
-      otherUser.interests.accepted = [
-        currentUserId.toString(),
-        ...(otherUser.interests.accepted || []),
-      ];
-    } else if (action === "decline") {
-      currentUser.interests.declined = [
-        userId.toString(),
-        ...(currentUser.interests.declined || []),
-      ];
-      otherUser.interests.declined = [
-        currentUserId.toString(),
-        ...(otherUser.interests.declined || []),
-      ];
+    // Only an interest that was actually received can be answered. Without
+    // this, "accepting" any id would reveal that member's contact details.
+    if (!hasId(currentUser.interests.received, otherUser._id)) {
+      return res
+        .status(400)
+        .json({ msg: "You have not received an interest from this member" });
+    }
+    if (
+      hasId(currentUser.interests.accepted, otherUser._id) ||
+      hasId(currentUser.interests.declined, otherUser._id)
+    ) {
+      return res
+        .status(400)
+        .json({ msg: "You have already responded to this interest" });
+    }
+
+    const field = action === "accept" ? "accepted" : "declined";
+    currentUser.interests[field].unshift(otherUser._id);
+    if (!hasId(otherUser.interests[field], currentUser._id)) {
+      otherUser.interests[field].unshift(currentUser._id);
     }
 
     await currentUser.save();
     await otherUser.save();
     if (action === "accept") {
-      await sendEmail({
+      notify({
         to: [{ email: otherUser.basic.email }],
         template_id: "accepted_interest", // MSG91 Template ID
         variables: {
@@ -203,19 +226,26 @@ router.post("/view-contact", auth, async (req, res) => {
   try {
     await dbConnect();
 
+    const { receiverId } = req.body || {};
+    // @ts-ignore
+    if (!mongoose.isValidObjectId(receiverId) || req.user.id === receiverId) {
+      return res.status(400).json({ msg: "Invalid profile" });
+    }
+
     // @ts-ignore
     const sender = await User.findById(req.user.id);
-    const { receiverId } = req.body;
-
     const receiver = await User.findById(receiverId);
 
-    // @ts-ignore
-    if (!sender || !receiver || req.user.id === receiverId) {
+    if (!sender || !receiver) {
       return res.status(404).json({ msg: "User not found" });
     }
 
-    if (sender.interests.viewed.includes(receiver._id)) {
+    if (hasId(sender.interests.viewed, receiver._id)) {
       return res.status(400).json({ msg: "Contact already viewed" });
+    }
+    const theyReachedOut = hasId(sender.interests.received, receiver._id);
+    if (isBlocked(sender, receiver) || (!theyReachedOut && !canView(sender, receiver))) {
+      return res.status(403).json({ msg: "This profile is not available" });
     }
     if (remainingInterests(sender) < 5) {
       return res.status(400).json({
@@ -254,7 +284,7 @@ router.get("/view-contact", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
-      "-basic.password -transactions -interests -hideProfiles -__v"
+      "-basic.password -transactions -interests -hideProfiles -astrology -shortlisted -profileViews -__v"
     ).lean();
 
     const sortedUsers = uniqueOrdered

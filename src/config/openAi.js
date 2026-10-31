@@ -1,8 +1,26 @@
 import OpenAI from "openai";
 import dotenv from "dotenv";
+import { DateTime } from "luxon";
 dotenv.config();
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Fail fast so a slow call is retried instead of hanging the whole job.
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 30000,
+  maxRetries: 1,
+});
+
+/**
+ * The model has no clock and drifts to its training year (e.g. "2025 is good
+ * for marriage"), so every prompt is anchored to today's date in India.
+ */
+const dateRules = (now = DateTime.now().setZone("Asia/Kolkata")) => `
+CURRENT DATE:
+Today is ${now.toFormat("d MMMM yyyy")} (current year: ${now.year}).
+- Every year or period you predict MUST be in the future: ${now.year} (only for the months after ${now.toFormat("MMMM")}) or later.
+- NEVER predict a year before ${now.year}. Treat all earlier years as already past.
+- Calculate the person's current age from their birth date and today's date.
+`;
 
 const GLOBAL_RULES = `
 ROLE LOCK:
@@ -25,19 +43,48 @@ NAMING RULES:
 - NEVER use English names like Sun, Moon, Aries, Capricorn, etc.
 `;
 
+const KOOTAS = [
+  ["varna_kootam", "Varna"],
+  ["vasya_kootam", "Vashya"],
+  ["tara_kootam", "Tara"],
+  ["yoni_kootam", "Yoni"],
+  ["graha_maitri_kootam", "Graha Maitri"],
+  ["gana_kootam", "Gana"],
+  ["rasi_kootam", "Bhakoot (Rasi)"],
+  ["nadi_kootam", "Nadi"],
+];
+
+const kootaLines = (guna) =>
+  KOOTAS.map(
+    ([key, name]) => `- ${name}: ${guna[key]?.score} / ${guna[key]?.out_of}`
+  ).join("\n");
+
+/** Traditional bands: 18 of 36 is the usual minimum for marriage. */
+const gunaVerdict = (score) =>
+  score >= 33
+    ? "Excellent Match"
+    : score >= 25
+    ? "Good Match"
+    : score >= 18
+    ? "Average Match"
+    : "Not Recommended";
+
 export async function generateAstroInsights({
   kundli1,
   kundli2 = null,
+  guna = null,
   query = "",
   gender1,
   gender2,
   consultationMode,
 }) {
   let prompt = "";
+  const rules = `${GLOBAL_RULES}
+${dateRules()}`;
 
   if (consultationMode === "Overview") {
     prompt = `
-${GLOBAL_RULES}
+${rules}
 
 You are analyzing a single birth chart.
 
@@ -62,7 +109,7 @@ JSON FORMAT:
 `;
   } else if (consultationMode === "Personalized") {
     prompt = `
-${GLOBAL_RULES}
+${rules}
 
 You are analyzing a single birth chart and answering the user's question as a purohit.
 
@@ -96,9 +143,10 @@ JSON FORMAT:
 `;
   } else if (consultationMode === "Kundli Matching") {
     prompt = `
-${GLOBAL_RULES}
+${rules}
 
-You are analyzing marriage compatibility using traditional Guna Milan.
+You are explaining a traditional Ashtakoota (Guna Milan) result.
+The points below are already calculated. Do NOT change or recalculate them.
 
 Partner 1 (Gender: ${gender1}):
 ${JSON.stringify(kundli1)}
@@ -106,21 +154,18 @@ ${JSON.stringify(kundli1)}
 Partner 2 (Gender: ${gender2}):
 ${JSON.stringify(kundli2)}
 
+Guna Milan: ${guna.total_score} out of ${guna.out_of}
+${kootaLines(guna)}
+
 Instructions:
-1. Provide a 3–4 line compatibility summary as ONE string.
-2. Give a score from 0 to 100.
-3. Verdict rules:
-   - >= 80 → "Excellent Match"
-   - 65–79 → "Good Match"
-   - 50–64 → "Average Match"
-   - < 50 → "Does Not Match"
+1. Write a 4–5 line compatibility summary as ONE string.
+2. Mention the strongest kootas and the weakest ones by name.
+3. If Nadi scores 0 (Nadi dosha) or Bhakoot/Rasi scores 0 (Bhakoot dosha), say so plainly and name one traditional remedy.
 4. Respond STRICTLY in JSON.
 
 JSON FORMAT:
 {
-  "compatibility_summary": string,
-  "score": number,
-  "verdict": string
+  "compatibility_summary": string
 }
 `;
   }
@@ -129,7 +174,23 @@ JSON FORMAT:
     model: "gpt-4.1",
     messages: [{ role: "user", content: prompt }],
     temperature: 0.6,
+    response_format: { type: "json_object" },
   });
 
-  return response.choices[0].message.content;
+  const content = response.choices[0].message.content;
+  if (consultationMode !== "Kundli Matching") return content;
+
+  // Score and verdict come from the calculation, never from the model.
+  const { compatibility_summary } = JSON.parse(content);
+  return JSON.stringify({
+    compatibility_summary,
+    score: guna.total_score,
+    out_of: guna.out_of,
+    verdict: gunaVerdict(guna.total_score),
+    kootas: KOOTAS.map(([key, name]) => ({
+      name,
+      score: guna[key]?.score,
+      out_of: guna[key]?.out_of,
+    })),
+  });
 }

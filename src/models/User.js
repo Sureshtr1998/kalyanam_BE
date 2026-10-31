@@ -9,9 +9,9 @@ const userSchema = new Schema(
       email: { type: String, required: true, unique: true },
       qualification: { type: String, required: true },
       password: { type: String, required: true },
-      subCaste: { type: String },
-      caste: { type: String, required: true },
-      gothra: { type: String },
+      subCaste: { type: String, default: "" },
+      caste: { type: String, default: "brahmin" },
+      gothra: { type: String, default: "" },
       mobile: { type: String, required: true, unique: true },
       alternateMob: { type: String },
       gender: { type: String, required: true },
@@ -109,6 +109,11 @@ const userSchema = new Schema(
         mDob: { type: Date },
         place: { type: String },
         mPlace: { type: String },
+        // Birthplace coordinates, when picked from the place search.
+        lat: { type: Number },
+        lng: { type: Number },
+        mLat: { type: Number },
+        mLng: { type: Number },
         gender: { type: String },
         mGender: { type: String },
         consultationMode: { type: String },
@@ -121,14 +126,40 @@ const userSchema = new Schema(
     ],
     hasCompleteProfile: { type: Boolean, default: false },
     isVerified: { type: Boolean, default: false },
-    isAdmin: { type: Boolean, default: false },
-    isCorrupted: { type: Boolean, default: false },
     isHidden: { type: Boolean, default: false },
+    // Policy violation: hidden from matches and unable to log in until an
+    // admin clears it (see /manage/users/:id/corrupt).
+    isCorrupted: { type: Boolean, default: false },
+    // Admins use the site as normal members and also get the admin panel.
+    // Only set directly in the database or by another admin.
+    isAdmin: { type: Boolean, default: false },
+    // Referral (basic.referralId holds the broker's code). The broker is paid
+    // a commission per referred registration, outside the site.
+    brokerUnlinked: { type: Boolean, default: false },
+    commissionPaidAt: { type: Date },
+    // Internal note visible only to admins / the member's broker.
+    staffNote: { type: String },
+    // Blocking is mutual: neither side sees the other in matches.
     hideProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    shortlisted: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    // Newest first, capped (see /profile-view).
+    profileViews: {
+      type: [
+        {
+          user: { type: mongoose.Schema.Types.ObjectId },
+          at: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+    lastActiveAt: { type: Date },
+    // Tokens issued before this are refused (see middleware/auth.js).
+    passwordChangedAt: { type: Date },
   },
   { timestamps: true }
 );
 userSchema.index({ createdAt: -1 });
+userSchema.index({ "basic.gender": 1, isHidden: 1, hasCompleteProfile: 1 });
 const User = model("User", userSchema);
 
 export default User;
