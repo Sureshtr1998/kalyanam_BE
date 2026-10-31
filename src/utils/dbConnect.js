@@ -17,7 +17,14 @@ async function dbConnect() {
     });
   }
 
-  cached.conn = await cached.promise;
+  try {
+    cached.conn = await cached.promise;
+  } catch (err) {
+    // Don't keep a rejected promise around, or a warm instance would fail
+    // every request until it's recycled. The next request retries.
+    cached.promise = null;
+    throw err;
+  }
   return cached.conn;
 }
 

@@ -1,11 +1,56 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { auth } from "../../middleware/auth.js";
 import imageKit from "../../config/imageKit.js";
 import User from "../../models/User.js";
-import sendEmail from "../../config/msg91Email.js";
+import { notify } from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
 
 const router = Router();
+
+/** Deletes a member, their photos, and every reference other members hold to them. */
+/** @param {InstanceType<typeof User>} user */
+export const removeMember = async (user) => {
+  for (const image of user.basic?.images || []) {
+    try {
+      await imageKit.deleteFile(image.fileId);
+    } catch (err) {
+      console.error("Error deleting ImageKit image:", /** @type {Error} */ (err).message);
+    }
+  }
+
+  await User.findByIdAndDelete(user._id);
+
+  // Drop dangling references so other members' lists don't show a ghost row.
+  const oid = user._id;
+  await User.updateMany(
+    {
+      $or: [
+        { "interests.sent": oid },
+        { "interests.received": oid },
+        { "interests.accepted": oid },
+        { "interests.declined": oid },
+        { "interests.viewed": oid },
+        { hideProfiles: oid },
+        { shortlisted: oid },
+        { "profileViews.user": oid },
+      ],
+    },
+    {
+      $pull: {
+        "interests.sent": oid,
+        "interests.received": oid,
+        "interests.accepted": oid,
+        "interests.declined": oid,
+        "interests.viewed": oid,
+        hideProfiles: oid,
+        shortlisted: oid,
+        profileViews: { user: oid },
+      },
+    }
+  );
+};
+
 router.delete("/delete-account", auth, async (req, res) => {
   try {
     await dbConnect();
@@ -17,26 +62,13 @@ router.delete("/delete-account", auth, async (req, res) => {
       return res.status(404).json({ success: false, msg: "User not found" });
     }
 
-    // @ts-ignore
-    if (user.images && user.images.length > 0) {
-      // @ts-ignore
-      for (const image of user.images) {
-        try {
-          // @ts-ignore
-          await imagekit.deleteFile(image.fileId);
-        } catch (err) {
-          console.error("Error deleting ImageKit image:", err.message);
-        }
-      }
-    }
+    await removeMember(user);
 
-    await User.findByIdAndDelete(userId);
-
-    await sendEmail({
-      to: [{ email: user.basic.email }],
+    notify({
+      to: [{ email: user.basic?.email }],
       template_id: "account_deletion_3", // MSG91 Template ID
       variables: {
-        user_name: user.basic.fullName || "",
+        user_name: user.basic?.fullName || "",
       },
     });
 
@@ -68,11 +100,11 @@ router.post("/hide-profile", auth, async (req, res) => {
       currentUser.isHidden = true;
       await currentUser.save();
 
-      await sendEmail({
-        to: [{ email: currentUser.basic.email }],
+      notify({
+        to: [{ email: currentUser.basic?.email }],
         template_id: "account_hidden", // MSG91 Template ID
         variables: {
-          user_name: currentUser.basic.fullName || "",
+          user_name: currentUser.basic?.fullName || "",
         },
       });
 
@@ -82,14 +114,18 @@ router.post("/hide-profile", auth, async (req, res) => {
       });
     }
 
-    if (!currentUser.hideProfiles.includes(userId)) {
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ success: false, msg: "Invalid profile" });
+    }
+
+    if (!currentUser.hideProfiles.some((id) => id.equals(userId))) {
       currentUser.hideProfiles.unshift(userId);
       await currentUser.save();
     }
 
     return res.status(200).json({
       success: true,
-      msg: "User profile hidden successfully",
+      msg: "Profile hidden. You can unhide it from Activity → Hidden.",
       hideProfiles: currentUser.hideProfiles,
     });
   } catch (err) {

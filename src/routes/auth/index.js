@@ -8,8 +8,9 @@ import validationRoutes from "./validations.js";
 import transactionsRoutes from "./transactions.js";
 import astrologyRoutes from "./astrology.js";
 import reportRoutes from "./report.js";
+import socialRoutes from "./social.js";
 import brokerRoutes from "./broker.js";
-import adminRoutes from "./admin.js";
+import manageRoutes from "./manage.js";
 
 const router = Router();
 
@@ -31,8 +32,11 @@ router.use(astrologyRoutes);
 
 router.use(reportRoutes);
 
+router.use(socialRoutes);
+
 router.use(brokerRoutes);
 
-router.use(adminRoutes);
+// Admin panel + broker dashboard (all under /manage).
+router.use(manageRoutes);
 
 export default router;

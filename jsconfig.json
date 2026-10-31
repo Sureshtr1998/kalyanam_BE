@@ -7,6 +7,6 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true
   },
-  "include": ["./**/*.js"],
+  "include": ["./**/*.js", "src/types/**/*.d.ts"],
   "exclude": ["node_modules"]
 }

@@ -1,5 +1,4 @@
 import { Redis } from "@upstash/redis";
-import fetch from "node-fetch";
 
 // Upstash Redis client
 export const upStash = new Redis({

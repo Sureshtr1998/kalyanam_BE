@@ -4,7 +4,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon --watch src --exec node src/index.js",
-    "build": "tsc"
+    "typecheck": "tsc -p jsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@upstash/redis": "^1.35.7",
@@ -14,13 +16,13 @@
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
+    "helmet": "^8.3.0",
     "imagekit": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
     "luxon": "^3.7.2",
     "mongoose": "^8.19.3",
     "multer": "^2.0.2",
     "nanoid": "^5.1.6",
-    "node-fetch": "^3.3.2",
     "openai": "^6.10.0",
     "otp-generator": "^4.0.1",
     "razorpay": "^2.9.6"
@@ -29,10 +31,18 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/luxon": "^3.7.6",
     "@types/multer": "^2.0.0",
     "@types/node": "^24.9.1",
+    "@types/otp-generator": "^4.0.2",
+    "@types/supertest": "^7.2.1",
+    "mongodb-memory-server": "^10.4.3",
     "nodemon": "^3.1.10",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "supertest": "^7.3.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

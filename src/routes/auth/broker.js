@@ -1,241 +1,56 @@
-// controllers/broker.controller.ts
-import bcrypt from "bcryptjs";
-import dbConnect from "../../utils/dbConnect.js";
-import Broker from "../../models/Broker.js";
-import { generateBrokerId, uploadToImageKit } from "../../utils/utils.js";
 import { Router } from "express";
-import upload from "../../middleware/upload.js";
-import { publishQStash } from "../../config/upStash.js";
-import sendEmail from "../../config/msg91Email.js";
+import Broker from "../../models/Broker.js";
+import User from "../../models/User.js";
+import upload, { requireImageContent } from "../../middleware/upload.js";
+import { anonymousUploadLimiter, lookupLimiter, uploadLimiter } from "../../middleware/otpLimiter.js";
+import { areKnownUploads, rememberAnonymousUploads } from "../../utils/images.js";
+import { brokerAuth } from "../../middleware/auth.js";
+import { notify } from "../../config/msg91Email.js";
+import dbConnect from "../../utils/dbConnect.js";
+import { uploadToImageKit } from "../../utils/utils.js";
+import {
+  SUPPORT_EMAIL,
+  normalizeEmail,
+} from "../../utils/constants.js";
+import {
+  HttpError,
+  resolvePaidOrder,
+  saveOrder,
+  sendHttpError,
+} from "../../utils/payments.js";
+import { findReferralBroker } from "../../utils/orderBuilders.js";
 
 const router = Router();
 
-router.post("/broker-register", async (req, res) => {
-  try {
-    await dbConnect();
-
-    const {
-      name,
-      email,
-      phone,
-      companyName,
-      address,
-      note,
-      caste,
-      password,
-      confirmPassword,
-      idProofs, // [{ url, fileId }]
-      motherTongue,
-      // Transactions
-      // orderId,
-      paymentId,
-      amount,
-    } = req.body;
-
-    if (!name || !email || !phone || !password || !confirmPassword) {
-      return res.status(400).json({
-        success: false,
-        message: "Missing required fields",
-      });
-    }
-
-    const existingBroker = await Broker.findOne({
-      $or: [{ email }, { phone }],
-    });
-
-    if (existingBroker) {
-      return res.status(409).json({
-        success: false,
-        message: "Broker already registered with this email or phone",
-      });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const broker = await Broker.create({
-      name,
-      email,
-      phone,
-      companyName,
-      address,
-      note,
-      caste,
-      password: hashedPassword,
-      idProofs: idProofs || [],
-      motherTongue,
-    });
-
-    await sendEmail({
-      to: [{ email: email }],
-      template_id: "broker_registration", // MSG91 Template ID
-      variables: {
-        userName: name,
-        paymentId: paymentId,
-        amount: amount,
-      },
-    });
-
-    const delay = name === "Suresh TR" ? "1m" : "5h31m";
-
-    await publishQStash("broker-completion", { email, role: "BROKER" }, delay);
-    return res.status(201).json({
-      success: true,
-      message: "Broker registered successfully",
-      data: {
-        id: broker._id,
-        name: broker.name,
-        email: broker.email,
-        phone: broker.phone,
-      },
-    });
-  } catch (error) {
-    console.error("Broker registration error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong while registering broker",
-    });
-  }
+const brokerView = (b) => ({
+  _id: b._id,
+  name: b.name,
+  email: b.email,
+  phone: b.phone,
+  companyName: b.companyName,
+  address: b.address,
+  note: b.note,
+  caste: b.caste,
+  motherTongue: b.motherTongue,
+  referralId: b.referralId,
+  status: b.referralId && b.status !== "suspended" ? "approved" : b.status,
+  createdAt: b.createdAt,
 });
 
-router.post("/broker-completion", async (req, res) => {
+router.get("/broker-validation", lookupLimiter, async (req, res) => {
   try {
-    await dbConnect();
-
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "Email is required",
-      });
-    }
-
-    const broker = await Broker.findOne({ email });
-
-    if (!broker) {
-      return res.status(404).json({
-        success: false,
-        message: "Broker not found",
-      });
-    }
-
-    const referralId = generateBrokerId(broker.name);
-
-    broker.referralId = referralId;
-    await broker.save();
-
-    await sendEmail({
-      to: [{ email: email }],
-      template_id: "broker_confirmation", // MSG91 Template ID
-      variables: {
-        userName: broker.name,
-        referralId: referralId,
-      },
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: "Broker profile completed successfully",
-      data: {
-        email: broker.email,
-        referralId: broker.referralId,
-      },
-    });
-  } catch (error) {
-    console.error("Broker completion error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to complete broker profile",
-    });
-  }
-});
-
-router.post(
-  "/broker-register/upload-idproof",
-  upload.array("images", 3),
-  async (req, res) => {
-    try {
-      await dbConnect();
-
-      const files = req.files || [];
-
-      if (!files.length) {
-        return res.status(400).json({
-          message: "No images uploaded",
-        });
-      }
-
-      const uploadedMedia = [];
-
-      // @ts-ignore
-      for (const file of files) {
-        const result = await uploadToImageKit(
-          file.buffer,
-          file.originalname,
-          true
-        );
-
-        uploadedMedia.push({
-          url: result.url,
-          fileId: result.fileId,
-        });
-      }
-
-      return res.json({ media: uploadedMedia });
-    } catch (error) {
-      console.error("Broker ID proof upload error:", error);
-      return res.status(500).json({
-        message: "Failed to upload ID proof",
-      });
-    }
-  }
-);
-
-router.get("/validate-referral/:referralId", async (req, res) => {
-  try {
-    await dbConnect();
-
-    const { referralId } = req.params;
-
-    if (!referralId) {
-      return res
-        .status(400)
-        .json({ valid: false, msg: "Referral ID required" });
-    }
-
-    const broker = await Broker.findOne({ referralId: referralId }).select(
-      "_id"
-    );
-
-    if (!broker) {
-      return res.json({ valid: false, msg: "Invalid referral ID" });
-    }
-
-    return res.json({ valid: true, msg: "Valid referral ID" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ valid: false, msg: "Server error" });
-  }
-});
-
-router.get("/broker-validation", async (req, res) => {
-  try {
-    const { email, mobile } = req.query;
-
-    if (!email && !mobile) {
+    const email = normalizeEmail(req.query.email);
+    const phone = typeof req.query.mobile === "string" ? req.query.mobile : "";
+    if (!email && !phone) {
       return res.status(400).json({ msg: "Email or Mobile is required" });
     }
-
     await dbConnect();
-
-    const existingUser = await Broker.findOne({ email: email });
-    if (existingUser)
+    if (email && (await Broker.exists({ email }))) {
       return res.status(400).json({ msg: "Email already exists" });
-
-    const existingMobile = await Broker.findOne({ phone: mobile });
-    if (existingMobile)
+    }
+    if (phone && (await Broker.exists({ phone }))) {
       return res.status(400).json({ msg: "Mobile number already registered" });
-
+    }
     return res.json({ success: true, msg: "Valid" });
   } catch (err) {
     console.error("Broker Validation Error:", err);
@@ -243,4 +58,134 @@ router.get("/broker-validation", async (req, res) => {
   }
 });
 
+router.post(
+  "/broker-register/upload-idproof",
+  uploadLimiter,
+  anonymousUploadLimiter,
+  upload.array("images", 3),
+  requireImageContent,
+  async (req, res) => {
+    try {
+      const files = /** @type {any[]} */ (req.files || []);
+      if (!files.length) return res.status(400).json({ msg: "No images uploaded" });
+      const media = [];
+      for (const file of files) {
+        const result = /** @type {any} */ (
+          await uploadToImageKit(file.buffer, file.originalname, "/broker_id_proofs")
+        );
+        media.push({ url: result.url, fileId: result.fileId });
+      }
+      await rememberAnonymousUploads(media);
+      return res.json({ media });
+    } catch (err) {
+      console.error("Broker ID proof upload error:", err);
+      return res.status(500).json({ msg: "Failed to upload ID proof" });
+    }
+  }
+);
+
+/**
+ * Completes a paid partner sign-up from the order record saved at
+ * /create-order. Safe to call twice (browser + webhook). The account starts
+ * "pending": an admin approves it, which issues the referral ID.
+ */
+router.post("/broker-register", async (req, res) => {
+  try {
+    await dbConnect();
+    const { record, orderId, paymentId } = await resolvePaidOrder(req, "broker");
+    const data = record.broker;
+
+    let idProofs = (Array.isArray(req.body?.idProofs) ? req.body.idProofs : [])
+      .filter((i) => i && typeof i.url === "string" && i.url.startsWith("https://") && typeof i.fileId === "string")
+      .slice(0, 3)
+      .map((i) => ({ url: i.url, fileId: i.fileId }));
+    // Only files uploaded through /broker-register/upload-idproof.
+    if (idProofs.length && !(await areKnownUploads(idProofs))) idProofs = [];
+
+    const existing = await Broker.findOne({ email: data.email });
+    if (existing) {
+      if (existing.transactions.some((t) => t.orderId === orderId)) {
+        if (idProofs.length && !existing.idProofs.length) {
+          existing.idProofs = idProofs;
+          await existing.save();
+        }
+        return res.json({ success: true, msg: "Registration received" });
+      }
+      throw new HttpError(
+        409,
+        `This email is already registered as a partner. If you were charged, please contact support with payment ID ${paymentId}.`
+      );
+    }
+
+    await Broker.create({
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+      companyName: data.companyName,
+      address: data.address,
+      note: data.note,
+      caste: data.caste,
+      motherTongue: data.motherTongue,
+      password: data.passwordHash,
+      idProofs,
+      status: "pending",
+      transactions: [
+        { orderId, paymentId, amountPaid: record.amountCharged, note: record.note },
+      ],
+    });
+
+    await saveOrder(orderId, {
+      ...record,
+      broker: { ...data, passwordHash: undefined },
+      fulfilled: true,
+      paymentId,
+    });
+
+    notify({
+      to: [{ email: SUPPORT_EMAIL }],
+      template_id: "user_register_2",
+      variables: {
+        note: "New partner registration",
+        payload: `PARTNER: ${data.name} | ${data.email} | ${data.phone} | ₹${record.amountCharged} | ${paymentId}. Approve it in the admin panel.`,
+      },
+    });
+
+    return res.status(201).json({ success: true, msg: "Registration received" });
+  } catch (err) {
+    if (!(err instanceof HttpError)) console.error("Broker registration error:", err);
+    return sendHttpError(
+      res,
+      err,
+      "Partner registration failed after payment. Please contact support with your payment ID."
+    );
+  }
+});
+
+router.get("/validate-referral/:referralId", async (req, res) => {
+  try {
+    await dbConnect();
+    const code = String(req.params.referralId || "").trim().toUpperCase();
+    const broker = await findReferralBroker(code);
+    return res.json(
+      broker
+        ? { valid: true, msg: "Valid referral ID" }
+        : { valid: false, msg: "Invalid referral ID" }
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ valid: false, msg: "Server error" });
+  }
+});
+
+/** The logged-in partner's own account. */
+router.get("/broker/me", brokerAuth, async (req, res) => {
+  // @ts-ignore
+  const broker = req.broker;
+  const usersReferred = broker.referralId
+    ? await User.countDocuments({ "basic.referralId": broker.referralId })
+    : 0;
+  return res.json({ profile: { ...brokerView(broker), usersReferred } });
+});
+
+export { brokerView };
 export default router;
