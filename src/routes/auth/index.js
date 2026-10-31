@@ -7,7 +7,6 @@ import resetPasswordsRoutes from "./resetPwd.js";
 import validationRoutes from "./validations.js";
 import transactionsRoutes from "./transactions.js";
 import astrologyRoutes from "./astrology.js";
-import reportRoutes from "./report.js";
 import socialRoutes from "./social.js";
 import brokerRoutes from "./broker.js";
 import manageRoutes from "./manage.js";
@@ -29,8 +28,6 @@ router.use(validationRoutes);
 router.use(transactionsRoutes);
 
 router.use(astrologyRoutes);
-
-router.use(reportRoutes);
 
 router.use(socialRoutes);
 

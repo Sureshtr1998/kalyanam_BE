@@ -9,7 +9,7 @@ import getPlanetPositions, { getAshtakootScore } from "../../config/astroApi.js"
 import { generateAstroInsights } from "../../config/openAi.js";
 import User from "../../models/User.js";
 import { publishQStash } from "../../config/upStash.js";
-import { SUPPORT_EMAIL, isTestPayer } from "../../utils/constants.js";
+import { isTestPayer } from "../../utils/constants.js";
 import { notify } from "../../config/msg91Email.js";
 import {
   HttpError,
@@ -78,14 +78,6 @@ router.post("/astro-data", auth, async (req, res) => {
         );
       } catch (err) {
         console.error("Failed to schedule astrology job:", err);
-        notify({
-          to: [{ email: SUPPORT_EMAIL }],
-          template_id: "user_register_2",
-          variables: {
-            note: "Astrology scheduling failed",
-            payload: `${record.email} | ${astro.uId} | ${orderId}`,
-          },
-        });
       }
     }
 
@@ -196,14 +188,6 @@ router.post("/astrology", auth, async (req, res) => {
         astroEntry.status = "failed";
         astroEntry.aiResponse = err.message;
         await user.save();
-        notify({
-          to: [{ email: SUPPORT_EMAIL }],
-          template_id: "user_register_2",
-          variables: {
-            note: "Astrology failed",
-            payload: `${user.basic.email} | ${uniqueId} | ${err.message}`,
-          },
-        });
         return res.status(200).json({ msg: "Marked as failed" });
       }
       throw err;

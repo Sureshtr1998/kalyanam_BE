@@ -16,7 +16,11 @@ export const generateBrokerId = (name) =>
     .slice(0, 3)
     .padEnd(3, "X")}${referralSuffix()}`;
 
-export const uploadToImageKit = async (fileBuffer, fileName, folder) => {
+/**
+ * Private files (ID proofs) can only be opened through a signed URL,
+ * see signedImageUrl.
+ */
+export const uploadToImageKit = async (fileBuffer, fileName, folder, isPrivate = false) => {
   return new Promise((resolve, reject) => {
     imageKit.upload(
       {
@@ -24,6 +28,7 @@ export const uploadToImageKit = async (fileBuffer, fileName, folder) => {
         fileName,
         // Set IMAGEKIT_FOLDER=/test_profiles locally to keep test uploads apart.
         folder: folder || process.env.IMAGEKIT_FOLDER || "/user_profiles",
+        isPrivateFile: isPrivate,
       },
       (error, result) => {
         if (error) reject(error);
@@ -32,3 +37,7 @@ export const uploadToImageKit = async (fileBuffer, fileName, folder) => {
     );
   });
 };
+
+/** Short-lived link to a private ImageKit file. */
+export const signedImageUrl = (url, expireSeconds = 600) =>
+  imageKit.url({ src: url, signed: true, expireSeconds });

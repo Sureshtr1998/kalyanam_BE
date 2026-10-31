@@ -6,7 +6,7 @@ import User from "../../models/User.js";
 import { notify } from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
 import { publishQStash } from "../../config/upStash.js";
-import { SUPPORT_EMAIL, isTestPayer } from "../../utils/constants.js";
+import { isTestPayer } from "../../utils/constants.js";
 import {
   HttpError,
   getOrder,
@@ -79,15 +79,6 @@ router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
       orderId: order.id,
       amountCharged,
       createdAt: Date.now(),
-    });
-
-    notify({
-      to: [{ email: SUPPORT_EMAIL }],
-      template_id: "user_register_2",
-      variables: {
-        note: record.note,
-        payload: `CREATE ORDER: ${record.purpose} | ${record.email} | ₹${amountCharged} | ${order.id}`,
-      },
     });
 
     return res.json({

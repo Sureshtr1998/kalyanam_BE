@@ -3,8 +3,6 @@ import mongoose from "mongoose";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import dbConnect from "../../utils/dbConnect.js";
-import { notify } from "../../config/msg91Email.js";
-import { SUPPORT_EMAIL } from "../../utils/constants.js";
 import { canView, publicProjection } from "../../utils/matching.js";
 
 const router = Router();
@@ -144,15 +142,6 @@ router.post("/report-profile", auth, async (req, res) => {
     if (!target) return res.status(404).json({ msg: "User not found" });
 
     await User.updateOne({ _id: me._id }, { $addToSet: { hideProfiles: target._id } });
-
-    notify({
-      to: [{ email: SUPPORT_EMAIL }],
-      template_id: "user_register_2",
-      variables: {
-        note: "Profile reported",
-        payload: `${target.basic.uniqueId} (${target.basic.fullName}) reported by ${me.basic.uniqueId}: ${reason}. ${String(details || "").slice(0, 500)}`,
-      },
-    });
 
     return res.json({
       msg: "Thank you. Our team will review this profile, and you won't see each other any more.",
