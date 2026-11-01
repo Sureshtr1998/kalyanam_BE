@@ -76,6 +76,7 @@ export const EDITABLE = {
     "note",
     "qualification",
     "country",
+    "strict",
   ],
 };
 

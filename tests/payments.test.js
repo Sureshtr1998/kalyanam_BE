@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import razorpay from "../src/config/razorpay.js";
+import { notify } from "../src/config/msg91Email.js";
 import upStash, { publishQStash } from "../src/config/upStash.js";
 import User from "../src/models/User.js";
 import Broker from "../src/models/Broker.js";
@@ -391,5 +392,88 @@ describe("POST /razorpay-webhook", () => {
     const res = await api().post(`/api/${endpoint}`).set("x-internal-secret", process.env.INTERNAL_ROUTE_SECRET).send(payload);
     expect(res.status).toBe(200);
     expect(await User.countDocuments({ "basic.email": "asha@example.test" })).toBe(1);
+  });
+});
+
+describe("POST /manage/users/:id/refund", () => {
+  const paidMember = () =>
+    createUser({
+      rest: {
+        transactions: [
+          { orderId: "order_r1", paymentId: "pay_r1", amountPaid: 499, noOfInterest: 10, note: "Interest Purchase" },
+          { orderId: "admin_1", amountPaid: 0, noOfInterest: 5, note: "Credits added by admin" },
+        ],
+      },
+    });
+  const refund = (member, token, paymentId) =>
+    api().post(`/api/manage/users/${member._id}/refund`).set("x-auth-token", token).send({ paymentId });
+
+  it("refunds the full payment, records it and emails the member", async () => {
+    const admin = await createUser({ rest: { isAdmin: true } });
+    const member = await paidMember();
+    const res = await refund(member, tokenFor(admin), "pay_r1");
+
+    expect(res.status).toBe(200);
+    expect(razorpay.payments.refund).toHaveBeenCalledWith("pay_r1", expect.objectContaining({ speed: "normal" }));
+    // No amount sent: Razorpay refunds everything captured.
+    expect(vi.mocked(razorpay.payments.refund).mock.calls[0][1]).not.toHaveProperty("amount");
+    const t = (await User.findById(member._id)).transactions.find((x) => x.paymentId === "pay_r1");
+    expect(t).toMatchObject({ refundId: "rfnd_pay_r1", amountRefunded: 499 });
+    expect(t.refundedAt).toBeInstanceOf(Date);
+    expect(res.body.member.stats.totalPaid).toBe(0);
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        template_id: "payment_refund_3",
+        variables: expect.objectContaining({ amount: 499, item: "Interest credits", paymentId: "pay_r1", refundId: "rfnd_pay_r1" }),
+      })
+    );
+  });
+
+  it("won't refund the same payment twice", async () => {
+    const admin = await createUser({ rest: { isAdmin: true } });
+    const member = await paidMember();
+    await refund(member, tokenFor(admin), "pay_r1");
+    const res = await refund(member, tokenFor(admin), "pay_r1");
+    expect(res.status).toBe(400);
+    expect(razorpay.payments.refund).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects unknown payments and passes on Razorpay errors", async () => {
+    const admin = await createUser({ rest: { isAdmin: true } });
+    const member = await paidMember();
+    expect((await refund(member, tokenFor(admin), "pay_nope")).status).toBe(404);
+
+    vi.mocked(razorpay.payments.refund).mockRejectedValueOnce({ error: { description: "The payment has been fully refunded already" } });
+    const res = await refund(member, tokenFor(admin), "pay_r1");
+    expect(res.status).toBe(400);
+    expect(res.body.msg).toMatch(/fully refunded/);
+    const t = (await User.findById(member._id)).transactions.find((x) => x.paymentId === "pay_r1");
+    expect(t.refundedAt).toBeUndefined();
+  });
+
+  it("is admin only", async () => {
+    const member = await paidMember();
+    const res = await refund(member, tokenFor(member), "pay_r1");
+    expect(res.status).not.toBe(200);
+    expect(razorpay.payments.refund).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /manage/users/:id/verify", () => {
+  it("emails the member once when their profile is verified", async () => {
+    const admin = await createUser({ rest: { isAdmin: true } });
+    const member = await createUser();
+    const verify = (value) =>
+      api().post(`/api/manage/users/${member._id}/verify`).set("x-auth-token", tokenFor(admin)).send({ value });
+
+    expect((await verify(true)).status).toBe(200);
+    expect(notify).toHaveBeenCalledWith({
+      to: [{ email: member.basic.email }],
+      template_id: "profile_verified_3",
+      variables: { userName: member.basic.fullName, email: member.basic.email, mobile: member.basic.mobile },
+    });
+    await verify(true);
+    await verify(false);
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 });

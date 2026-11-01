@@ -8,8 +8,16 @@ import Broker from "../../models/Broker.js";
 import { expiresIn, normalizeEmail } from "../../utils/constants.js";
 import { notify } from "../../config/msg91Email.js";
 import dbConnect from "../../utils/dbConnect.js";
-import { anonymousUploadLimiter, loginLimiter, lookupLimiter, uploadLimiter } from "../../middleware/otpLimiter.js";
-import { deleteUnclaimedUploads, rememberAnonymousUploads } from "../../utils/images.js";
+import {
+  anonymousUploadLimiter,
+  loginLimiter,
+  lookupLimiter,
+  uploadLimiter,
+} from "../../middleware/otpLimiter.js";
+import {
+  deleteUnclaimedUploads,
+  rememberAnonymousUploads,
+} from "../../utils/images.js";
 import {
   HttpError,
   isInternalRequest,
@@ -18,6 +26,7 @@ import {
   sendHttpError,
 } from "../../utils/payments.js";
 import { buildRegistrationOrder } from "../../utils/orderBuilders.js";
+import { DEFAULT_STRICT } from "../../utils/matching.js";
 
 const router = Router();
 
@@ -97,12 +106,13 @@ router.post(
       console.error("Image upload error:", err);
       res.status(500).json({ msg: "Image upload failed" });
     }
-  }
+  },
 );
 
 /** QStash, days after a pre-sign-up upload: deletes the photos if nobody registered with them. */
 router.post("/cleanup-uploads", async (req, res) => {
-  if (!isInternalRequest(req)) return res.status(404).json({ msg: "Not found" });
+  if (!isInternalRequest(req))
+    return res.status(404).json({ msg: "Not found" });
   try {
     await dbConnect();
     const deleted = await deleteUnclaimedUploads(req.body?.fileIds);
@@ -113,10 +123,16 @@ router.post("/cleanup-uploads", async (req, res) => {
   }
 });
 
-/** Builds the member document shared by paid and free registrations. */
-const newMemberFrom = (reg) =>
+/**
+ * Builds the member document shared by paid and free registrations.
+ * @param {Awaited<ReturnType<typeof buildRegistrationOrder>>["registration"]} reg
+ * @param {string} uniqueId
+ * @param {number} totalNoOfInterest
+ */
+const newMemberFrom = (reg, uniqueId, totalNoOfInterest) =>
   new User({
     basic: {
+      uniqueId,
       email: reg.email,
       password: reg.passwordHash,
       fullName: reg.fullName,
@@ -135,23 +151,27 @@ const newMemberFrom = (reg) =>
       referralId: reg.referralId || undefined,
     },
     // New members start out matched within their own caste and mother tongue;
-    // they can widen this from their profile.
+    // they can widen this from their profile. Only caste hides them from others.
     partner: {
       caste: [reg.caste],
       motherTongue: [reg.motherTongue],
+      strict: DEFAULT_STRICT,
     },
+    interests: { totalNoOfInterest },
   });
 
 /**
  * Free registration (no order). Validated exactly like a paid one, but the
  * member starts with no interest credits and no transaction.
+ * @param {import("express").Request} req
+ * @param {import("express").Response} res
  */
 const registerFree = async (req, res) => {
-  const record = await buildRegistrationOrder(req.body?.registration || req.body || {});
+  const record = await buildRegistrationOrder(
+    req.body?.registration || req.body || {},
+  );
   const reg = record.registration;
-  const newUser = newMemberFrom(reg);
-  newUser.basic.uniqueId = await generateUniqueId();
-  newUser.interests.totalNoOfInterest = 0;
+  const newUser = newMemberFrom(reg, await generateUniqueId(), 0);
 
   try {
     await newUser.save();
@@ -184,7 +204,7 @@ router.post("/user-register", async (req, res) => {
 
     const { record, orderId, paymentId } = await resolvePaidOrder(
       req,
-      "registration"
+      "registration",
     );
     const reg = record.registration;
 
@@ -195,13 +215,15 @@ router.post("/user-register", async (req, res) => {
       }
       throw new HttpError(
         409,
-        `This email is already registered. If you were charged, please contact support with payment ID ${paymentId}.`
+        `This email is already registered. If you were charged, please contact support with payment ID ${paymentId}.`,
       );
     }
 
-    const newUser = newMemberFrom({ ...reg, email: record.email });
-    newUser.basic.uniqueId = await generateUniqueId();
-    newUser.interests.totalNoOfInterest = record.interests;
+    const newUser = newMemberFrom(
+      { ...reg, email: record.email },
+      await generateUniqueId(),
+      record.interests,
+    );
     newUser.transactions.push({
       orderId,
       paymentId,
@@ -248,7 +270,7 @@ router.post("/user-register", async (req, res) => {
     return sendHttpError(
       res,
       err,
-      "Registration failed after payment. Please contact support with your payment ID."
+      "Registration failed after payment. Please contact support with your payment ID.",
     );
   }
 });
@@ -270,13 +292,18 @@ router.post("/login", loginLimiter, async (req, res) => {
         return res.status(400).json({ msg: "Invalid partner credentials" });
       }
       if (broker.status === "suspended") {
-        return res.status(403).json({ msg: "This partner account is suspended. Please contact support." });
+        return res
+          .status(403)
+          .json({
+            msg: "This partner account is suspended. Please contact support.",
+          });
       }
       return res.json(brokerLoginPayload(broker));
     }
 
     const user = await User.findOne({ "basic.email": email });
-    if (!user?.basic?.password) return res.status(400).json({ msg: "Invalid credentials" });
+    if (!user?.basic?.password)
+      return res.status(400).json({ msg: "Invalid credentials" });
 
     const isMatch = await bcrypt.compare(password, user.basic.password);
     if (!isMatch) return res.status(400).json({ msg: "Invalid credentials" });

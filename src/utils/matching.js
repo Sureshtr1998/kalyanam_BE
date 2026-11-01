@@ -8,7 +8,34 @@ import { ageInYears } from "./dates.js";
  *  2. who is allowed to see THEM: if a member only wants, say, Kannada
  *     speakers aged 27-33, nobody outside that group gets their profile.
  * An empty preference means "anyone".
+ *
+ * Only "must-have" preferences (listed in `partner.strict`) do the second
+ * part; the rest just narrow and rank the member's own matches. Members who
+ * have never chosen (no `strict` list) keep every preference as a must-have.
  */
+
+/** Preferences a member can mark as must-haves. */
+export const STRICT_KEYS = [
+  "age",
+  "height",
+  "caste",
+  "subCaste",
+  "motherTongue",
+  "martialStatus",
+  "qualification",
+  "employedIn",
+  "country",
+];
+
+/** Must-haves for new members. */
+export const DEFAULT_STRICT = ["age", "caste", "martialStatus"];
+
+/** Keeps only known keys; anything that isn't a list means "not chosen yet". */
+export const cleanStrict = (v) =>
+  Array.isArray(v) ? [...new Set(v.filter((k) => STRICT_KEYS.includes(k)))] : undefined;
+
+const isStrict = (partner, key) =>
+  !Array.isArray(partner?.strict) || partner.strict.includes(key);
 
 // partner preference field -> where the viewer's own value lives
 const LIST_PREFS = {
@@ -43,6 +70,9 @@ const emptyPref = (field) => [
   { [field]: { $size: 0 } },
 ];
 
+// The candidate chose their must-haves and `key` isn't one of them.
+const notStrict = (key) => ({ "partner.strict": { $type: "array", $ne: key } });
+
 export const viewerAge = (viewer) =>
   viewer?.basic?.dob ? ageInYears(viewer.basic.dob) : null;
 
@@ -59,6 +89,7 @@ export const acceptsViewerQuery = (viewer) => {
     const field = `partner.${pref}`;
     conditions.push({
       $or: [
+        notStrict(pref),
         ...emptyPref(field),
         { [field]: { $regex: `^${escapeRegex(value)}$`, $options: "i" } },
       ],
@@ -70,14 +101,14 @@ export const acceptsViewerQuery = (viewer) => {
   const age = viewerAge(viewer);
   if (age !== null && age >= 10 && age <= 99) {
     const a = String(age);
-    conditions.push({ $or: [...emptyPref("partner.ageFrom").slice(0, 3), { "partner.ageFrom": { $lte: a } }] });
-    conditions.push({ $or: [...emptyPref("partner.ageTo").slice(0, 3), { "partner.ageTo": { $gte: a } }] });
+    conditions.push({ $or: [notStrict("age"), ...emptyPref("partner.ageFrom").slice(0, 3), { "partner.ageFrom": { $lte: a } }] });
+    conditions.push({ $or: [notStrict("age"), ...emptyPref("partner.ageTo").slice(0, 3), { "partner.ageTo": { $gte: a } }] });
   }
 
   const height = viewer?.personal?.height;
   if (height && /^\d{3}$/.test(height)) {
-    conditions.push({ $or: [...emptyPref("partner.heightFrom").slice(0, 3), { "partner.heightFrom": { $lte: height } }] });
-    conditions.push({ $or: [...emptyPref("partner.heightTo").slice(0, 3), { "partner.heightTo": { $gte: height } }] });
+    conditions.push({ $or: [notStrict("height"), ...emptyPref("partner.heightFrom").slice(0, 3), { "partner.heightFrom": { $lte: height } }] });
+    conditions.push({ $or: [notStrict("height"), ...emptyPref("partner.heightTo").slice(0, 3), { "partner.heightTo": { $gte: height } }] });
   }
 
   return conditions;
@@ -88,6 +119,7 @@ export const acceptsViewer = (candidate, viewer) => {
   const partner = candidate?.partner || {};
 
   for (const [pref, path] of Object.entries(LIST_PREFS)) {
+    if (!isStrict(partner, pref)) continue;
     const wanted = toList(partner[pref]).map((x) => x.toLowerCase());
     const value = get(viewer, path);
     if (!wanted.length || !value) continue;
@@ -95,13 +127,13 @@ export const acceptsViewer = (candidate, viewer) => {
   }
 
   const age = viewerAge(viewer);
-  if (age !== null) {
+  if (age !== null && isStrict(partner, "age")) {
     if (partner.ageFrom && age < Number(partner.ageFrom)) return false;
     if (partner.ageTo && age > Number(partner.ageTo)) return false;
   }
 
   const height = Number(viewer?.personal?.height);
-  if (height) {
+  if (height && isStrict(partner, "height")) {
     if (partner.heightFrom && height < Number(partner.heightFrom)) return false;
     if (partner.heightTo && height > Number(partner.heightTo)) return false;
   }

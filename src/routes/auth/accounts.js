@@ -47,6 +47,7 @@ export const removeMember = async (user) => {
         shortlisted: oid,
         profileViews: { user: oid },
       },
+      $unset: { [`interests.actedAt.${oid}`]: "" },
     }
   );
 };

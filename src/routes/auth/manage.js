@@ -5,6 +5,7 @@ import Broker from "../../models/Broker.js";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { notify } from "../../config/msg91Email.js";
+import razorpay from "../../config/razorpay.js";
 import { generateBrokerId, signedImageUrl } from "../../utils/utils.js";
 import { parseFloatingDate, ageInYears } from "../../utils/dates.js";
 import {
@@ -55,6 +56,11 @@ const withMember = (handler) => async (req, res) => {
   }
 };
 
+// What a transaction actually earned once refunds are taken out.
+const NET_PAID = {
+  $subtract: [{ $ifNull: ["$transactions.amountPaid", 0] }, { $ifNull: ["$transactions.amountRefunded", 0] }],
+};
+
 const remainingCredits = (u) =>
   (u.interests?.totalNoOfInterest ?? 0) -
   ((u.interests?.sent?.length ?? 0) + (u.interests?.viewed?.length ?? 0) * 5);
@@ -80,7 +86,7 @@ const memberDetail = async (user, kind) => {
       contactsViewed: u.interests?.viewed?.length ?? 0,
       blocked: u.hideProfiles?.length ?? 0,
       profileViews: u.profileViews?.length ?? 0,
-      totalPaid: (u.transactions ?? []).reduce((s, t) => s + (t.amountPaid || 0), 0),
+      totalPaid: (u.transactions ?? []).reduce((s, t) => s + (t.amountPaid || 0) - (t.amountRefunded || 0), 0),
     },
     broker,
   };
@@ -165,14 +171,10 @@ router.get("/manage/summary", async (req, res) => {
                 default: "other",
               },
             },
-            total: { $sum: { $ifNull: ["$transactions.amountPaid", 0] } },
+            total: { $sum: NET_PAID },
             last30: {
               $sum: {
-                $cond: [
-                  { $gte: ["$transactions.dateOfTrans", new Date(now - 30 * DAY)] },
-                  { $ifNull: ["$transactions.amountPaid", 0] },
-                  0,
-                ],
+                $cond: [{ $gte: ["$transactions.dateOfTrans", new Date(now - 30 * DAY)] }, NET_PAID, 0],
               },
             },
             n: { $sum: 1 },
@@ -240,6 +242,101 @@ router.get("/manage/summary", async (req, res) => {
     });
   } catch (err) {
     console.error("Manage summary error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+// Calendar periods in IST (UTC+5:30, no DST). Weeks start on Monday.
+const IST = 330 * 60000;
+export const periodRange = (period, now = Date.now()) => {
+  const local = new Date(now + IST);
+  const today = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - IST;
+  switch (period) {
+    case "yesterday":
+      return { from: new Date(today - DAY), to: new Date(today) };
+    case "week":
+      return { from: new Date(today - ((local.getUTCDay() + 6) % 7) * DAY), to: new Date(now) };
+    case "month":
+      return { from: new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), 1) - IST), to: new Date(now) };
+    case "today":
+      return { from: new Date(today), to: new Date(now) };
+    default:
+      return null;
+  }
+};
+
+const REVENUE_TYPE = {
+  $switch: {
+    branches: [
+      { case: { $eq: ["$transactions.note", "Registration"] }, then: "registration" },
+      { case: { $eq: ["$transactions.note", "Interest Purchase"] }, then: "credits" },
+      { case: { $regexMatch: { input: { $ifNull: ["$transactions.note", ""] }, regex: "^Astro_" } }, then: "astrology" },
+    ],
+    default: "other",
+  },
+};
+
+// Sign-ups and money earned in one calendar period (admin).
+router.get("/manage/period", adminOnly, async (req, res) => {
+  try {
+    await dbConnect();
+    const range = periodRange(String(req.query.period ?? "today"));
+    if (!range) return res.status(400).json({ msg: "Unknown period" });
+    // `to` is "now" for open periods; +1ms keeps anything stamped this instant.
+    const to = new Date(range.to.getTime() + 1);
+    const created = { createdAt: { $gte: range.from, $lt: to } };
+    const paidIn = { "transactions.dateOfTrans": { $gte: range.from, $lt: to } };
+
+    const [joined, male, female, referred, memberRows, partnerRows, partnersJoined] = await Promise.all([
+      User.countDocuments(created),
+      User.countDocuments({ ...created, "basic.gender": /^male$/i }),
+      User.countDocuments({ ...created, "basic.gender": /^female$/i }),
+      User.countDocuments({ ...created, "basic.referralId": { $exists: true, $nin: ["", null] } }),
+      User.aggregate([
+        { $unwind: "$transactions" },
+        { $match: paidIn },
+        {
+          $group: {
+            _id: REVENUE_TYPE,
+            total: { $sum: NET_PAID },
+            refunded: { $sum: { $ifNull: ["$transactions.amountRefunded", 0] } },
+            n: { $sum: 1 },
+          },
+        },
+      ]),
+      Broker.aggregate([
+        { $unwind: "$transactions" },
+        { $match: paidIn },
+        { $group: { _id: null, total: { $sum: { $ifNull: ["$transactions.amountPaid", 0] } }, n: { $sum: 1 } } },
+      ]),
+      Broker.countDocuments(created),
+    ]);
+
+    const revenue = { total: 0, refunded: 0, payments: 0, byType: {} };
+    for (const r of memberRows) {
+      revenue.total += r.total;
+      revenue.refunded += r.refunded;
+      revenue.payments += r.n;
+      revenue.byType[r._id] = { total: r.total, count: r.n };
+    }
+    const partnerFees = partnerRows[0];
+    if (partnerFees?.n) {
+      revenue.total += partnerFees.total;
+      revenue.payments += partnerFees.n;
+      revenue.byType.partner = { total: partnerFees.total, count: partnerFees.n };
+    }
+
+    return res.json({
+      from: range.from,
+      to: range.to,
+      members: { joined, male, female, referred },
+      partnersJoined,
+      revenue,
+      // Commission owed for members referred in this period.
+      commission: referred * BROKER_COMMISSION,
+    });
+  } catch (err) {
+    console.error("Manage period error:", err);
     return res.status(500).json({ msg: "Server error" });
   }
 });
@@ -352,8 +449,16 @@ router.get(
 router.post(
   "/manage/users/:id/verify",
   withMember(async (req, res, user) => {
+    const wasVerified = user.isVerified;
     user.isVerified = req.body?.value !== false;
     await user.save();
+    if (user.isVerified && !wasVerified) {
+      notify({
+        to: [{ email: user.basic.email }],
+        template_id: "profile_verified_3", // MSG91 Template ID
+        variables: { userName: user.basic.fullName, email: user.basic.email, mobile: user.basic.mobile },
+      });
+    }
     return res.json({ msg: user.isVerified ? "Profile verified" : "Verification removed", member: await memberDetail(user, req.staff.kind) });
   })
 );
@@ -482,6 +587,56 @@ router.post(
     });
     await user.save();
     return res.json({ msg: `${amount > 0 ? "Added" : "Removed"} ${Math.abs(amount)} credits`, member: await memberDetail(user, "admin") });
+  })
+);
+
+/** What a payment bought, in words for the refund email. */
+const paymentLabel = (note = "") =>
+  note === "Interest Purchase"
+    ? "Interest credits"
+    : note.startsWith("Astro_")
+      ? `Astrology · ${note.slice(6)}`
+      : note || "Payment";
+
+/** Refunds the full amount of one Razorpay payment back to the member. */
+router.post(
+  "/manage/users/:id/refund",
+  adminOnly,
+  withMember(async (req, res, user) => {
+    const paymentId = String(req.body?.paymentId || "");
+    const t = paymentId && user.transactions.find((x) => x.paymentId === paymentId);
+    if (!t || !(t.amountPaid > 0)) return res.status(404).json({ msg: "Payment not found" });
+    if (t.refundedAt) return res.status(400).json({ msg: "This payment has already been refunded" });
+
+    let refund;
+    try {
+      // No amount: Razorpay refunds everything that was captured.
+      refund = await razorpay.payments.refund(paymentId, {
+        speed: "normal",
+        // @ts-ignore
+        notes: { reason: "Refunded by admin", admin: req.user.basic.uniqueId, member: user.basic.uniqueId },
+      });
+    } catch (err) {
+      console.error("Razorpay refund error:", err?.error || err);
+      return res.status(400).json({ msg: err?.error?.description || "Razorpay could not process this refund" });
+    }
+
+    t.refundId = refund.id;
+    t.amountRefunded = refund.amount != null ? refund.amount / 100 : t.amountPaid;
+    t.refundedAt = new Date();
+    await user.save();
+    notify({
+      to: [{ email: user.basic.email }],
+      template_id: "payment_refund_3", // MSG91 Template ID
+      variables: {
+        userName: user.basic.fullName,
+        amount: t.amountRefunded,
+        item: paymentLabel(t.note),
+        paymentId,
+        refundId: refund.id,
+      },
+    });
+    return res.json({ msg: `Refunded ₹${t.amountRefunded} · ${refund.id}`, member: await memberDetail(user, "admin") });
   })
 );
 
@@ -657,6 +812,8 @@ router.get("/manage/payments", adminOnly, async (req, res) => {
             credits: "$transactions.noOfInterest",
             paymentId: "$transactions.paymentId",
             orderId: "$transactions.orderId",
+            amountRefunded: "$transactions.amountRefunded",
+            refundedAt: "$transactions.refundedAt",
           },
         },
       ]),

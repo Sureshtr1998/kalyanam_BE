@@ -72,6 +72,9 @@ vi.mock("../src/config/razorpay.js", () => ({
         currency,
       })),
     },
+    payments: {
+      refund: vi.fn(async (paymentId) => ({ id: `rfnd_${paymentId}`, amount: undefined })),
+    },
   },
 }));
 
