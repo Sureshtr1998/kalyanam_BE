@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { cleanStrict } from "../utils/matching.js";
 const { Schema, model } = mongoose;
 
 const userSchema = new Schema(
@@ -76,6 +77,9 @@ const userSchema = new Schema(
       note: { type: String },
       qualification: { type: [String] },
       country: { type: [String] },
+      // Must-have preferences (see utils/matching.js). Left unset for members
+      // who never chose, which keeps every preference a must-have.
+      strict: { type: [String], default: undefined, set: cleanStrict },
     },
     interests: {
       viewed: { type: [mongoose.Schema.Types.ObjectId], default: [] },
@@ -84,6 +88,9 @@ const userSchema = new Schema(
       totalNoOfInterest: { type: Number },
       accepted: { type: [mongoose.Schema.Types.ObjectId], default: [] },
       declined: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+      // Other member id -> when the latest interest action with them happened
+      // (sent, received, accepted or declined). Drives Activity sorting.
+      actedAt: { type: Map, of: Date, default: {} },
       invitationStatus: {
         type: String,
         enum: ["accept", "decline", "sent", "received", "pending"],
@@ -98,6 +105,10 @@ const userSchema = new Schema(
         dateOfTrans: { type: Date, default: Date.now },
         amountPaid: { type: Number },
         noOfInterest: { type: Number },
+        // Set when an admin refunds the payment (see /manage/users/:id/refund).
+        refundId: { type: String },
+        amountRefunded: { type: Number },
+        refundedAt: { type: Date },
       },
     ],
     astrology: [

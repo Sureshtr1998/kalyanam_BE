@@ -18,6 +18,15 @@ const remainingInterests = (user) => {
 
 const hasId = (list = [], id) => list.some((x) => x.equals(id));
 
+// Records the latest interest activity between two members on both sides.
+const stampAction = (a, b) => {
+  const now = new Date();
+  a.interests.actedAt ??= new Map();
+  b.interests.actedAt ??= new Map();
+  a.interests.actedAt.set(String(b._id), now);
+  b.interests.actedAt.set(String(a._id), now);
+};
+
 router.post("/send-interest", auth, async (req, res) => {
   try {
     await dbConnect();
@@ -62,6 +71,7 @@ router.post("/send-interest", auth, async (req, res) => {
     if (!hasId(receiver.interests.received, sender._id)) {
       receiver.interests.received.unshift(sender._id);
     }
+    stampAction(sender, receiver);
 
     // Save both users
     await sender.save();
@@ -114,9 +124,17 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
       "-basic.password -transactions -interests -hideProfiles -astrology -shortlisted -profileViews -__v"
     ).lean();
 
+    const actedAt = (id) => interests.actedAt?.get(String(id)) ?? null;
+
+    // Newest action first. Interests from before timestamps existed keep
+    // their old relative order at the end (Array.sort is stable).
     const sortedUsers = uniqueOrdered
       .map((id) => users.find((u) => u._id.toString() === id))
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          (actedAt(b._id)?.getTime() ?? 0) - (actedAt(a._id)?.getTime() ?? 0)
+      );
 
     const finalList = sortedUsers.map((user) => {
       let status = "received";
@@ -133,6 +151,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
         ...user,
         interests: {
           invitationStatus: status,
+          actedAt: actedAt(user._id),
         },
         basic: {
           ...user.basic,
@@ -198,6 +217,7 @@ router.post("/interest-action", auth, async (req, res) => {
     if (!hasId(otherUser.interests[field], currentUser._id)) {
       otherUser.interests[field].unshift(currentUser._id);
     }
+    stampAction(currentUser, otherUser);
 
     await currentUser.save();
     await otherUser.save();
