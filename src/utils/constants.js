@@ -2,28 +2,9 @@ export const expiresIn = "6h";
 
 export const SUPPORT_EMAIL = "contactus@seetharamakalyana.in";
 
-// Prices are decided here, never by the browser. Keep the frontend's display
-// constants (kalyanam_FE/src/utils/constants.ts) in sync with these.
-export const REGISTRATION_FEE = 351;
-// Members who register with a broker's referral code pay less; the broker is
-// paid BROKER_COMMISSION per such registration (outside the site).
-export const REFERRAL_REGISTRATION_FEE = 301;
-export const BROKER_COMMISSION = 101;
-export const BROKER_REGISTRATION_FEE = 501;
-export const REGISTRATION_INTERESTS = 36;
+// Prices live in utils/pricing.js (one table per pricing level), never in the browser.
 // Promo codes: accepted, but charged the normal fee and nobody earns a commission.
 export const DISCOUNT_CODES = ["BRAHMIN", "SITARAM"];
-
-export const INTEREST_PACKS = {
-  basic: { amount: 101, interests: 21 },
-  premium: { amount: 251, interests: 56 },
-};
-
-export const ASTRO_FEES = {
-  Overview: 51,
-  Personalized: 251,
-  "Kundli Matching": 201,
-};
 
 /** Accounts listed in TEST_PAYMENT_EMAILS are charged ₹1 (for live testing). */
 export const isTestPayer = (email) =>

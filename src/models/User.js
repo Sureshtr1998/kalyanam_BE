@@ -147,6 +147,9 @@ const userSchema = new Schema(
     // Referral (basic.referralId holds the broker's code). The broker is paid
     // a commission per referred registration, outside the site.
     brokerUnlinked: { type: Boolean, default: false },
+    // What this referral earns the broker, fixed by the pricing level at sign-up.
+    // Missing on older members (see LEGACY_BROKER_COMMISSION).
+    commission: { type: Number },
     commissionPaidAt: { type: Date },
     // Internal note visible only to admins / the member's broker.
     staffNote: { type: String },

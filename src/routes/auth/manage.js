@@ -9,11 +9,18 @@ import razorpay from "../../config/razorpay.js";
 import { generateBrokerId, signedImageUrl } from "../../utils/utils.js";
 import { parseFloatingDate, ageInYears } from "../../utils/dates.js";
 import {
-  BROKER_COMMISSION,
   EMAIL_RE,
   MOBILE_RE,
   normalizeEmail,
 } from "../../utils/constants.js";
+import {
+  COMMISSION_OF,
+  PRICING_LEVELS,
+  getPricing,
+  getPricingSettings,
+  isPricingLevel,
+  setPricingLevel,
+} from "../../utils/pricing.js";
 import { escapeRegex } from "../../utils/matching.js";
 import { deleteRemovedImages } from "../../utils/images.js";
 import { EDITABLE, isComplete, pick } from "./profiles.js";
@@ -59,6 +66,19 @@ const withMember = (handler) => async (req, res) => {
 // What a transaction actually earned once refunds are taken out.
 const NET_PAID = {
   $subtract: [{ $ifNull: ["$transactions.amountPaid", 0] }, { $ifNull: ["$transactions.amountRefunded", 0] }],
+};
+
+// Commission totals for a $group stage. Each member carries the rate of the
+// pricing level they registered under, so totals are sums, not counts × rate.
+const COMMISSION_SUMS = {
+  referred: { $sum: 1 },
+  earned: { $sum: COMMISSION_OF },
+  paid: { $sum: { $cond: [{ $ifNull: ["$commissionPaidAt", false] }, COMMISSION_OF, 0] } },
+};
+
+const commissionTotals = async (match) => {
+  const [row] = await User.aggregate([{ $match: match }, { $group: { _id: null, ...COMMISSION_SUMS } }]);
+  return row ?? { referred: 0, earned: 0, paid: 0 };
 };
 
 const remainingCredits = (u) =>
@@ -134,23 +154,23 @@ router.get("/manage/summary", async (req, res) => {
       const code = broker.referralId;
       // Commission counts every registration made with the code, including
       // members the broker later removed from their list.
-      const [referred, paidOut] = code
-        ? await Promise.all([
-            User.countDocuments({ "basic.referralId": code }),
-            User.countDocuments({ "basic.referralId": code, commissionPaidAt: { $ne: null } }),
-          ])
-        : [0, 0];
+      const [totals, pricing] = await Promise.all([
+        code ? commissionTotals({ "basic.referralId": code }) : { referred: 0, earned: 0, paid: 0 },
+        getPricing(),
+      ]);
       return res.json({
         kind,
         broker: brokerView(broker),
         members,
         signups,
         commission: {
-          perMember: BROKER_COMMISSION,
-          referred,
-          earned: referred * BROKER_COMMISSION,
-          paid: paidOut * BROKER_COMMISSION,
-          due: (referred - paidOut) * BROKER_COMMISSION,
+          perMember: pricing.brokerCommission,
+          referralFee: pricing.referralFee,
+          registrationFee: pricing.registrationFee,
+          referred: totals.referred,
+          earned: totals.earned,
+          paid: totals.paid,
+          due: totals.earned - totals.paid,
         },
       });
     }
@@ -209,7 +229,7 @@ router.get("/manage/summary", async (req, res) => {
         { $match: { "basic.referralId": { $exists: true, $nin: ["", null] } } },
         { $lookup: { from: "brokers", localField: "basic.referralId", foreignField: "referralId", as: "b" } },
         { $match: { "b.0": { $exists: true } } },
-        { $group: { _id: null, referred: { $sum: 1 }, paid: { $sum: { $cond: [{ $ifNull: ["$commissionPaidAt", false] }, 1, 0] } } } },
+        { $group: { _id: null, ...COMMISSION_SUMS } },
       ]),
     ]);
 
@@ -224,7 +244,8 @@ router.get("/manage/summary", async (req, res) => {
       brokers[b._id] = b.n;
       brokers.total += b.n;
     }
-    const ref = referralRows[0] ?? { referred: 0, paid: 0 };
+    const ref = referralRows[0] ?? { referred: 0, earned: 0, paid: 0 };
+    const pricing = await getPricing();
 
     return res.json({
       kind,
@@ -234,11 +255,12 @@ router.get("/manage/summary", async (req, res) => {
       interests: interestRows[0] ?? { sent: 0, accepted: 0, contacts: 0 },
       brokers,
       commission: {
-        perMember: BROKER_COMMISSION,
+        perMember: pricing.brokerCommission,
         referred: ref.referred,
-        paid: ref.paid * BROKER_COMMISSION,
-        due: (ref.referred - ref.paid) * BROKER_COMMISSION,
+        paid: ref.paid,
+        due: ref.earned - ref.paid,
       },
+      pricingLevel: pricing.level,
     });
   } catch (err) {
     console.error("Manage summary error:", err);
@@ -287,11 +309,11 @@ router.get("/manage/period", adminOnly, async (req, res) => {
     const created = { createdAt: { $gte: range.from, $lt: to } };
     const paidIn = { "transactions.dateOfTrans": { $gte: range.from, $lt: to } };
 
-    const [joined, male, female, referred, memberRows, partnerRows, partnersJoined] = await Promise.all([
+    const [joined, male, female, referrals, memberRows, partnerRows, partnersJoined] = await Promise.all([
       User.countDocuments(created),
       User.countDocuments({ ...created, "basic.gender": /^male$/i }),
       User.countDocuments({ ...created, "basic.gender": /^female$/i }),
-      User.countDocuments({ ...created, "basic.referralId": { $exists: true, $nin: ["", null] } }),
+      commissionTotals({ ...created, "basic.referralId": { $exists: true, $nin: ["", null] } }),
       User.aggregate([
         { $unwind: "$transactions" },
         { $match: paidIn },
@@ -329,11 +351,11 @@ router.get("/manage/period", adminOnly, async (req, res) => {
     return res.json({
       from: range.from,
       to: range.to,
-      members: { joined, male, female, referred },
+      members: { joined, male, female, referred: referrals.referred },
       partnersJoined,
       revenue,
       // Commission owed for members referred in this period.
-      commission: referred * BROKER_COMMISSION,
+      commission: referrals.earned,
     });
   } catch (err) {
     console.error("Manage period error:", err);
@@ -693,8 +715,7 @@ router.get("/manage/brokers", adminOnly, async (req, res) => {
       {
         $group: {
           _id: "$basic.referralId",
-          referred: { $sum: 1 },
-          paid: { $sum: { $cond: [{ $ifNull: ["$commissionPaidAt", false] }, 1, 0] } },
+          ...COMMISSION_SUMS,
           complete: { $sum: { $cond: ["$hasCompleteProfile", 1, 0] } },
         },
       },
@@ -702,7 +723,7 @@ router.get("/manage/brokers", adminOnly, async (req, res) => {
     const byCode = new Map(counts.map((c) => [c._id, c]));
     return res.json({
       brokers: brokers.map((b) => {
-        const c = byCode.get(b.referralId) ?? { referred: 0, paid: 0, complete: 0 };
+        const c = byCode.get(b.referralId) ?? { referred: 0, earned: 0, paid: 0, complete: 0 };
         return {
           ...brokerView(b),
           idProofs: (b.idProofs ?? []).map((p) => ({ fileId: p.fileId, url: signedImageUrl(p.url) })),
@@ -710,8 +731,8 @@ router.get("/manage/brokers", adminOnly, async (req, res) => {
           lastActiveAt: b.lastActiveAt,
           referred: c.referred,
           complete: c.complete,
-          commissionDue: (c.referred - c.paid) * BROKER_COMMISSION,
-          commissionPaid: c.paid * BROKER_COMMISSION,
+          commissionDue: c.earned - c.paid,
+          commissionPaid: c.paid,
         };
       }),
     });
@@ -771,14 +792,44 @@ router.post("/manage/brokers/:id/settle", adminOnly, async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ msg: "Invalid request" });
     const broker = await Broker.findById(req.params.id).lean();
     if (!broker?.referralId) return res.status(404).json({ msg: "Partner not found" });
-    const result = await User.updateMany(
-      { "basic.referralId": broker.referralId, commissionPaidAt: null },
-      { commissionPaidAt: new Date() }
-    );
+    const due = { "basic.referralId": broker.referralId, commissionPaidAt: null };
+    const { earned } = await commissionTotals(due);
+    const result = await User.updateMany(due, { commissionPaidAt: new Date() });
     return res.json({
       msg: result.modifiedCount
-        ? `Marked ₹${result.modifiedCount * BROKER_COMMISSION} as paid (${result.modifiedCount} members)`
+        ? `Marked ₹${earned} as paid (${result.modifiedCount} members)`
         : "Nothing due",
+    });
+  } catch (err) {
+    console.error("Broker settle error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+// ───────────────────────── Pricing (admin) ─────────────────────────
+
+router.get("/manage/pricing", adminOnly, async (_req, res) => {
+  try {
+    await dbConnect();
+    return res.json({ ...(await getPricingSettings()), levels: PRICING_LEVELS });
+  } catch (err) {
+    console.error("Pricing settings error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+/** Switches every new order (and the prices the site shows) to another level. */
+router.post("/manage/pricing", adminOnly, async (req, res) => {
+  try {
+    await dbConnect();
+    const level = Number(req.body?.level);
+    if (!isPricingLevel(level)) return res.status(400).json({ msg: "Choose a pricing level from 1 to 4" });
+    // @ts-ignore
+    await setPricingLevel(level, req.user?.basic?.email ?? "admin");
+    return res.json({
+      msg: level === 1 ? "Level 1 is live · registration is now free" : `Level ${level} is live`,
+      ...(await getPricingSettings()),
+      levels: PRICING_LEVELS,
     });
   } catch (err) {
     console.error("Broker settle error:", err);

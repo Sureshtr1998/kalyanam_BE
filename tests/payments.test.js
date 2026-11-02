@@ -4,14 +4,17 @@ import { notify } from "../src/config/msg91Email.js";
 import upStash, { publishQStash } from "../src/config/upStash.js";
 import User from "../src/models/User.js";
 import Broker from "../src/models/Broker.js";
-import {
-  ASTRO_FEES,
-  BROKER_REGISTRATION_FEE,
-  INTEREST_PACKS,
-  REFERRAL_REGISTRATION_FEE,
-  REGISTRATION_FEE,
-  REGISTRATION_INTERESTS,
-} from "../src/utils/constants.js";
+import { DEFAULT_PRICING_LEVEL, PRICING_LEVELS } from "../src/utils/pricing.js";
+
+// With no level saved the site runs at the default level.
+const {
+  astroFees: ASTRO_FEES,
+  brokerRegistrationFee: BROKER_REGISTRATION_FEE,
+  interestPacks: INTEREST_PACKS,
+  referralFee: REFERRAL_REGISTRATION_FEE,
+  registrationFee: REGISTRATION_FEE,
+  registrationInterests: REGISTRATION_INTERESTS,
+} = PRICING_LEVELS[DEFAULT_PRICING_LEVEL];
 import {
   api,
   createBroker,
@@ -475,5 +478,108 @@ describe("POST /manage/users/:id/verify", () => {
     await verify(true);
     await verify(false);
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pricing levels", () => {
+  const setLevel = async (level, token) => {
+    const admin = token ?? tokenFor(await createUser({ rest: { isAdmin: true } }));
+    return api().post("/api/manage/pricing").set("x-auth-token", admin).send({ level });
+  };
+
+  it("serves the default level until an admin picks one", async () => {
+    const res = await api().get("/api/pricing");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ level: DEFAULT_PRICING_LEVEL, registrationFee: REGISTRATION_FEE });
+  });
+
+  it("lets only admins change the level, and only to a known one", async () => {
+    const member = await createUser();
+    expect((await setLevel(2, tokenFor(member))).status).toBe(404);
+    expect((await setLevel(7)).status).toBe(400);
+    expect((await api().get("/api/pricing")).body.level).toBe(DEFAULT_PRICING_LEVEL);
+
+    const res = await setLevel(4);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ level: 4, updatedBy: expect.stringContaining("@") });
+    expect((await api().get("/api/pricing")).body).toMatchObject({ level: 4, registrationFee: PRICING_LEVELS[4].registrationFee });
+  });
+
+  it("prices every new order at the live level", async () => {
+    await setLevel(2);
+    const l2 = PRICING_LEVELS[2];
+    const reg = await createOrder({ purpose: "registration", registration: registrationForm() });
+    expect(reg.body.amount).toBe(l2.registrationFee * 100);
+    expect(await storedOrder(reg.body.orderId)).toMatchObject({ interests: l2.registrationInterests });
+
+    const pack = await createOrder({ purpose: "interest", pack: "premium" }, tokenFor(await createUser()));
+    expect(pack.body.amount).toBe(l2.interestPacks.premium.amount * 100);
+  });
+
+  it("keeps the price an order was created with after the level changes", async () => {
+    const { body } = await createOrder({ purpose: "registration", registration: registrationForm() });
+    await setLevel(4);
+    expect((await api().post("/api/user-register").send(paidOrder(body.orderId))).status).toBe(200);
+    const user = await User.findOne({ "basic.email": "asha@example.test" });
+    expect(user.transactions[0].amountPaid).toBe(REGISTRATION_FEE);
+    expect(user.interests.totalNoOfInterest).toBe(REGISTRATION_INTERESTS);
+  });
+
+  it("stores the level's commission on referred members", async () => {
+    await setLevel(2);
+    const broker = await createBroker();
+    const { body } = await createOrder({ purpose: "registration", registration: registrationForm({ referralId: broker.referralId }) });
+    expect(body.amount).toBe(PRICING_LEVELS[2].referralFee * 100);
+    await api().post("/api/user-register").send(paidOrder(body.orderId));
+    expect((await User.findOne({ "basic.email": "asha@example.test" })).commission).toBe(PRICING_LEVELS[2].brokerCommission);
+  });
+
+  describe("level 1 (free registration)", () => {
+    beforeEach(() => setLevel(1));
+
+    it("registers without payment and gives the starter credits", async () => {
+      const res = await api().post("/api/user-register").send({ registration: registrationForm() });
+      expect(res.status).toBe(200);
+      expect(res.body.token).toBeTypeOf("string");
+      const user = await User.findOne({ "basic.email": "asha@example.test" });
+      expect(user.interests.totalNoOfInterest).toBe(PRICING_LEVELS[1].registrationInterests);
+      expect(user.transactions).toHaveLength(0);
+    });
+
+    it("refuses to open a ₹0 checkout", async () => {
+      const res = await createOrder({ purpose: "registration", registration: registrationForm() });
+      expect(res.status).toBe(400);
+      expect(razorpay.orders.create).not.toHaveBeenCalled();
+    });
+
+    it("still charges for packs and astrology", async () => {
+      const res = await createOrder({ purpose: "interest", pack: "basic" }, tokenFor(await createUser()));
+      expect(res.body.amount).toBe(PRICING_LEVELS[1].interestPacks.basic.amount * 100);
+    });
+  });
+
+  it("refuses free registration at a paid level", async () => {
+    const res = await api().post("/api/user-register").send({ registration: registrationForm() });
+    expect(res.status).toBe(402);
+    expect(await User.countDocuments()).toBe(0);
+  });
+});
+
+describe("broker commission totals", () => {
+  it("adds each member's own commission, counting older members at the legacy rate", async () => {
+    const admin = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const broker = await createBroker();
+    await createUser({ basic: { referralId: broker.referralId } }); // legacy: no stored commission
+    await createUser({ basic: { referralId: broker.referralId }, rest: { commission: 51 } });
+    await createUser({ basic: { referralId: broker.referralId }, rest: { commission: 0 } });
+
+    const list = await api().get("/api/manage/brokers").set("x-auth-token", admin);
+    const row = list.body.brokers.find((b) => b.referralId === broker.referralId);
+    expect(row).toMatchObject({ referred: 3, commissionDue: 152, commissionPaid: 0 });
+
+    const settle = await api().post(`/api/manage/brokers/${broker._id}/settle`).set("x-auth-token", admin);
+    expect(settle.body.msg).toBe("Marked ₹152 as paid (3 members)");
+    const summary = await api().get("/api/manage/summary").set("x-auth-token", tokenFor(broker, "BROKER"));
+    expect(summary.body.commission).toMatchObject({ referred: 3, earned: 152, paid: 152, due: 0 });
   });
 });
