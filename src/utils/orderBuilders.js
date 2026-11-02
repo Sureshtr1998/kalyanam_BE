@@ -3,19 +3,14 @@ import { nanoid } from "nanoid";
 import User from "../models/User.js";
 import Broker from "../models/Broker.js";
 import {
-  ASTRO_FEES,
-  BROKER_REGISTRATION_FEE,
   DISCOUNT_CODES,
   EMAIL_RE,
-  INTEREST_PACKS,
   MOBILE_RE,
   PASSWORD_RULE_MSG,
-  REFERRAL_REGISTRATION_FEE,
-  REGISTRATION_FEE,
-  REGISTRATION_INTERESTS,
   isValidPassword,
   normalizeEmail,
 } from "./constants.js";
+import { getPricing } from "./pricing.js";
 import { ageInYears, parseFloatingDate } from "./dates.js";
 import { HttpError } from "./payments.js";
 import { geocodePlace, validCoords } from "./astrology/astroHelper.js";
@@ -45,19 +40,22 @@ export const findReferralBroker = (code) =>
     : null;
 
 /**
- * Price for a registration with the given (upper-cased) code.
+ * Price (and the broker's commission, if any) for a registration with the
+ * given (upper-cased) code at the live pricing level.
  * Unknown codes are rejected rather than silently charged the normal fee, and
  * a broker can't take the referral discount on their own email / number.
  */
 const registrationPrice = async (code, email, mobile) => {
-  if (!code) return REGISTRATION_FEE;
-  if (DISCOUNT_CODES.includes(code)) return REGISTRATION_FEE;
+  const pricing = await getPricing();
+  const normal = { amount: pricing.registrationFee, interests: pricing.registrationInterests };
+  if (!code) return normal;
+  if (DISCOUNT_CODES.includes(code)) return normal;
   const broker = await findReferralBroker(code);
   if (!broker) throw new HttpError(400, "Invalid referral ID");
   if (broker.email === email || broker.phone === mobile) {
     throw new HttpError(400, "You can't use your own referral ID");
   }
-  return REFERRAL_REGISTRATION_FEE;
+  return { ...normal, amount: pricing.referralFee, commission: pricing.brokerCommission };
 };
 
 /**
@@ -124,13 +122,15 @@ export const buildRegistrationOrder = async (body) => {
     throw new HttpError(400, "Mobile number already registered");
   }
 
+  const price = await registrationPrice(data.referralId, email, mobile);
   return {
     purpose: "registration",
     email,
     phone: mobile,
     name: data.fullName,
-    amount: await registrationPrice(data.referralId, email, mobile),
-    interests: REGISTRATION_INTERESTS,
+    amount: price.amount,
+    interests: price.interests,
+    commission: price.commission,
     note: "Registration",
     registration: {
       ...data,
@@ -175,14 +175,15 @@ export const buildBrokerOrder = async (body) => {
     email,
     phone,
     name: data.name,
-    amount: BROKER_REGISTRATION_FEE,
+    amount: (await getPricing()).brokerRegistrationFee,
     note: "Partner registration",
     broker: { ...data, passwordHash: await bcrypt.hash(body.password, 10) },
   };
 };
 
-export const buildInterestOrder = (user, pack) => {
-  const plan = INTEREST_PACKS[pack];
+export const buildInterestOrder = async (user, pack) => {
+  const packs = (await getPricing()).interestPacks;
+  const plan = Object.prototype.hasOwnProperty.call(packs, pack) ? packs[pack] : null;
   if (!plan) throw new HttpError(400, "Unknown interest pack");
   return {
     purpose: "interest",
@@ -204,7 +205,8 @@ const coordsOf = (lat, lng) => {
 
 export const buildAstroOrder = async (user, astro = {}) => {
   const consultationMode = astro.consultationMode;
-  const amount = ASTRO_FEES[consultationMode];
+  const fees = (await getPricing()).astroFees;
+  const amount = Object.prototype.hasOwnProperty.call(fees, consultationMode) ? fees[consultationMode] : 0;
   if (!amount) throw new HttpError(400, "Choose a consultation type");
 
   /** @type {Record<string, any>} */

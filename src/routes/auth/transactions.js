@@ -7,6 +7,7 @@ import { notify } from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
 import { publishQStash } from "../../config/upStash.js";
 import { isTestPayer } from "../../utils/constants.js";
+import { getPricing } from "../../utils/pricing.js";
 import {
   HttpError,
   getOrder,
@@ -32,6 +33,17 @@ const FULFILMENT_ENDPOINT = {
   broker: "broker-register",
 };
 
+/** Live prices, for display. What is charged is still decided in /create-order. */
+router.get("/pricing", async (_req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    return res.json(await getPricing());
+  } catch (err) {
+    console.error("Pricing error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
 /**
  * Creates a Razorpay order. The amount and what it buys are decided here from
  * `purpose` (+ pack / consultation mode); any amount sent by the client is ignored.
@@ -49,12 +61,16 @@ router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
       const user = req.user;
       if (!user) throw new HttpError(401, "Please log in again");
       if (purpose === "interest") {
-        record = buildInterestOrder(user, req.body.pack);
+        record = await buildInterestOrder(user, req.body.pack);
       } else if (purpose === "astro") {
         record = await buildAstroOrder(user, req.body.astro);
       } else {
         throw new HttpError(400, "Unknown payment type");
       }
+    }
+    // Pricing level 1: registration is free and goes straight to /user-register.
+    if (!(record.amount > 0)) {
+      throw new HttpError(400, "Registration is free right now. Please refresh the page and register again.");
     }
 
     // Admins and test payers are charged ₹1 for anything (live testing).

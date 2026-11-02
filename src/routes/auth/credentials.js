@@ -128,8 +128,9 @@ router.post("/cleanup-uploads", async (req, res) => {
  * @param {Awaited<ReturnType<typeof buildRegistrationOrder>>["registration"]} reg
  * @param {string} uniqueId
  * @param {number} totalNoOfInterest
+ * @param {number} [commission] what the referring broker earns, if any
  */
-const newMemberFrom = (reg, uniqueId, totalNoOfInterest) =>
+const newMemberFrom = (reg, uniqueId, totalNoOfInterest, commission) =>
   new User({
     basic: {
       uniqueId,
@@ -158,11 +159,13 @@ const newMemberFrom = (reg, uniqueId, totalNoOfInterest) =>
       strict: DEFAULT_STRICT,
     },
     interests: { totalNoOfInterest },
+    commission,
   });
 
 /**
- * Free registration (no order). Validated exactly like a paid one, but the
- * member starts with no interest credits and no transaction.
+ * Free registration (no order), only while the pricing level makes
+ * registration free. Validated exactly like a paid one; the member gets that
+ * level's starter credits and no transaction.
  * @param {import("express").Request} req
  * @param {import("express").Response} res
  */
@@ -170,8 +173,11 @@ const registerFree = async (req, res) => {
   const record = await buildRegistrationOrder(
     req.body?.registration || req.body || {},
   );
+  if (record.amount > 0) {
+    throw new HttpError(402, "Registration needs payment. Please refresh the page and try again.");
+  }
   const reg = record.registration;
-  const newUser = newMemberFrom(reg, await generateUniqueId(), 0);
+  const newUser = newMemberFrom(reg, await generateUniqueId(), record.interests, record.commission);
 
   try {
     await newUser.save();
@@ -223,6 +229,7 @@ router.post("/user-register", async (req, res) => {
       { ...reg, email: record.email },
       await generateUniqueId(),
       record.interests,
+      record.commission,
     );
     newUser.transactions.push({
       orderId,
