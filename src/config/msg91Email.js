@@ -3,7 +3,7 @@ import { SUPPORT_EMAIL } from "../utils/constants.js";
 /**
  * Send email using MSG91 template
  * @param {Object} options
- * @param {{ email: string }[]} options.to - recipient email
+ * @param {{ email: string, name?: string }[]} options.to - recipients
  * @param {string} options.template_id - MSG91 template ID
  * @param {Object} options.variables - dynamic variables for the template
  */

@@ -383,7 +383,7 @@ describe("POST /razorpay-webhook", () => {
   });
 
   it("ignores other events", async () => {
-    const res = await send({ event: "payment.failed", payload: {} });
+    const res = await send({ event: "refund.created", payload: {} });
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("ignored");
   });

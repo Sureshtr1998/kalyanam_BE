@@ -9,6 +9,11 @@ import { publishQStash } from "../../config/upStash.js";
 import { isTestPayer } from "../../utils/constants.js";
 import { getPricing } from "../../utils/pricing.js";
 import {
+  markCheckoutFailed,
+  markCheckoutPaid,
+  recordCheckout,
+} from "../../utils/abandoned.js";
+import {
   HttpError,
   getOrder,
   isValidWebhookSignature,
@@ -96,6 +101,8 @@ router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
       amountCharged,
       createdAt: Date.now(),
     });
+    // Kept until they pay, for the admin panel's "Abandoned" win-back list.
+    await recordCheckout({ ...record, orderId: order.id }, amountCharged);
 
     return res.json({
       orderId: order.id,
@@ -114,9 +121,11 @@ router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
 });
 
 /**
- * Razorpay webhook (configure for `payment.captured` with a secret set in
- * RAZORPAY_WEBHOOK_SECRET). If the browser never reported back (closed tab,
- * network drop), this queues the same fulfilment the browser would have done.
+ * Razorpay webhook (configure for `payment.captured`, `payment.failed` and
+ * `order.paid` with a secret set in RAZORPAY_WEBHOOK_SECRET). If the browser
+ * never reported back (closed tab, network drop), `payment.captured` queues the
+ * same fulfilment the browser would have done. The other two only update the
+ * abandoned-checkout list.
  */
 router.post("/razorpay-webhook", async (req, res) => {
   try {
@@ -127,10 +136,23 @@ router.post("/razorpay-webhook", async (req, res) => {
       return res.status(400).json({ status: "invalid signature" });
     }
 
+    const event = req.body?.event;
     const payment = req.body?.payload?.payment?.entity;
-    if (req.body?.event !== "payment.captured" || !payment?.order_id) {
+    if (event === "payment.failed") {
+      await markCheckoutFailed(
+        payment?.order_id,
+        payment?.error_description || payment?.error_reason
+      );
+      return res.status(200).json({ status: "recorded" });
+    }
+    if (event === "order.paid") {
+      await markCheckoutPaid(req.body?.payload?.order?.entity?.id ?? payment?.order_id);
+      return res.status(200).json({ status: "recorded" });
+    }
+    if (event !== "payment.captured" || !payment?.order_id) {
       return res.status(200).json({ status: "ignored" });
     }
+    await markCheckoutPaid(payment.order_id);
 
     const record = await getOrder(payment.order_id);
     if (!record || record.fulfilled) {
