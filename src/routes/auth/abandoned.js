@@ -28,7 +28,9 @@ const MAX_BULK = 50;
 
 /** "YYYY-MM-DD" as the start of that day in IST, or null. */
 const istDay = (v) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(String(v ?? "")) ? new Date(`${v}T00:00:00+05:30`) : null;
+  /^\d{4}-\d{2}-\d{2}$/.test(String(v ?? ""))
+    ? new Date(`${v}T00:00:00+05:30`)
+    : null;
 
 const listFilter = (q) => {
   /** @type {Record<string, any>} */
@@ -47,7 +49,9 @@ const listFilter = (q) => {
       ...(to && { $lt: new Date(to.getTime() + 86400000) }),
     };
   }
-  const search = String(q.q ?? "").trim().slice(0, 80);
+  const search = String(q.q ?? "")
+    .trim()
+    .slice(0, 80);
   if (search) {
     const re = new RegExp(escapeRegex(search), "i");
     filter.$or = [{ name: re }, { email: re }, { mobile: re }];
@@ -93,13 +97,22 @@ router.get("/manage/abandoned", async (req, res) => {
             _id: null,
             total: { $sum: 1 },
             emailed: { $sum: { $cond: [{ $gte: ["$emailCount", 1] }, 1, 0] } },
-            converted: { $sum: { $cond: [{ $ifNull: ["$convertedAt", false] }, 1, 0] } },
-            convertedAfterEmail: { $sum: { $cond: ["$convertedAfterEmail", 1, 0] } },
+            converted: {
+              $sum: { $cond: [{ $ifNull: ["$convertedAt", false] }, 1, 0] },
+            },
+            convertedAfterEmail: {
+              $sum: { $cond: ["$convertedAfterEmail", 1, 0] },
+            },
           },
         },
       ]),
     ]);
-    const s = summary[0] ?? { total: 0, emailed: 0, converted: 0, convertedAfterEmail: 0 };
+    const s = summary[0] ?? {
+      total: 0,
+      emailed: 0,
+      converted: 0,
+      convertedAfterEmail: 0,
+    };
     return res.json({
       rows: rows.map(rowView),
       total,
@@ -132,16 +145,20 @@ const claimSend = async (id, now) => {
       _id: id,
       convertedAt: null,
       emailCount: { $not: { $gte: EMAIL_LIMIT } },
-      $or: [{ lastEmailedAt: null }, { lastEmailedAt: { $lte: new Date(now - EMAIL_GAP_MS) } }],
+      $or: [
+        { lastEmailedAt: null },
+        { lastEmailedAt: { $lte: new Date(now - EMAIL_GAP_MS) } },
+      ],
     },
-    { $inc: { emailCount: 1 }, $set: { lastEmailedAt: new Date(now) } }
+    { $inc: { emailCount: 1 }, $set: { lastEmailedAt: new Date(now) } },
   ).lean();
   if (row) return { row };
 
   const current = await AbandonedCheckout.findById(id).lean();
   if (!current) return { reason: "Not found" };
   if (current.convertedAt) return { reason: "Already joined" };
-  if ((current.emailCount ?? 0) >= EMAIL_LIMIT) return { reason: `Already emailed ${EMAIL_LIMIT} times` };
+  if ((current.emailCount ?? 0) >= EMAIL_LIMIT)
+    return { reason: `Already emailed ${EMAIL_LIMIT} times` };
   return { reason: "Emailed in the last 24 hours" };
 };
 
@@ -149,13 +166,18 @@ const claimSend = async (id, now) => {
 router.post("/manage/abandoned/email", async (req, res) => {
   try {
     await dbConnect();
-    const templateId = process.env.MSG91_TEMPLATE_COMPLETE_REGISTRATION;
-    if (!templateId) {
-      return res.status(500).json({ msg: "Email template is not configured on the server" });
-    }
-    const ids = [...new Set(Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [])];
-    if (!ids.length || ids.length > MAX_BULK || !ids.every((id) => mongoose.isValidObjectId(id))) {
-      return res.status(400).json({ msg: `Choose between 1 and ${MAX_BULK} people` });
+    const templateId = "complete_registration_en";
+    const ids = [
+      ...new Set(Array.isArray(req.body?.ids) ? req.body.ids.map(String) : []),
+    ];
+    if (
+      !ids.length ||
+      ids.length > MAX_BULK ||
+      !ids.every((id) => mongoose.isValidObjectId(id))
+    ) {
+      return res
+        .status(400)
+        .json({ msg: `Choose between 1 and ${MAX_BULK} people` });
     }
     // @ts-ignore
     const admin = req.user;
@@ -176,14 +198,24 @@ router.post("/manage/abandoned/email", async (req, res) => {
       if (member) {
         await AbandonedCheckout.updateOne(
           { _id: id },
-          { $inc: { emailCount: -1 }, $set: { lastEmailedAt: row.lastEmailedAt ?? null } }
+          {
+            $inc: { emailCount: -1 },
+            $set: { lastEmailedAt: row.lastEmailedAt ?? null },
+          },
         );
-        await markConverted({ email: row.email, mobile: row.mobile }, member.createdAt);
+        await markConverted(
+          { email: row.email, mobile: row.mobile },
+          member.createdAt,
+        );
         results.push({ id, ok: false, msg: "Already joined" });
         continue;
       }
 
-      const log = { at: new Date(now), by: admin._id, byName: admin.basic?.fullName };
+      const log = {
+        at: new Date(now),
+        by: admin._id,
+        byName: admin.basic?.fullName,
+      };
       try {
         const response = await sendEmail({
           to: [{ email: row.email, name: row.name }],
@@ -192,7 +224,7 @@ router.post("/manage/abandoned/email", async (req, res) => {
         });
         await AbandonedCheckout.updateOne(
           { _id: id },
-          { $push: { emails: { ...log, ok: true, response } } }
+          { $push: { emails: { ...log, ok: true, response } } },
         );
         results.push({ id, ok: true, msg: "Sent" });
       } catch (err) {
@@ -202,8 +234,14 @@ router.post("/manage/abandoned/email", async (req, res) => {
           {
             $inc: { emailCount: -1 },
             $set: { lastEmailedAt: row.lastEmailedAt ?? null },
-            $push: { emails: { ...log, ok: false, response: err?.response?.data ?? String(err?.message ?? err) } },
-          }
+            $push: {
+              emails: {
+                ...log,
+                ok: false,
+                response: err?.response?.data ?? String(err?.message ?? err),
+              },
+            },
+          },
         );
         results.push({ id, ok: false, msg: "Email provider error" });
       }

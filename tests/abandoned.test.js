@@ -285,12 +285,11 @@ describe("POST /manage/abandoned/email", () => {
     expect((await email(token, ["not-an-id"])).status).toBe(400);
   });
 
-  it("refuses to send when the template id isn't configured", async () => {
+  it("uses the complete_registration_en template when no override is set", async () => {
     delete process.env.MSG91_TEMPLATE_COMPLETE_REGISTRATION;
     const token = await adminToken();
     const r = await seedRow();
-    const res = await email(token, [String(r._id)]);
-    expect(res.status).toBe(500);
-    expect(sendEmail).not.toHaveBeenCalled();
+    expect((await email(token, [String(r._id)])).body.sent).toBe(1);
+    expect(vi.mocked(sendEmail).mock.calls[0][0].template_id).toBe("complete_registration_en");
   });
 });
