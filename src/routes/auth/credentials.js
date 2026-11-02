@@ -27,6 +27,7 @@ import {
 } from "../../utils/payments.js";
 import { buildRegistrationOrder } from "../../utils/orderBuilders.js";
 import { DEFAULT_STRICT } from "../../utils/matching.js";
+import { markCheckoutPaid, markConverted } from "../../utils/abandoned.js";
 
 const router = Router();
 
@@ -187,6 +188,7 @@ const registerFree = async (req, res) => {
     }
     throw err;
   }
+  await markConverted({ email: record.email, mobile: reg.mobile });
 
   notify({
     to: [{ email: record.email }],
@@ -258,6 +260,8 @@ router.post("/user-register", async (req, res) => {
       fulfilled: true,
       paymentId,
     });
+    await markCheckoutPaid(orderId);
+    await markConverted({ email: record.email, mobile: reg.mobile });
 
     notify({
       to: [{ email: record.email }],
