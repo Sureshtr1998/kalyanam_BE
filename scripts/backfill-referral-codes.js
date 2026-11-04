@@ -24,14 +24,18 @@ if (!uri) {
 await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 });
 const missing = { referralCode: { $exists: false } };
 const total = await User.countDocuments(missing);
-console.log(`${total} member(s) without a referral code${dryRun ? " (dry run, nothing written)" : ""}.`);
+console.log(
+  `${total} member(s) without a referral code${dryRun ? " (dry run, nothing written)" : ""}.`,
+);
 
 let done = 0;
 let failed = 0;
 if (!dryRun) {
   // The unique index on referralCode must exist before codes are written.
   await User.createIndexes();
-  for await (const user of User.find(missing).select("_id basic.fullName referralCode").cursor()) {
+  for await (const user of User.find(missing)
+    .select("_id basic.fullName referralCode")
+    .cursor()) {
     try {
       await ensureReferralCode(user);
       done++;
