@@ -1,4 +1,5 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import Broker from "../../models/Broker.js";
@@ -120,7 +121,7 @@ router.get("/hidden-profiles", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: orderedIds } },
-      "-basic.password -hideProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -astrology -shortlisted -profileViews -__v"
+      "-basic.password -hideProfiles -skippedProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -astrology -shortlisted -profileViews -__v"
     ).lean();
 
     // Deleted accounts leave ids behind; skip them.
@@ -169,6 +170,80 @@ router.post("/unhide-profile", auth, async (req, res) => {
   }
 });
 
+// Skip: drop a profile from my matches only. The other member isn't affected.
+router.post("/skip-profile", auth, async (req, res) => {
+  try {
+    await dbConnect();
+
+    const { userId } = req.body || {};
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ success: false, msg: "Invalid profile" });
+    }
+    // @ts-ignore
+    const currentUser = req.user;
+    if (currentUser._id.equals(userId)) {
+      return res.status(400).json({ success: false, msg: "Invalid profile" });
+    }
+
+    // Move to the front so Activity, Skipped lists newest first.
+    await User.updateOne({ _id: currentUser._id }, { $pull: { skippedProfiles: userId } });
+    await User.updateOne(
+      { _id: currentUser._id },
+      { $push: { skippedProfiles: { $each: [userId], $position: 0 } } }
+    );
+
+    return res.status(200).json({
+      success: true,
+      msg: "Skipped. You can bring it back from Activity, Skipped.",
+    });
+  } catch (err) {
+    console.error("Error skipping profile:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+router.post("/unskip-profile", auth, async (req, res) => {
+  try {
+    await dbConnect();
+
+    const { userId } = req.body || {};
+    if (!mongoose.isValidObjectId(userId)) {
+      return res.status(400).json({ success: false, msg: "Invalid profile" });
+    }
+
+    // @ts-ignore
+    await User.updateOne({ _id: req.user._id }, { $pull: { skippedProfiles: userId } });
+
+    return res.status(200).json({
+      success: true,
+      msg: "This profile will show in your matches again",
+    });
+  } catch (err) {
+    console.error("Error unskipping profile:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+router.get("/skipped-profiles", auth, async (req, res) => {
+  try {
+    await dbConnect();
+
+    // @ts-ignore
+    const orderedIds = [...(req.user.skippedProfiles || [])];
+    const users = await User.find({ _id: { $in: orderedIds } }, publicProjection).lean();
+
+    // Deleted accounts leave ids behind; skip them.
+    const sortedUsers = orderedIds
+      .map((id) => users.find((u) => u._id.toString() === id.toString()))
+      .filter(Boolean);
+
+    res.status(200).json({ success: true, count: sortedUsers.length, activities: sortedUsers });
+  } catch (err) {
+    console.error("Error fetching skipped profiles:", err);
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
 /**
  * Matches for the current member. A profile is returned only when
  *  - it fits the member's filters (sent from the UI, defaulting to their preferences), and
@@ -198,6 +273,7 @@ router.post("/fetch-profiles", auth, async (req, res) => {
       ...currentUser.interests.accepted,
       ...currentUser.interests.declined,
       ...currentUser.hideProfiles,
+      ...(currentUser.skippedProfiles || []),
       ...currentUser.interests.sent,
       ...currentUser.interests.viewed,
       ...currentUser.interests.received,

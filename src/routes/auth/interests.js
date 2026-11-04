@@ -121,7 +121,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
-      "-basic.password -transactions -interests -hideProfiles -astrology -shortlisted -profileViews -__v"
+      "-basic.password -transactions -interests -hideProfiles -skippedProfiles -astrology -shortlisted -profileViews -__v"
     ).lean();
 
     const actedAt = (id) => interests.actedAt?.get(String(id)) ?? null;
@@ -304,7 +304,7 @@ router.get("/view-contact", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
-      "-basic.password -transactions -interests -hideProfiles -astrology -shortlisted -profileViews -__v"
+      "-basic.password -transactions -interests -hideProfiles -skippedProfiles -astrology -shortlisted -profileViews -__v"
     ).lean();
 
     const sortedUsers = uniqueOrdered

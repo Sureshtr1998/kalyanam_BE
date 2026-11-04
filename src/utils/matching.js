@@ -49,7 +49,7 @@ const LIST_PREFS = {
 };
 
 const PUBLIC_FIELDS =
-  "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -interests -transactions -astrology -shortlisted -profileViews -__v";
+  "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -skippedProfiles -interests -transactions -astrology -shortlisted -profileViews -__v";
 
 export const publicProjection = PUBLIC_FIELDS;
 
