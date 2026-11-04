@@ -15,6 +15,7 @@ import { ageInYears, parseFloatingDate } from "./dates.js";
 import { HttpError } from "./payments.js";
 import { geocodePlace, validCoords } from "./astrology/astroHelper.js";
 import { areKnownUploads } from "./images.js";
+import { findReferrerMember } from "./referrals.js";
 
 const str = (v, max = 200) =>
   typeof v === "string" ? v.trim().slice(0, max) : "";
@@ -40,8 +41,9 @@ export const findReferralBroker = (code) =>
     : null;
 
 /**
- * Price (and the broker's commission, if any) for a registration with the
- * given (upper-cased) code at the live pricing level.
+ * Price (and the broker's commission or the referring member's reward, if
+ * any) for a registration with the given (upper-cased) code at the live
+ * pricing level. Partner codes are checked first, then member codes.
  * Unknown codes are rejected rather than silently charged the normal fee, and
  * a broker can't take the referral discount on their own email / number.
  */
@@ -51,11 +53,22 @@ const registrationPrice = async (code, email, mobile) => {
   if (!code) return normal;
   if (DISCOUNT_CODES.includes(code)) return normal;
   const broker = await findReferralBroker(code);
-  if (!broker) throw new HttpError(400, "Invalid referral ID");
-  if (broker.email === email || broker.phone === mobile) {
-    throw new HttpError(400, "You can't use your own referral ID");
+  if (broker) {
+    if (broker.email === email || broker.phone === mobile) {
+      throw new HttpError(400, "You can't use your own referral ID");
+    }
+    return { ...normal, amount: pricing.referralFee, commission: pricing.brokerCommission };
   }
-  return { ...normal, amount: pricing.referralFee, commission: pricing.brokerCommission };
+  // A member's refer & earn code: the friend gets the same discount and the
+  // member is paid memberReferralReward once this registration is paid.
+  const member = await findReferrerMember(code);
+  if (!member) throw new HttpError(400, "Invalid referral ID");
+  return {
+    ...normal,
+    amount: pricing.referralFee,
+    referrerId: String(member._id),
+    referralReward: pricing.memberReferralReward,
+  };
 };
 
 /**
@@ -131,6 +144,8 @@ export const buildRegistrationOrder = async (body) => {
     amount: price.amount,
     interests: price.interests,
     commission: price.commission,
+    referrerId: price.referrerId,
+    referralReward: price.referralReward,
     note: "Registration",
     registration: {
       ...data,

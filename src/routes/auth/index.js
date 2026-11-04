@@ -11,6 +11,7 @@ import socialRoutes from "./social.js";
 import brokerRoutes from "./broker.js";
 import manageRoutes from "./manage.js";
 import abandonedRoutes from "./abandoned.js";
+import referralRoutes from "./referrals.js";
 
 const router = Router();
 
@@ -33,6 +34,8 @@ router.use(astrologyRoutes);
 router.use(socialRoutes);
 
 router.use(brokerRoutes);
+
+router.use(referralRoutes);
 
 // Admin panel + broker dashboard (all under /manage).
 router.use(abandonedRoutes);
