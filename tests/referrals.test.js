@@ -198,3 +198,32 @@ describe("admin: refer & earn rewards", () => {
     expect((await User.findById(member._id)).referralRewards[0].status).toBe("pending");
   });
 });
+
+describe("GET /manage/member-referrals", () => {
+  it("lists who joined with whose code, with the reward, for admins only", async () => {
+    const admin = await createUser({ rest: { isAdmin: true } });
+    const member = await referrer();
+    await registerWith("REFMEM2");
+
+    const res = await api().get("/api/manage/member-referrals").set("x-auth-token", tokenFor(admin));
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toHaveLength(1);
+    expect(res.body.rows[0]).toMatchObject({
+      name: "Asha Rao",
+      code: "REFMEM2",
+      paid: referralFee,
+      referrer: { name: member.basic.fullName, uniqueId: member.basic.uniqueId },
+      reward: { amount: memberReferralReward, status: "paid" },
+    });
+    expect(res.body.totals).toEqual({ joined: 1, paid: memberReferralReward, due: 0 });
+
+    // Search by the referrer's Profile ID finds the friend.
+    const byReferrer = await api()
+      .get(`/api/manage/member-referrals?q=${member.basic.uniqueId}`)
+      .set("x-auth-token", tokenFor(admin));
+    expect(byReferrer.body.rows).toHaveLength(1);
+
+    const notAdmin = await api().get("/api/manage/member-referrals").set("x-auth-token", tokenFor(member));
+    expect(notAdmin.status).toBeGreaterThanOrEqual(401);
+  });
+});

@@ -395,6 +395,8 @@ const STATUS_FILTERS = {
   commissionDue: { "basic.referralId": { $exists: true, $nin: ["", null] }, commissionPaidAt: null },
   // Refer & earn rewards Razorpay couldn't refund; staff pay these by hand.
   referralRewardDue: { referralRewards: { $elemMatch: { status: { $in: ["pending", "processing"] } } } },
+  // Joined with another member's refer & earn code.
+  memberReferred: { referredBy: { $exists: true, $ne: null } },
 };
 
 router.get("/manage/users", async (req, res) => {
@@ -869,6 +871,93 @@ router.post("/manage/pricing", adminOnly, async (req, res) => {
     });
   } catch (err) {
     console.error("Broker settle error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+// ───────────────────────── Refer & earn (admin) ─────────────────────────
+
+/**
+ * Members who joined with another member's refer & earn code, newest first,
+ * with who referred them and how that member's reward stands. `q` matches the
+ * new member's or the referrer's name / Profile ID, or the code used.
+ */
+router.get("/manage/member-referrals", adminOnly, async (req, res) => {
+  try {
+    await dbConnect();
+    const page = Math.max(1, parseInt(String(req.query.page)) || 1);
+    const limit = 30;
+    const q = String(req.query.q || "").trim().slice(0, 80);
+    const match = { referredBy: { $exists: true, $ne: null } };
+    if (q) {
+      const re = new RegExp(escapeRegex(q), "i");
+      const referrers = await User.find({ $or: [{ "basic.fullName": re }, { "basic.uniqueId": re }] })
+        .select("_id")
+        .limit(200)
+        .lean();
+      Object.assign(match, {
+        $or: [
+          { "basic.fullName": re },
+          { "basic.uniqueId": re },
+          { referredByCode: re },
+          { referredBy: { $in: referrers.map((r) => r._id) } },
+        ],
+      });
+    }
+
+    const [friends, total, rewardRows] = await Promise.all([
+      User.find(match)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .select("basic.fullName basic.uniqueId basic.gender referredBy referredByCode createdAt transactions")
+        .lean(),
+      User.countDocuments(match),
+      // Every reward ever earned, for the totals at the top.
+      User.aggregate([
+        { $match: { "referralRewards.0": { $exists: true } } },
+        { $unwind: "$referralRewards" },
+        { $group: { _id: "$referralRewards.status", amount: { $sum: "$referralRewards.amount" }, n: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const referrers = await User.find({ _id: { $in: friends.map((f) => f.referredBy) } })
+      .select("basic.fullName basic.uniqueId referralRewards")
+      .lean();
+    const byId = new Map(referrers.map((r) => [String(r._id), r]));
+
+    const rows = friends.map((f) => {
+      const referrer = byId.get(String(f.referredBy));
+      const reward = referrer?.referralRewards?.find((r) => String(r.friend) === String(f._id));
+      const registration = (f.transactions ?? []).find((t) => t.note === "Registration");
+      return {
+        _id: f._id,
+        name: f.basic?.fullName,
+        uniqueId: f.basic?.uniqueId,
+        gender: f.basic?.gender,
+        joinedAt: f.createdAt,
+        paid: registration?.amountPaid ?? 0,
+        code: f.referredByCode,
+        referrer: referrer
+          ? { _id: referrer._id, name: referrer.basic?.fullName, uniqueId: referrer.basic?.uniqueId }
+          : null,
+        reward: reward
+          ? { amount: reward.amount, status: reward.status, paidAt: reward.paidAt ?? null, note: reward.note ?? null }
+          : null,
+      };
+    });
+
+    const totals = { joined: total, paid: 0, due: 0 };
+    for (const r of rewardRows) {
+      if (r._id === "paid") totals.paid += r.amount;
+      else totals.due += r.amount;
+    }
+    // Totals ignore the search: they describe the whole programme.
+    if (q) totals.joined = await User.countDocuments({ referredBy: { $exists: true, $ne: null } });
+
+    return res.json({ rows, total, page, totalPages: Math.max(1, Math.ceil(total / limit)), totals });
+  } catch (err) {
+    console.error("Member referrals error:", err);
     return res.status(500).json({ msg: "Server error" });
   }
 });
