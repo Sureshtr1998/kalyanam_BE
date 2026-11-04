@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { newMemberReferralCode } from "../../utils/referrals.js";
 import mongoose from "mongoose";
 import User from "../../models/User.js";
 import Broker from "../../models/Broker.js";
@@ -6,7 +7,7 @@ import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { notify } from "../../config/msg91Email.js";
 import razorpay from "../../config/razorpay.js";
-import { generateBrokerId, signedImageUrl } from "../../utils/utils.js";
+import { signedImageUrl } from "../../utils/utils.js";
 import { parseFloatingDate, ageInYears } from "../../utils/dates.js";
 import {
   EMAIL_RE,
@@ -64,8 +65,12 @@ const withMember = (handler) => async (req, res) => {
 };
 
 // What a transaction actually earned once refunds are taken out.
+// Refer & earn rewards are paid back as partial refunds, so they come out too.
 const NET_PAID = {
-  $subtract: [{ $ifNull: ["$transactions.amountPaid", 0] }, { $ifNull: ["$transactions.amountRefunded", 0] }],
+  $subtract: [
+    { $ifNull: ["$transactions.amountPaid", 0] },
+    { $add: [{ $ifNull: ["$transactions.amountRefunded", 0] }, { $ifNull: ["$transactions.referralRefunded", 0] }] },
+  ],
 };
 
 // Commission totals for a $group stage. Each member carries the rate of the
@@ -92,8 +97,18 @@ const memberDetail = async (user, kind) => {
   const broker = u.basic.referralId
     ? await Broker.findOne({ referralId: u.basic.referralId }).select("name companyName referralId").lean()
     : null;
+  // Refer & earn: the member whose code this member used.
+  const referredByMember =
+    kind === "admin" && u.referredBy
+      ? await User.findById(u.referredBy).select("basic.fullName basic.uniqueId").lean()
+      : null;
   return {
     ...u,
+    // Refer & earn rewards carry Razorpay ids; admins only.
+    referralRewards: kind === "admin" ? u.referralRewards : undefined,
+    referredByMember: referredByMember
+      ? { _id: referredByMember._id, fullName: referredByMember.basic?.fullName, uniqueId: referredByMember.basic?.uniqueId }
+      : null,
     // Payment details stay with admins.
     transactions: kind === "admin" ? u.transactions : undefined,
     astrology: kind === "admin" ? u.astrology : undefined,
@@ -106,7 +121,7 @@ const memberDetail = async (user, kind) => {
       contactsViewed: u.interests?.viewed?.length ?? 0,
       blocked: u.hideProfiles?.length ?? 0,
       profileViews: u.profileViews?.length ?? 0,
-      totalPaid: (u.transactions ?? []).reduce((s, t) => s + (t.amountPaid || 0) - (t.amountRefunded || 0), 0),
+      totalPaid: (u.transactions ?? []).reduce((s, t) => s + (t.amountPaid || 0) - (t.amountRefunded || 0) - (t.referralRefunded || 0), 0),
     },
     broker,
   };
@@ -321,7 +336,11 @@ router.get("/manage/period", adminOnly, async (req, res) => {
           $group: {
             _id: REVENUE_TYPE,
             total: { $sum: NET_PAID },
-            refunded: { $sum: { $ifNull: ["$transactions.amountRefunded", 0] } },
+            refunded: {
+              $sum: {
+                $add: [{ $ifNull: ["$transactions.amountRefunded", 0] }, { $ifNull: ["$transactions.referralRefunded", 0] }],
+              },
+            },
             n: { $sum: 1 },
           },
         },
@@ -374,6 +393,8 @@ const STATUS_FILTERS = {
   admin: { isAdmin: true },
   referred: { "basic.referralId": { $exists: true, $nin: ["", null] } },
   commissionDue: { "basic.referralId": { $exists: true, $nin: ["", null] }, commissionPaidAt: null },
+  // Refer & earn rewards Razorpay couldn't refund; staff pay these by hand.
+  referralRewardDue: { referralRewards: { $elemMatch: { status: { $in: ["pending", "processing"] } } } },
 };
 
 router.get("/manage/users", async (req, res) => {
@@ -691,6 +712,23 @@ router.post(
   })
 );
 
+/** Refer & earn: records a reward staff paid by hand (UPI / bank) as paid. */
+router.post(
+  "/manage/users/:id/referral-reward",
+  adminOnly,
+  withMember(async (req, res, user) => {
+    const reward = user.referralRewards.id(String(req.body?.rewardId || ""));
+    if (!reward) return res.status(404).json({ msg: "Reward not found" });
+    if (reward.status === "paid") return res.status(400).json({ msg: "This reward is already paid" });
+    reward.status = "paid";
+    reward.paidAt = new Date();
+    // @ts-ignore
+    reward.note = `Paid by hand · admin ${req.user.basic.uniqueId}`;
+    await user.save();
+    return res.json({ msg: `Marked ₹${reward.amount} as paid`, member: await memberDetail(user, "admin") });
+  })
+);
+
 router.delete(
   "/manage/users/:id",
   adminOnly,
@@ -757,10 +795,8 @@ router.post("/manage/brokers/:id/status", adminOnly, async (req, res) => {
     broker.status = status;
     if (firstApproval) {
       // Retry on the (unlikely) clash with an existing code.
-      for (let i = 0; i < 5 && !broker.referralId; i++) {
-        const code = generateBrokerId(broker.name);
-        if (!(await Broker.exists({ referralId: code }))) broker.referralId = code;
-      }
+      // newMemberReferralCode also avoids members' refer & earn codes.
+      broker.referralId = await newMemberReferralCode(broker.name);
     }
     await broker.save();
     if (firstApproval) {

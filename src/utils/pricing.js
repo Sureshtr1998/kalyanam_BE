@@ -9,6 +9,11 @@ import Settings from "../models/Settings.js";
  * Level 1 makes registration free (no payment at all); packs and astrology
  * stay paid at level 2's prices. Each order stores its amount when it is
  * created, so switching levels never changes a checkout in progress.
+ *
+ * Refer & earn: a friend who registers with a member's code pays referralFee
+ * (registrationFee minus the discount) and the member who referred them gets
+ * memberReferralReward back on one of their own Razorpay payments (see
+ * utils/referrals.js). Level 1 is free, so there is nothing to discount or pay.
  */
 export const PRICING_LEVELS = {
   1: {
@@ -16,6 +21,7 @@ export const PRICING_LEVELS = {
     registrationFeeOriginal: null,
     registrationInterests: 5,
     referralFee: 0,
+    memberReferralReward: 0,
     brokerCommission: 0,
     interestPacks: {
       basic: { amount: 81, interests: 21 },
@@ -29,6 +35,7 @@ export const PRICING_LEVELS = {
     registrationFeeOriginal: 599,
     registrationInterests: 21,
     referralFee: 171,
+    memberReferralReward: 41,
     brokerCommission: 51,
     interestPacks: {
       basic: { amount: 81, interests: 21 },
@@ -42,6 +49,7 @@ export const PRICING_LEVELS = {
     registrationFeeOriginal: 999,
     registrationInterests: 36,
     referralFee: 301,
+    memberReferralReward: 71,
     brokerCommission: 101,
     interestPacks: {
       basic: { amount: 101, interests: 21 },
@@ -55,6 +63,7 @@ export const PRICING_LEVELS = {
     registrationFeeOriginal: 1499,
     registrationInterests: 51,
     referralFee: 431,
+    memberReferralReward: 101,
     brokerCommission: 151,
     interestPacks: {
       basic: { amount: 121, interests: 21 },

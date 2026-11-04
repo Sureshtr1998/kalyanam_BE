@@ -16,6 +16,7 @@ import {
   sendHttpError,
 } from "../../utils/payments.js";
 import { findReferralBroker } from "../../utils/orderBuilders.js";
+import { findReferrerMember } from "../../utils/referrals.js";
 
 const router = Router();
 
@@ -163,9 +164,10 @@ router.get("/validate-referral/:referralId", async (req, res) => {
   try {
     await dbConnect();
     const code = String(req.params.referralId || "").trim().toUpperCase();
-    const broker = await findReferralBroker(code);
+    // A partner's code, or a member's refer & earn code.
+    const valid = !!(await findReferralBroker(code)) || !!(await findReferrerMember(code));
     return res.json(
-      broker
+      valid
         ? { valid: true, msg: "Valid referral ID" }
         : { valid: false, msg: "Invalid referral ID" }
     );

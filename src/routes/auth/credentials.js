@@ -28,6 +28,7 @@ import {
 import { buildRegistrationOrder } from "../../utils/orderBuilders.js";
 import { DEFAULT_STRICT } from "../../utils/matching.js";
 import { markCheckoutPaid, markConverted } from "../../utils/abandoned.js";
+import { newMemberReferralCode, payReferralReward } from "../../utils/referrals.js";
 
 const router = Router();
 
@@ -129,9 +130,11 @@ router.post("/cleanup-uploads", async (req, res) => {
  * @param {Awaited<ReturnType<typeof buildRegistrationOrder>>["registration"]} reg
  * @param {string} uniqueId
  * @param {number} totalNoOfInterest
- * @param {number} [commission] what the referring broker earns, if any
+ * @param {{ commission?: number, referrerId?: string, referralCode: string }} extra
+ *   commission: what the referring broker earns; referrerId: the member whose
+ *   refer & earn code was used; referralCode: this member's own code
  */
-const newMemberFrom = (reg, uniqueId, totalNoOfInterest, commission) =>
+const newMemberFrom = (reg, uniqueId, totalNoOfInterest, { commission, referrerId, referralCode }) =>
   new User({
     basic: {
       uniqueId,
@@ -150,8 +153,13 @@ const newMemberFrom = (reg, uniqueId, totalNoOfInterest, commission) =>
       gothra: reg.gothra,
       qualification: reg.qualification,
       images: reg.images,
-      referralId: reg.referralId || undefined,
+      // Partner and promo codes only; a member's code goes in referredByCode
+      // so it never counts towards partner commissions.
+      referralId: (!referrerId && reg.referralId) || undefined,
     },
+    referralCode,
+    referredBy: referrerId || undefined,
+    referredByCode: (referrerId && reg.referralId) || undefined,
     // New members start out matched within their own caste and mother tongue;
     // they can widen this from their profile. Only caste hides them from others.
     partner: {
@@ -178,7 +186,11 @@ const registerFree = async (req, res) => {
     throw new HttpError(402, "Registration needs payment. Please refresh the page and try again.");
   }
   const reg = record.registration;
-  const newUser = newMemberFrom(reg, await generateUniqueId(), record.interests, record.commission);
+  const newUser = newMemberFrom(reg, await generateUniqueId(), record.interests, {
+    commission: record.commission,
+    referrerId: record.referrerId,
+    referralCode: await newMemberReferralCode(reg.fullName),
+  });
 
   try {
     await newUser.save();
@@ -219,6 +231,8 @@ router.post("/user-register", async (req, res) => {
     const existing = await User.findOne({ "basic.email": record.email });
     if (existing) {
       if (existing.transactions.some((t) => t.orderId === orderId)) {
+        // A retry after a call that died mid-way; the reward runs only once.
+        await payReferralReward({ referrerId: record.referrerId, friend: existing, amount: record.referralReward });
         return res.json(loginPayload(existing));
       }
       throw new HttpError(
@@ -231,7 +245,11 @@ router.post("/user-register", async (req, res) => {
       { ...reg, email: record.email },
       await generateUniqueId(),
       record.interests,
-      record.commission,
+      {
+        commission: record.commission,
+        referrerId: record.referrerId,
+        referralCode: await newMemberReferralCode(reg.fullName),
+      },
     );
     newUser.transactions.push({
       orderId,
@@ -262,6 +280,12 @@ router.post("/user-register", async (req, res) => {
     });
     await markCheckoutPaid(orderId);
     await markConverted({ email: record.email, mobile: reg.mobile });
+    // Refer & earn: send the referring member their reward (never throws).
+    await payReferralReward({
+      referrerId: record.referrerId,
+      friend: newUser,
+      amount: record.referralReward,
+    });
 
     notify({
       to: [{ email: record.email }],

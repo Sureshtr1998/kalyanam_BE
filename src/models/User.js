@@ -109,8 +109,38 @@ const userSchema = new Schema(
         refundId: { type: String },
         amountRefunded: { type: Number },
         refundedAt: { type: Date },
+        // Refer & earn rewards paid back on this payment as partial refunds
+        // (see utils/referrals.js). Razorpay never refunds more than was captured.
+        referralRefunded: { type: Number },
       },
     ],
+    // Refer & earn: this member's own code, given to friends (7 characters,
+    // never the same as a partner's code). Old members get one lazily or from
+    // scripts/backfill-referral-codes.js.
+    referralCode: { type: String },
+    // The member whose code this member registered with, and the code itself.
+    // Partner codes stay in basic.referralId; these are only for member codes.
+    referredBy: { type: mongoose.Schema.Types.ObjectId },
+    referredByCode: { type: String },
+    // One entry per friend who registered with referralCode, newest last.
+    referralRewards: {
+      type: [
+        {
+          friend: { type: mongoose.Schema.Types.ObjectId, required: true },
+          friendName: { type: String },
+          amount: { type: Number, required: true },
+          // processing: refund being created; paid: refunded through Razorpay;
+          // pending: no refundable payment or Razorpay refused, staff pay it by hand.
+          status: { type: String, enum: ["processing", "paid", "pending"], default: "processing" },
+          paymentId: { type: String },
+          refundId: { type: String },
+          note: { type: String },
+          createdAt: { type: Date, default: Date.now },
+          paidAt: { type: Date },
+        },
+      ],
+      default: [],
+    },
     astrology: [
       {
         name: { type: String },
@@ -175,6 +205,8 @@ const userSchema = new Schema(
   { timestamps: true }
 );
 userSchema.index({ createdAt: -1 });
+userSchema.index({ referralCode: 1 }, { unique: true, sparse: true });
+userSchema.index({ referredBy: 1 }, { sparse: true });
 userSchema.index({ "basic.gender": 1, isHidden: 1, hasCompleteProfile: 1 });
 const User = model("User", userSchema);
 
