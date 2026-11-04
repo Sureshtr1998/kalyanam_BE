@@ -155,6 +155,8 @@ const userSchema = new Schema(
     staffNote: { type: String },
     // Blocking is mutual: neither side sees the other in matches.
     hideProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    // Skipping is one-way and only affects my matches; newest first.
+    skippedProfiles: { type: [mongoose.Schema.Types.ObjectId], default: [] },
     shortlisted: { type: [mongoose.Schema.Types.ObjectId], default: [] },
     // Newest first, capped (see /profile-view).
     profileViews: {
