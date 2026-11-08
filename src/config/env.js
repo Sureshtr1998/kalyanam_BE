@@ -30,6 +30,8 @@ const RECOMMENDED = {
   OPENAI_API_KEY: "astrology insights fail",
   FREE_ASTRO_API_KEY: "astrology charts fail",
   TIMEZONEDB_KEY: "astrology time zones fail",
+  BACKUP_SECRET: "database backups can't be saved to the cloud (Admin → Backups)",
+  CRON_SECRET: "the daily database backup doesn't run",
 };
 
 export const isProduction =

@@ -84,7 +84,13 @@ vi.mock("../src/config/msg91Email.js", () => ({
 }));
 
 vi.mock("../src/config/imageKit.js", () => ({
-  default: { deleteFile: vi.fn(async () => ({})), upload: vi.fn() },
+  default: {
+    deleteFile: vi.fn(async () => ({})),
+    upload: vi.fn(),
+    listFiles: vi.fn(async () => []),
+    getFileDetails: vi.fn(),
+    url: vi.fn(({ src }) => src),
+  },
 }));
 
 vi.mock("../src/config/msg91Whatsapp.js", () => ({ default: vi.fn(async () => ({})) }));

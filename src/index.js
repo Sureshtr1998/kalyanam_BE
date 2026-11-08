@@ -68,7 +68,9 @@ app.use((err, req, res, _next) => {
   if (err instanceof multer.MulterError) {
     const msg =
       err.code === "LIMIT_FILE_SIZE"
-        ? "Each image must be under 1 MB"
+        ? err.field === "backup"
+          ? "Backup files must be under 4 MB"
+          : "Each image must be under 1 MB"
         : err.code === "LIMIT_UNEXPECTED_FILE"
         ? "You can upload at most 3 images"
         : err.message;
