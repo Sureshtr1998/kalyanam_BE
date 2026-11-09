@@ -149,13 +149,20 @@ router.get("/manage/ad-spend", async (req, res) => {
     return res.json(await withJoins(data));
   } catch (err) {
     console.error("Meta ad spend error:", err.message, err.meta ?? "");
-    // 190 = expired/invalid token, 200/10 = missing permission.
+    // Meta reuses code 200 for several things, so read the message too.
     const code = err.meta?.code;
+    const metaMsg = String(err.meta?.message || "");
     const msg =
       code === 190
         ? "The Meta token has expired or is invalid. Generate a new one."
-        : code === 200 || code === 10
+        : /api access blocked/i.test(metaMsg)
+        ? "Meta has blocked API access for the app (often a developer account check). Open developers.facebook.com and complete any confirmation it asks for."
+        : /ads_read|ads_management|permission/i.test(metaMsg) || code === 10
         ? "The Meta token doesn't have ads_read access to this ad account."
+        : code === 4 || code === 17 || code === 80000 || code === 80004
+        ? "Meta's rate limit was hit. Try again in a few minutes."
+        : err.meta
+        ? `Meta said: ${metaMsg || "unknown error"}`
         : "Couldn't reach Meta right now.";
     return res.status(502).json({ msg });
   }
