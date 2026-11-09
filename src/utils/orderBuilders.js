@@ -16,6 +16,7 @@ import { HttpError } from "./payments.js";
 import { geocodePlace, validCoords } from "./astrology/astroHelper.js";
 import { areKnownUploads } from "./images.js";
 import { findReferrerMember } from "./referrals.js";
+import upStash from "../config/upStash.js";
 
 const str = (v, max = 200) =>
   typeof v === "string" ? v.trim().slice(0, max) : "";
@@ -185,6 +186,16 @@ export const buildBrokerOrder = async (body) => {
   if (await Broker.exists({ $or: [{ email }, { phone }] })) {
     throw new HttpError(400, "A partner is already registered with this email or phone");
   }
+  // Set by /broker-verify-otp for the email + number the partner proved they own.
+  const token = typeof body.verificationToken === "string" ? body.verificationToken : "";
+  const verified = token ? await upStash.get(`broker_verified:${token}`) : null;
+  if (!verified || verified.email !== email || verified.phone !== phone) {
+    throw new HttpError(400, "Please verify your email and phone number with the OTPs first.");
+  }
+  // Uploaded before payment, so the webhook fallback can still attach them.
+  if (!validImages(body.idProofs) || !(await areKnownUploads(body.idProofs))) {
+    throw new HttpError(400, "Please upload your ID proof again.");
+  }
   return {
     purpose: "broker",
     email,
@@ -192,7 +203,11 @@ export const buildBrokerOrder = async (body) => {
     name: data.name,
     amount: (await getPricing()).brokerRegistrationFee,
     note: "Partner registration",
-    broker: { ...data, passwordHash: await bcrypt.hash(body.password, 10) },
+    broker: {
+      ...data,
+      idProofs: body.idProofs.map((i) => ({ url: i.url, fileId: i.fileId })),
+      passwordHash: await bcrypt.hash(body.password, 10),
+    },
   };
 };
 

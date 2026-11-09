@@ -29,6 +29,7 @@ const resolveToken = async (req, token) => {
     const broker = await Broker.findById(decoded.id);
     if (!broker) return "Partner account not found";
     if (broker.status === "suspended") return "This partner account is suspended";
+    if (broker.status === "rejected") return "This partner application was not approved";
     if (issuedBeforePasswordChange(decoded, broker)) return SESSION_ENDED;
     req.broker = broker;
     req.role = "BROKER";

@@ -227,6 +227,7 @@ router.get("/manage/summary", async (req, res) => {
         },
       ]),
       Broker.aggregate([
+        { $match: { status: { $ne: "rejected" } } },
         {
           $group: {
             _id: {
@@ -348,7 +349,14 @@ router.get("/manage/period", adminOnly, async (req, res) => {
       Broker.aggregate([
         { $unwind: "$transactions" },
         { $match: paidIn },
-        { $group: { _id: null, total: { $sum: { $ifNull: ["$transactions.amountPaid", 0] } }, n: { $sum: 1 } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: { $ifNull: ["$transactions.amountPaid", 0] } },
+            refunded: { $sum: { $ifNull: ["$transactions.amountRefunded", 0] } },
+            n: { $sum: 1 },
+          },
+        },
       ]),
       Broker.countDocuments(created),
     ]);
@@ -363,6 +371,7 @@ router.get("/manage/period", adminOnly, async (req, res) => {
     const partnerFees = partnerRows[0];
     if (partnerFees?.n) {
       revenue.total += partnerFees.total;
+      revenue.refunded += partnerFees.refunded;
       revenue.payments += partnerFees.n;
       revenue.byType.partner = { total: partnerFees.total, count: partnerFees.n };
     }
@@ -791,6 +800,11 @@ router.post("/manage/brokers/:id/status", adminOnly, async (req, res) => {
     }
     const broker = await Broker.findById(req.params.id);
     if (!broker) return res.status(404).json({ msg: "Partner not found" });
+    if (broker.status === "rejected") {
+      return res.status(400).json({ msg: "This application was rejected and refunded. They need to apply again." });
+    }
+    if (broker.status === status) return res.json({ msg: "No change", broker: brokerView(broker) });
+    const wasSuspended = broker.status === "suspended";
 
     // Only the first approval issues a code and emails it; reactivating doesn't.
     const firstApproval = status === "approved" && !broker.referralId;
@@ -807,6 +821,18 @@ router.post("/manage/brokers/:id/status", adminOnly, async (req, res) => {
         template_id: "broker_confirmation",
         variables: { userName: broker.name, referralId: broker.referralId },
       });
+    } else if (status === "suspended") {
+      notify({
+        to: [{ email: broker.email, name: broker.name }],
+        template_id: "broker_suspended",
+        variables: { userName: broker.name },
+      });
+    } else if (wasSuspended) {
+      notify({
+        to: [{ email: broker.email, name: broker.name }],
+        template_id: "broker_reactivated",
+        variables: { userName: broker.name, referralId: broker.referralId },
+      });
     }
     return res.json({
       msg:
@@ -819,6 +845,70 @@ router.post("/manage/brokers/:id/status", adminOnly, async (req, res) => {
     });
   } catch (err) {
     console.error("Broker status error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+/**
+ * Turns down a pending application: refunds the registration fee in full and
+ * emails the reason. The record stays, so the same email / number can't
+ * simply re-apply; support can delete it if they should.
+ */
+router.post("/manage/brokers/:id/reject", adminOnly, async (req, res) => {
+  try {
+    await dbConnect();
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ msg: "Invalid request" });
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 500) : "";
+    if (!reason) return res.status(400).json({ msg: "Please give a reason. It is included in the email to them." });
+    const broker = await Broker.findById(req.params.id);
+    if (!broker) return res.status(404).json({ msg: "Partner not found" });
+    if (broker.status !== "pending" || broker.referralId) {
+      return res.status(400).json({ msg: "Only applications awaiting approval can be rejected" });
+    }
+
+    let refunded = 0;
+    const refundIds = [];
+    for (const t of broker.transactions) {
+      if (!t.paymentId || !(t.amountPaid > 0) || t.refundedAt) continue;
+      let refund;
+      try {
+        refund = await razorpay.payments.refund(t.paymentId, {
+          speed: "normal",
+          // @ts-ignore
+          notes: { reason: "Partner application rejected", admin: req.user.basic.uniqueId, partner: broker.email },
+        });
+      } catch (err) {
+        // Keep whatever was already refunded on record before giving up.
+        await broker.save();
+        console.error("Razorpay partner refund error:", err?.error || err);
+        return res.status(400).json({ msg: err?.error?.description || "Razorpay could not process this refund" });
+      }
+      t.refundId = refund.id;
+      t.amountRefunded = refund.amount != null ? refund.amount / 100 : t.amountPaid;
+      t.refundedAt = new Date();
+      refunded += t.amountRefunded;
+      refundIds.push(refund.id);
+    }
+
+    broker.status = "rejected";
+    broker.rejectReason = reason;
+    await broker.save();
+    notify({
+      to: [{ email: broker.email, name: broker.name }],
+      template_id: "broker_rejected",
+      variables: {
+        userName: broker.name,
+        reason,
+        amount: refunded,
+        refundId: refundIds.join(", ") || "-",
+      },
+    });
+    return res.json({
+      msg: refunded ? `Rejected · ₹${refunded} refunded` : "Rejected",
+      broker: brokerView(broker),
+    });
+  } catch (err) {
+    console.error("Broker reject error:", err);
     return res.status(500).json({ msg: "Server error" });
   }
 });

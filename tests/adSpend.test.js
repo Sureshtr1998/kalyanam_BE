@@ -48,13 +48,13 @@ describe("GET /manage/ad-spend", () => {
     ]);
     const admin = await createUser({ rest: { isAdmin: true } });
     await createUser();
-    await createUser({ basic: { referralId: "REF1" } });
+    await createUser({ basic: { referralId: "REF1" }, rest: { transactions: [{ amountPaid: 1000, amountRefunded: 100, dateOfTrans: new Date() }] } });
 
     const res = await api().get("/api/manage/ad-spend?refresh=1").set("x-auth-token", tokenFor(admin));
     expect(res.status).toBe(200);
     expect(res.body.days).toHaveLength(14);
     const last = res.body.days.at(-1);
-    expect(last).toMatchObject({ date: today(), spend: 600.5, clicks: 80, leads: 5, registrations: 2, joined: 3, direct: 2 });
+    expect(last).toMatchObject({ date: today(), spend: 600.5, clicks: 80, leads: 5, registrations: 2, joined: 3, direct: 2, earned: 900 });
     // Days Meta leaves out are filled with zeros.
     expect(res.body.days[0]).toMatchObject({ spend: 0, registrations: 0 });
   });

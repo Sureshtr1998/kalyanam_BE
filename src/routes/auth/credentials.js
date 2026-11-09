@@ -326,6 +326,11 @@ router.post("/login", loginLimiter, async (req, res) => {
       if (!broker || !(await bcrypt.compare(password, broker.password))) {
         return res.status(400).json({ msg: "Invalid partner credentials" });
       }
+      if (broker.status === "rejected") {
+        return res.status(403).json({
+          msg: "Your partner application was not approved. Please contact support for details.",
+        });
+      }
       if (broker.status === "suspended") {
         return res
           .status(403)

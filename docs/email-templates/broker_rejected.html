@@ -1,0 +1,45 @@
+<!-- MSG91 template: broker_rejected · subject: About your partner application · variables: {{userName}}, {{reason}}, {{amount}}, {{refundId}}, {{contactEmail}} (added by sendEmail). Sent by src/routes/auth/manage.js when an admin rejects a pending partner application. The fee is refunded in full. -->
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">We couldn't approve your partner application. Your ₹{{amount}} fee has been refunded in full.</div>
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="background:#fff8f1;">
+  <tr>
+    <td align="center" style="padding:24px 12px;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="max-width:560px;">
+        <tr>
+          <td align="center" style="padding:8px 0 20px;">
+            <a href="https://www.seetharamakalyana.in/"><img src="https://www.seetharamakalyana.in/logo.png" alt="Seetha Rama Kalyana" width="88" height="88" style="display:block;margin:0 auto 10px;border:0;width:88px;height:88px;border-radius:44px;"></a>
+            <a href="https://www.seetharamakalyana.in/" style="text-decoration:none;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#c2410c;">Seetha Rama Kalyana</a>
+            <div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#7a6352;margin-top:4px;">Matrimony, made with care</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#ffffff;border-radius:14px;border-top:4px solid #f59e0b;padding:32px 28px;box-shadow:0 1px 3px rgba(154,52,18,0.08);">
+            <h1 style="margin:0 0 16px;font-family:Georgia,'Times New Roman',serif;font-size:24px;line-height:32px;font-weight:normal;color:#9a3412;">About your partner application</h1>
+            <p style="margin:0 0 16px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;">Namaste {{userName}},</p>
+            <p style="margin:0 0 16px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;">Thank you for applying to partner with Seetha Rama Kalyana. After reviewing your application, we are not able to approve it at this time.</p>
+            <p style="margin:0 0 16px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;"><strong>Reason:</strong> {{reason}}</p>
+            <p style="margin:0 0 16px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;">We have refunded your registration fee in full:</p>
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 20px;background:#fff8f1;border-radius:10px;padding:12px 16px;">
+              <tr>
+                <td style="padding:4px 0;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#7a6352;width:40%;">Amount</td>
+                <td style="padding:4px 0;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#2b1a0e;font-weight:bold;">₹{{amount}}</td>
+              </tr>
+              <tr>
+                <td style="padding:4px 0;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#7a6352;width:40%;">Refund ID</td>
+                <td style="padding:4px 0;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#2b1a0e;font-weight:bold;">{{refundId}}</td>
+              </tr>
+            </table>
+            <p style="margin:0 0 16px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;">The money goes back to the card, UPI or bank account you paid with. Banks usually show it within 5–7 working days.</p>
+            <p style="margin:0 0 16px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;">If you have questions, or can share the details we need, write to us at <a href="mailto:{{contactEmail}}" style="color:#c2410c;">{{contactEmail}}</a>.</p>
+            <p style="margin:8px 0 0;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:24px;color:#2b1a0e;">Warm regards,<br>Team Seetha Rama Kalyana</p>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding:24px 16px 8px;">
+            <p style="margin:0 0 12px;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:20px;color:#7a6352;">Questions? Write to us at <a href="mailto:{{contactEmail}}" style="color:#c2410c;">{{contactEmail}}</a></p>
+            <p style="margin:0;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#7a6352;"><a href="https://www.seetharamakalyana.in/" style="color:#7a6352;">seetharamakalyana.in</a> &nbsp;·&nbsp; <a href="https://www.seetharamakalyana.in/privacy" style="color:#7a6352;">Privacy</a> &nbsp;·&nbsp; <a href="https://www.seetharamakalyana.in/terms" style="color:#7a6352;">Terms</a></p>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

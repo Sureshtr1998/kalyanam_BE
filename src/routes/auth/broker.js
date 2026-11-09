@@ -1,14 +1,24 @@
+import crypto from "node:crypto";
 import { Router } from "express";
+import otpGenerator from "otp-generator";
 import Broker from "../../models/Broker.js";
 import User from "../../models/User.js";
 import upload, { requireImageContent } from "../../middleware/upload.js";
-import { anonymousUploadLimiter, lookupLimiter, uploadLimiter } from "../../middleware/otpLimiter.js";
+import otpLimiter, {
+  anonymousUploadLimiter,
+  countHit,
+  lookupLimiter,
+  uploadLimiter,
+  verifyOtpLimiter,
+} from "../../middleware/otpLimiter.js";
 import { areKnownUploads, rememberAnonymousUploads } from "../../utils/images.js";
 import { brokerAuth } from "../../middleware/auth.js";
-import { notify } from "../../config/msg91Email.js";
+import sendEmail, { notify } from "../../config/msg91Email.js";
+import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
+import upStash from "../../config/upStash.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { uploadToImageKit } from "../../utils/utils.js";
-import { normalizeEmail } from "../../utils/constants.js";
+import { EMAIL_RE, MOBILE_RE, normalizeEmail } from "../../utils/constants.js";
 import {
   HttpError,
   resolvePaidOrder,
@@ -31,6 +41,7 @@ const brokerView = (b) => ({
   caste: b.caste,
   motherTongue: b.motherTongue,
   referralId: b.referralId,
+  rejectReason: b.rejectReason,
   status: b.referralId && b.status !== "suspended" ? "approved" : b.status,
   createdAt: b.createdAt,
 });
@@ -53,6 +64,90 @@ router.get("/broker-validation", lookupLimiter, async (req, res) => {
   } catch (err) {
     console.error("Broker Validation Error:", err);
     res.status(500).json({ msg: "Server error" });
+  }
+});
+
+const MAX_OTP_ATTEMPTS = 5;
+// OTP sends (one email + one WhatsApp each) per email / number per hour.
+const MAX_SENDS_PER_HOUR = 5;
+const otpKey = (email, phone) => `broker_otp:${email}:${phone}`;
+
+const newOtp = () =>
+  otpGenerator.generate(6, { upperCaseAlphabets: false, specialChars: false, lowerCaseAlphabets: false });
+
+const readContact = (body) => ({
+  email: normalizeEmail(body?.email),
+  phone: typeof body?.mobile === "string" ? body.mobile : "",
+});
+
+/**
+ * Partners sign up before they have an account, so their OTPs are keyed by the
+ * email + number pair rather than a user id.
+ */
+router.post("/broker-send-otp", otpLimiter, async (req, res) => {
+  const { email, phone } = readContact(req.body);
+  if (!EMAIL_RE.test(email) || !MOBILE_RE.test(phone)) {
+    return res.status(400).json({ success: false, msg: "Enter a valid email and 10-digit WhatsApp number" });
+  }
+  try {
+    const hour = 60 * 60 * 1000;
+    const [byEmail, byPhone] = await Promise.all([
+      countHit(`broker-otp:${email}`, hour),
+      countHit(`broker-otp:${phone}`, hour),
+    ]);
+    if (byEmail > MAX_SENDS_PER_HOUR || byPhone > MAX_SENDS_PER_HOUR) {
+      return res.status(429).json({ success: false, msg: "Too many codes sent. Please try again in an hour." });
+    }
+    await dbConnect();
+    if (await Broker.exists({ email })) {
+      return res.status(400).json({ success: false, msg: "Email already exists" });
+    }
+    if (await Broker.exists({ phone })) {
+      return res.status(400).json({ success: false, msg: "Mobile number already registered" });
+    }
+
+    const record = { emailOtp: newOtp(), mobileOtp: newOtp(), attempts: 0 };
+    await upStash.set(otpKey(email, phone), JSON.stringify(record), { ex: 300 });
+    await sendEmail({ to: [{ email }], template_id: "otp_verify_2", variables: { otp: record.emailOtp } });
+    await sendWhatsappOTP(`91${phone}`, record.mobileOtp);
+    return res.json({ success: true, msg: "OTP sent to email and WhatsApp" });
+  } catch (err) {
+    console.error("Broker send OTP error:", err);
+    return res.status(500).json({ success: false, msg: "Failed to send OTP" });
+  }
+});
+
+/**
+ * Checks both codes and returns a token that /create-order needs for this
+ * exact email + number before it will take a partner's payment.
+ */
+router.post("/broker-verify-otp", verifyOtpLimiter, async (req, res) => {
+  const { email, phone } = readContact(req.body);
+  const { emailOtp, mobileOtp } = req.body || {};
+  try {
+    const key = otpKey(email, phone);
+    const record = await upStash.get(key);
+    if (!record) return res.status(400).json({ success: false, msg: "OTP not found or expired" });
+
+    const emailOk = String(record.emailOtp) === String(emailOtp);
+    const mobileOk = String(record.mobileOtp) === String(mobileOtp);
+    if (!emailOk || !mobileOk) {
+      const attempts = (record.attempts || 0) + 1;
+      if (attempts >= MAX_OTP_ATTEMPTS) {
+        await upStash.del(key);
+        return res.status(400).json({ success: false, msg: "Too many wrong attempts. Please request new OTPs." });
+      }
+      await upStash.set(key, JSON.stringify({ ...record, attempts }), { keepTtl: true });
+      return res.status(400).json({ success: false, msg: !emailOk ? "Invalid email OTP" : "Invalid WhatsApp OTP" });
+    }
+
+    await upStash.del(key);
+    const verificationToken = crypto.randomBytes(24).toString("hex");
+    await upStash.set(`broker_verified:${verificationToken}`, JSON.stringify({ email, phone }), { ex: 3600 });
+    return res.json({ success: true, msg: "Email and phone verified", verificationToken });
+  } catch (err) {
+    console.error("Broker verify OTP error:", err);
+    return res.status(500).json({ success: false, msg: "Server error" });
   }
 });
 
@@ -93,7 +188,8 @@ router.post("/broker-register", async (req, res) => {
     const { record, orderId, paymentId } = await resolvePaidOrder(req, "broker");
     const data = record.broker;
 
-    let idProofs = (Array.isArray(req.body?.idProofs) ? req.body.idProofs : [])
+    // Saved with the order since it was created; older orders sent them here.
+    let idProofs = (Array.isArray(data.idProofs) && data.idProofs.length ? data.idProofs : Array.isArray(req.body?.idProofs) ? req.body.idProofs : [])
       .filter((i) => i && typeof i.url === "string" && i.url.startsWith("https://") && typeof i.fileId === "string")
       .slice(0, 3)
       .map((i) => ({ url: i.url, fileId: i.fileId }));
