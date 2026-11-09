@@ -28,6 +28,15 @@ import {
 // registrationForm()'s photo, as if uploaded through /user-register/upload-images.
 beforeEach(() => upStash.set("upload:asha", "1"));
 
+const idProof = { url: "https://ik.example.test/asha.jpg", fileId: "asha" };
+const brokerForm = { name: "Lakshmi", email: "l@example.test", phone: "9000000001", companyName: "LM", address: "Mysuru", caste: ["Brahmin"], password: "Secret@123", idProofs: [idProof] };
+/** A partner sign-up whose email + number already passed /broker-verify-otp. */
+const verifiedBroker = async (overrides = {}) => {
+  const form = { ...brokerForm, ...overrides };
+  await upStash.set("broker_verified:tok_test", JSON.stringify({ email: form.email, phone: form.phone }));
+  return { ...form, verificationToken: "tok_test" };
+};
+
 const storedOrder = (orderId) => upStash.get(`rzp_order:${orderId}`);
 
 // /create-order is rate limited per client IP; give each call its own so the
@@ -136,7 +145,7 @@ describe("POST /create-order (pricing)", () => {
   it("prices partner registration", async () => {
     const res = await createOrder({
       purpose: "broker",
-      broker: { name: "Lakshmi", email: "l@example.test", phone: "9000000001", companyName: "LM", address: "Mysuru", caste: ["Brahmin"], password: "Secret@123" },
+      broker: await verifiedBroker(),
     });
     expect(res.status).toBe(200);
     expect(res.body.amount).toBe(BROKER_REGISTRATION_FEE * 100);
@@ -328,7 +337,7 @@ describe("POST /broker-register (partner fulfilment)", () => {
   it("creates a pending partner once", async () => {
     const { body } = await createOrder({
       purpose: "broker",
-      broker: { name: "Lakshmi", email: "l@example.test", phone: "9000000001", companyName: "LM", address: "Mysuru", caste: ["Brahmin"], password: "Secret@123" },
+      broker: await verifiedBroker(),
     });
     const first = await api().post("/api/broker-register").send(paidOrder(body.orderId));
     const again = await api().post("/api/broker-register").send(paidOrder(body.orderId));
@@ -339,6 +348,28 @@ describe("POST /broker-register (partner fulfilment)", () => {
     expect(brokers).toHaveLength(1);
     expect(brokers[0].status).toBe("pending");
     expect(brokers[0].referralId).toBeUndefined();
+    expect(brokers[0].idProofs.map((p) => p.fileId)).toEqual(["asha"]);
+  });
+
+  it("keeps the ID proof when the webhook retry creates the partner", async () => {
+    const { body } = await createOrder({ purpose: "broker", broker: await verifiedBroker() });
+    // The internal retry sends no idProofs; they come from the stored order.
+    const res = await api()
+      .post("/api/broker-register")
+      .set("x-internal-secret", process.env.INTERNAL_ROUTE_SECRET)
+      .send({ orderId: body.orderId, paymentId: "pay_hook" });
+
+    expect(res.status).toBe(201);
+    const broker = await Broker.findOne({ email: "l@example.test" });
+    expect(broker.idProofs.map((p) => p.fileId)).toEqual(["asha"]);
+  });
+
+  it("refuses an order whose ID proof wasn't uploaded through us", async () => {
+    const res = await createOrder({
+      purpose: "broker",
+      broker: await verifiedBroker({ idProofs: [{ url: "https://evil.example/x.jpg", fileId: "nope" }] }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

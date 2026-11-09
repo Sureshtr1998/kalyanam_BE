@@ -30,7 +30,7 @@ const BrokerSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "suspended"],
+      enum: ["pending", "approved", "suspended", "rejected"],
       default: "pending",
     },
     transactions: [
@@ -40,8 +40,13 @@ const BrokerSchema = new Schema(
         amountPaid: { type: Number },
         note: { type: String },
         dateOfTrans: { type: Date, default: Date.now },
+        refundId: { type: String },
+        amountRefunded: { type: Number },
+        refundedAt: { type: Date },
       },
     ],
+    // Why an admin turned the application down; shown in the email to them.
+    rejectReason: { type: String },
     lastActiveAt: { type: Date },
     // Tokens issued before this are refused (see middleware/auth.js).
     passwordChangedAt: { type: Date },

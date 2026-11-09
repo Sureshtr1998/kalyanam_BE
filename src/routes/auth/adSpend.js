@@ -2,6 +2,7 @@ import { Router } from "express";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import upStash from "../../config/upStash.js";
 import User from "../../models/User.js";
+import Broker from "../../models/Broker.js";
 import dbConnect from "../../utils/dbConnect.js";
 
 /*
@@ -125,9 +126,41 @@ const joinsByDay = async (days, tz) => {
   });
 };
 
+/** Money left after refunds on one payment (same rule as the Overview's revenue). */
+const NET_PAID = {
+  $subtract: [
+    { $ifNull: ["$transactions.amountPaid", 0] },
+    { $add: [{ $ifNull: ["$transactions.amountRefunded", 0] }, { $ifNull: ["$transactions.referralRefunded", 0] }] },
+  ],
+};
+
+/**
+ * Money earned on each day (member payments + partner fees, net of refunds),
+ * so the Overview can show spend vs earnings per day.
+ */
+const earningsByDay = async (days, tz) => {
+  await dbConnect();
+  const since = new Date(Date.now() - (days.length + 1) * 86400000);
+  const pipeline = [
+    { $unwind: "$transactions" },
+    { $match: { "transactions.dateOfTrans": { $gte: since } } },
+    {
+      $group: {
+        _id: { $dateToString: { format: "%Y-%m-%d", date: "$transactions.dateOfTrans", timezone: tz } },
+        earned: { $sum: NET_PAID },
+      },
+    },
+  ];
+  const [members, partners] = await Promise.all([User.aggregate(pipeline), Broker.aggregate(pipeline)]);
+  const map = new Map();
+  for (const r of [...members, ...partners]) map.set(r._id, (map.get(r._id) ?? 0) + r.earned);
+  return days.map((d) => ({ ...d, earned: map.get(d.date) ?? 0 }));
+};
+
 const withJoins = async (data) => {
   try {
-    return { ...data, days: await joinsByDay(data.days, data.account.timezone) };
+    const tz = data.account.timezone;
+    return { ...data, days: await earningsByDay(await joinsByDay(data.days, tz), tz) };
   } catch (err) {
     console.error("Ad spend joins error:", err);
     return data;
