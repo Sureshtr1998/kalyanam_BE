@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { api, createUser, PASSWORD, tokenFor } from "./helpers.js";
+import { api, createBroker, createUser, PASSWORD, tokenFor } from "./helpers.js";
 
 describe("app", () => {
   it("answers the health check without a database round-trip", async () => {
@@ -59,6 +59,20 @@ describe("auth", () => {
     const res = await api().post("/api/login").send({ email: user.basic.email, password: "nope" });
     expect(res.status).toBe(400);
     expect(res.body.msg).toBe("Invalid credentials");
+  });
+
+  it("logs a member in from partner mode when there's no partner account", async () => {
+    const user = await createUser();
+    const res = await api().post("/api/login").send({ email: user.basic.email, password: PASSWORD, isPartner: true });
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe("USER");
+  });
+
+  it("partner mode still signs a partner into the partner account", async () => {
+    const broker = await createBroker();
+    const res = await api().post("/api/login").send({ email: broker.email, password: PASSWORD, isPartner: true });
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe("BROKER");
   });
 
   it("protects member routes", async () => {
