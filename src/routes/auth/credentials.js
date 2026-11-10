@@ -321,9 +321,13 @@ router.post("/login", loginLimiter, async (req, res) => {
       return res.status(400).json({ msg: "Email and password are required" });
     }
 
-    if (req.body?.isPartner) {
-      const broker = await Broker.findOne({ email }).select("+password");
-      if (!broker || !(await bcrypt.compare(password, broker.password))) {
+    // Partner mode with no partner account for this email: most likely a member
+    // who opened partner login by mistake, so fall through to member login.
+    const broker = req.body?.isPartner
+      ? await Broker.findOne({ email }).select("+password")
+      : null;
+    if (broker) {
+      if (!(await bcrypt.compare(password, broker.password))) {
         return res.status(400).json({ msg: "Invalid partner credentials" });
       }
       if (broker.status === "rejected") {

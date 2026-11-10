@@ -15,11 +15,14 @@ const MAX_OTP_ATTEMPTS = 5;
 const MAX_RESETS_PER_HOUR = 5;
 
 // Members and matchmaker partners are separate accounts that may share an
-// email, so their reset codes are kept apart.
-const scopeOf = (body) => (body?.isPartner ? "partner:" : "");
+// email, so their reset codes are kept apart. A partner-mode request for an
+// email with no partner account is treated as a member's (someone who opened
+// partner login by mistake), the same fallback as /login.
+const scopeOf = async (body, email) =>
+  body?.isPartner && (await Broker.exists({ email })) ? "partner:" : "";
 
-const accountExists = (isPartner, email) =>
-  isPartner ? Broker.exists({ email }) : User.exists({ "basic.email": email });
+const accountExists = (scope, email) =>
+  scope ? Broker.exists({ email }) : User.exists({ "basic.email": email });
 
 router.post("/request-reset", otpLimiter, async (req, res) => {
   try {
@@ -33,7 +36,8 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
     // to find out who is registered.
     const sent = { success: true, msg: "If an account exists for this email, we've sent it a reset code" };
 
-    const hits = await countHit(`reset:${scopeOf(req.body)}${email}`, 60 * 60 * 1000);
+    const scope = await scopeOf(req.body, email);
+    const hits = await countHit(`reset:${scope}${email}`, 60 * 60 * 1000);
     if (hits > MAX_RESETS_PER_HOUR) {
       return res.status(429).json({
         success: false,
@@ -41,7 +45,7 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
       });
     }
 
-    if (!(await accountExists(req.body?.isPartner, email))) return res.json(sent);
+    if (!(await accountExists(scope, email))) return res.json(sent);
 
     // Generate 6-digit OTP
     const otp = otpGenerator.generate(6, {
@@ -52,7 +56,7 @@ router.post("/request-reset", otpLimiter, async (req, res) => {
 
     // Store in Redis with expiry (5 minutes)
     await upStash.set(
-      `reset_otp:${scopeOf(req.body)}${email}`,
+      `reset_otp:${scope}${email}`,
       JSON.stringify({ otp, attempts: 0 }),
       { ex: 300 }
     );
@@ -79,7 +83,7 @@ router.post("/verify-otp", verifyOtpLimiter, async (req, res) => {
   try {
     await dbConnect();
 
-    const scope = scopeOf(req.body);
+    const scope = await scopeOf(req.body, email);
     const key = `reset_otp:${scope}${email}`;
     const record = await upStash.get(key);
 
@@ -125,7 +129,7 @@ router.post("/reset-password", verifyOtpLimiter, async (req, res) => {
       return res.status(400).json({ success: false, msg: PASSWORD_RULE_MSG });
     }
 
-    const scope = scopeOf(req.body);
+    const scope = await scopeOf(req.body, email);
     const verified = await upStash.get(`otp_verified:${scope}${email}`);
     if (!verified)
       return res

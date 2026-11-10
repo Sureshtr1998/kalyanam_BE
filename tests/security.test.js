@@ -87,6 +87,18 @@ describe("password reset", () => {
     return api().post("/api/reset-password").send({ email, newPassword });
   };
 
+  it("resets a member's password from partner mode when there's no partner account", async () => {
+    const user = await createUser();
+    const email = user.basic.email;
+    await api().post("/api/request-reset").set("X-Forwarded-For", freshIp()).send({ email, isPartner: true });
+    const { otp } = await upStash.get(`reset_otp:${email}`);
+    await api().post("/api/verify-otp").send({ email, otp, isPartner: true });
+    const res = await api().post("/api/reset-password").send({ email, newPassword: "NewSecret@123", isPartner: true });
+    expect(res.status).toBe(200);
+    const login = await api().post("/api/login").send({ email, password: "NewSecret@123" });
+    expect(login.status).toBe(200);
+  });
+
   it("requires at least 8 characters", async () => {
     const res = await resetTo(await createUser(), "short12");
     expect(res.status).toBe(400);
