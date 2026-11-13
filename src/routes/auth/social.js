@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import { auth } from "../../middleware/auth.js";
 import User from "../../models/User.js";
 import dbConnect from "../../utils/dbConnect.js";
-import { canView, publicProjection } from "../../utils/matching.js";
+import { canView, isBlocked, publicProjection } from "../../utils/matching.js";
 
 const router = Router();
 const MAX_VIEWS = 100;
@@ -13,6 +13,17 @@ const hasId = (list = [], id) => list.some((x) => String(x) === String(id));
 // hideProfiles is loaded so canView can check blocks both ways; strip it with toPublic.
 const listProjection = publicProjection.replace(" -hideProfiles", "");
 const toPublic = ({ hideProfiles, ...profile }) => profile;
+
+/**
+ * Whether `me` can open `other`'s profile: a normal match, or someone an
+ * interest already connects me to. Interests list a member even when their
+ * must-have preferences exclude me, so views from there must count too.
+ */
+const canOpen = (me, other) => {
+  if (canView(me, other)) return true;
+  if (other.isHidden || other.isCorrupted || isBlocked(me, other)) return false;
+  return hasId(me.interests?.sent, other._id) || hasId(me.interests?.received, other._id);
+};
 
 /** Loads profiles by id, keeping the given order and dropping deleted ones. */
 const loadOrdered = async (ids) => {
@@ -75,9 +86,9 @@ router.post("/profile-view", auth, async (req, res) => {
     }
     // @ts-ignore
     const me = req.user;
-    const target = await User.findById(userId).select("basic.gender partner hideProfiles isHidden");
+    const target = await User.findById(userId).select("basic.gender partner hideProfiles isHidden isCorrupted");
     // Only record views of profiles the member could actually open.
-    if (!target || !canView(me, target)) return res.json({ ok: true });
+    if (!target || !canOpen(me, target)) return res.json({ ok: true });
 
     await User.updateOne({ _id: target._id }, { $pull: { profileViews: { user: me._id } } });
     await User.updateOne(
@@ -104,13 +115,18 @@ router.get("/profile-views", auth, async (req, res) => {
   try {
     await dbConnect();
     // @ts-ignore
-    const me = await User.findById(req.user.id).select("profileViews hideProfiles basic personal partner");
-    const views = me?.profileViews || [];
-    const profiles = await loadOrdered(views.map((v) => v.user));
-    const viewedAt = new Map(views.map((v) => /** @type {[string, Date]} */ ([String(v.user), v.at])));
-    // A viewer whose own preferences exclude me (or who is hidden) stays hidden here too.
+    const me = req.user;
+    const views = me.profileViews || [];
+    // Newest view per member: two quick opens can leave the same viewer twice.
+    const viewedAt = new Map();
+    for (const v of views) {
+      if (!viewedAt.has(String(v.user))) viewedAt.set(String(v.user), v.at);
+    }
+    const profiles = await loadOrdered([...viewedAt.keys()]);
+    // A viewer whose own preferences exclude me (or who is hidden) stays hidden
+    // here too, unless an interest already connects us.
     const activities = profiles
-      .filter((p) => canView(me, p))
+      .filter((p) => canOpen(me, p))
       .map((p) => ({ ...toPublic(p), viewedAt: viewedAt.get(String(p._id)) }));
     return res.json({ activities, count: activities.length });
   } catch (err) {
