@@ -3,7 +3,7 @@ import User from "../models/User.js";
 import { OpsCreative, OpsPost, OpsReport, getConfig, OpsStory } from "./models.js";
 import { ask } from "./claude.js";
 import { handle, notice, propose } from "./actions.js";
-import { deleteFacebookPost, fetchLiveStories, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
+import { deleteFacebookPost, fetchLiveStories, lastInsightErrors, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
 
 /** Reads the Page's scheduled posts; null when Meta can't be read (then nothing is planned). */
 const scheduledOrNull = () => fetchScheduledTimes().catch((err) => {
@@ -368,7 +368,7 @@ export const recordOrganicStats = async () => {
   const today = istDay(new Date());
   await OpsReport.updateOne(
     { kind: "organic", period: today },
-    { $set: { kind: "organic", period: today, body: "", data: { posts, totals, codes: Object.fromEntries(signups) } } },
+    { $set: { kind: "organic", period: today, body: "", data: { posts, totals, codes: Object.fromEntries(signups), insightsErrors: { ...lastInsightErrors("facebook"), ...lastInsightErrors("instagram") } } } },
     { upsert: true }
   );
   return { posts: posts.length, signups: totals.total };
@@ -399,7 +399,8 @@ export const recordStoryStats = async () => {
       await OpsStory.create(fields);
     }
   }
-  return { stories: live.length, matched };
+  const errors = lastInsightErrors("story");
+  return { stories: live.length, matched, ...(Object.keys(errors).length ? { insightsErrors: errors } : {}) };
 };
 
 /** Results per story concept (stories measured in the last `days` days). */

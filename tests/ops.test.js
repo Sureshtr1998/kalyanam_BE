@@ -35,6 +35,7 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   scheduleFacebookPhoto: vi.fn(async () => ({ id: "fbpost_1" })),
   publishInstagramPhoto: vi.fn(async () => ({ id: "igpost_1" })),
   fetchLiveStories: vi.fn(async () => metaRead.stories ?? []),
+  lastInsightErrors: vi.fn(() => ({})),
   fetchCreativeSpec: vi.fn(async () => ({
     object_story_spec: { page_id: "pg1", link_data: { link: "https://www.seetharamakalyana.in/kn", message: "old", name: "old", picture: "x", call_to_action: { type: "SIGN_UP" } } },
     url_tags: "utm_source=meta",

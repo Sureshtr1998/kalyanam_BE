@@ -2,7 +2,7 @@ import crypto from "crypto";
 import { Router } from "express";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
-import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory } from "../../ops/models.js";
+import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory, OpsConfig } from "../../ops/models.js";
 import { cancel, execute, undo } from "../../ops/actions.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
 import { adsSettings, unitStates } from "../../ops/ads.js";
@@ -394,6 +394,8 @@ router.get(
       signups: Object.fromEntries(signups),
       stories,
       storyConcepts: storyConcepts(stories),
+      // Why reach/clicks may be missing (e.g. the Meta token lacks an insights permission).
+      storyInsightsErrors: (await OpsConfig.findById("ops").select("lastRuns.storyStats").lean())?.lastRuns?.storyStats?.result?.insightsErrors ?? null,
     });
   })
 );

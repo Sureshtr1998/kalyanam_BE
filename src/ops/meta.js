@@ -386,10 +386,22 @@ export const metaErrorText = (err) => {
 
 /* ------------------------- organic post performance ------------------------ */
 
-const settle = async (p) => {
+/*
+ * Insights reads never fail a whole run, but their errors are kept (one per
+ * kind) and shown on the Organic tab, so a missing permission isn't silent.
+ */
+const insightErrors = new Map();
+export const lastInsightErrors = (prefix = "") =>
+  Object.fromEntries([...insightErrors].filter(([k]) => k.startsWith(prefix)));
+const clearInsightErrors = (prefix) => {
+  for (const k of [...insightErrors.keys()]) if (k.startsWith(prefix)) insightErrors.delete(k);
+};
+
+const settle = async (p, label) => {
   try {
     return await p;
-  } catch {
+  } catch (err) {
+    if (label && !insightErrors.has(label)) insightErrors.set(label, `${err.message}${err.meta?.code ? ` (code ${err.meta.code})` : ""}`.slice(0, 300));
     return null;
   }
 };
@@ -413,6 +425,8 @@ export const fetchPostPerformance = async (days = 28) => {
   const token = await pageToken();
   const since = Math.floor((Date.now() - days * 86400000) / 1000);
   const out = [];
+  clearInsightErrors("facebook");
+  clearInsightErrors("instagram");
   const fb = await settle(
     graphGet(`${PAGE()}/published_posts`, {
       fields: "id,message,created_time,shares,reactions.summary(total_count).limit(0),comments.summary(total_count).limit(0)",
@@ -422,8 +436,8 @@ export const fetchPostPerformance = async (days = 28) => {
   );
   for (const p of fb?.data ?? []) {
     const [reach, clicks] = await Promise.all([
-      settle(graphGet(`${p.id}/insights`, { metric: "post_impressions_unique" }, token)),
-      settle(graphGet(`${p.id}/insights`, { metric: "post_clicks_by_type" }, token)),
+      settle(graphGet(`${p.id}/insights`, { metric: "post_impressions_unique" }, token), "facebook reach"),
+      settle(graphGet(`${p.id}/insights`, { metric: "post_clicks_by_type" }, token), "facebook link clicks"),
     ]);
     const byType = metricValue(clicks, "post_clicks_by_type");
     out.push({
@@ -441,9 +455,9 @@ export const fetchPostPerformance = async (days = 28) => {
     const ig = await settle(graphGet(`${IG()}/media`, { fields: "id,caption,timestamp,like_count,comments_count,media_type", limit: 40 }, token));
     for (const m of (ig?.data ?? []).filter((x) => Date.parse(x.timestamp) / 1000 >= since)) {
       const [reach, extra, visits] = await Promise.all([
-        settle(graphGet(`${m.id}/insights`, { metric: "reach" }, token)),
-        settle(graphGet(`${m.id}/insights`, { metric: "saved,shares" }, token)),
-        settle(graphGet(`${m.id}/insights`, { metric: "profile_visits" }, token)),
+        settle(graphGet(`${m.id}/insights`, { metric: "reach" }, token), "instagram reach"),
+        settle(graphGet(`${m.id}/insights`, { metric: "saved,shares" }, token), "instagram saves and shares"),
+        settle(graphGet(`${m.id}/insights`, { metric: "profile_visits" }, token), "instagram profile visits"),
       ]);
       out.push({
         id: m.id,
@@ -489,15 +503,16 @@ export const fetchLiveStories = async () => {
   const token = await pageToken();
   const list = await graphGet(`${IG()}/stories`, { fields: "id,media_type,timestamp,permalink" }, token);
   const out = [];
+  clearInsightErrors("story");
   for (const s of list?.data ?? []) {
-    const one = (metric) => settle(graphGet(`${s.id}/insights`, { metric }, token)).then((r) => metricValue(r, metric));
+    const one = (metric) => settle(graphGet(`${s.id}/insights`, { metric }, token), `story ${metric}`).then((r) => metricValue(r, metric));
     const [reach, replies, shares, profileVisits, follows, nav] = await Promise.all([
       one("reach"),
       one("replies"),
       one("shares"),
       one("profile_visits"),
       one("follows"),
-      settle(graphGet(`${s.id}/insights`, { metric: "navigation", breakdown: "story_navigation_action_type", metric_type: "total_value" }, token)),
+      settle(graphGet(`${s.id}/insights`, { metric: "navigation", breakdown: "story_navigation_action_type", metric_type: "total_value" }, token), "story navigation"),
     ]);
     const byAction = {};
     for (const r of nav?.data?.[0]?.total_value?.breakdowns?.[0]?.results ?? []) byAction[r.dimension_values?.[0]] = r.value;
