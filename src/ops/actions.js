@@ -91,7 +91,19 @@ export const execute = async (id, by = "agent") => {
     action.error = String(err?.message || err).slice(0, 500);
   }
   action.ranAt = new Date();
-  return action.save();
+  const saved = await action.save();
+  // A failed ad change or post is something the owner must hear about (emailed as urgent).
+  if (saved.status === "failed" && (saved.module === "ads" || saved.module === "organic")) {
+    await notice(saved.module, {
+      type: `${saved.module}.action_failed`,
+      priority: "urgent",
+      title: `Failed: ${saved.title}`.slice(0, 160),
+      reason: saved.error,
+      effect: "Nothing was changed by this step. Open the Ops tab to retry or cancel it.",
+      payload: { dedupeKey: `failed:${saved._id}` },
+    }).catch(() => {});
+  }
+  return saved;
 };
 
 /** Reverses a done action (pauses what it created, restores what it changed). */

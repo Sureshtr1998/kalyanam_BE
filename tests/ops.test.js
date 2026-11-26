@@ -853,3 +853,44 @@ describe("stuck images and re-planning", () => {
     expect(await OpsPost.countDocuments({ topic: "old", status: "cancelled" })).toBe(1);
   });
 });
+
+describe("agent-planned ideas follow the ads rules", () => {
+  const empty = { post: { topic: "", kicker: "", headline: "", subline: "", theme: "", caption: "" }, ad: { campaignId: "", adsetId: "", variants: [] }, adset: { campaignId: "c_kn", baseAdsetId: "", name: "Kannada | Mysuru | Parents", locations: ["Mysuru"], ageMin: 45, ageMax: 65, gender: "all", dailyBudget: 500 }, budget: { entityId: "", dailyBudget: 0 } };
+  const future = (days) => new Date(Date.now() + days * 86400000 + 5.5 * 3600000).toISOString().slice(0, 10);
+
+  it("doesn't create ad sets, starve a language or make big jumps on its own", async () => {
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    const { planIdea } = await import("../src/ops/ideas.js");
+    await AdSnapshot.deleteMany({});
+    await AdSnapshot.create([
+      { level: "campaign", entityId: "c_kn", name: "SRK | Kannada", date: "2026-11-25", dailyBudget: 2000, status: "ACTIVE" },
+      { level: "campaign", entityId: "c_te", name: "SRK | Telugu", date: "2026-11-25", dailyBudget: 2200, status: "ACTIVE" },
+    ]);
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live", "ads.newAdsets": false } }, { upsert: true });
+    ideaPlan.mockReturnValue({
+      title: "Review idea",
+      steps: [
+        { ...empty, kind: "new_adset", date: future(2), summary: "Mysuru parents", language: "Kannada" },
+        { ...empty, kind: "budget", date: future(1), summary: "Cut Telugu hard", language: "Telugu", budget: { entityId: "c_te", dailyBudget: 300 } },
+        { ...empty, kind: "budget", date: future(1), summary: "Raise Kannada 50%", language: "Kannada", budget: { entityId: "c_kn", dailyBudget: 3000 } },
+        { ...empty, kind: "budget", date: future(1), summary: "Raise Kannada 10%", language: "Kannada", budget: { entityId: "c_kn", dailyBudget: 2200 } },
+      ],
+    });
+    const r = await planIdea({ text: "Expand Kannada and trim Telugu", source: "review" });
+    expect(r.steps.map((s) => s.status)).toEqual(["needs_you", "needs_you", "needs_you", "scheduled"]);
+    expect(r.steps[0].error).toMatch(/New ad sets are switched off/);
+    expect(r.steps[1].error).toMatch(/below ₹500/);
+    expect(r.steps[2].error).toMatch(/over 20%/);
+  });
+
+  it("emails the owner when an ad change fails", async () => {
+    await createUser({ rest: { isAdmin: true } });
+    metaRead.structure = { campaigns: [], adsets: [] };
+    const a = await OpsAction.create({ module: "ads", type: "ads.budget", status: "scheduled", title: "Raise SRK | Kannada to ₹2,200/day", runAt: new Date(), payload: { entityId: "gone", from: 2000, to: 2200 } });
+    await execute(a._id);
+    expect((await OpsAction.findById(a._id)).status).toBe("failed");
+    const alert = await OpsAction.findOne({ type: "ads.action_failed" });
+    expect(alert).toMatchObject({ priority: "urgent" });
+    expect(sent.at(-1).subject).toMatch(/\[SRK Ops\] Failed: Raise SRK \| Kannada/);
+  });
+});

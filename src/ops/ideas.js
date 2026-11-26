@@ -6,6 +6,8 @@ import { igConfigured } from "./meta.js";
 import { requestRenders } from "./organic.js";
 import { CLAIM_RULES, proposeIdeaCreatives } from "./adsCreative.js";
 import { proposeIdeaAdset } from "./adsGrowth.js";
+import { RULES, batchGate } from "./adsEngine.js";
+import { adsSettings, lastBatchAt } from "./ads.js";
 
 /*
  * "Plan an idea": the owner (or the weekly review) writes an idea in plain
@@ -171,6 +173,11 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
   });
   const ideaId = String(ideaDoc._id);
   const noticeAt = new Date(Date.now() + config.limits.adNoticeHours * 3600000);
+  // Ideas the agent plans on its own (weekly review, no answer in 48 h) follow the ads engine's
+  // rules; the owner's own ideas are deliberate and only keep the hard limits.
+  const auto = source !== "owner";
+  const settings = adsSettings(config);
+  const gate = auto ? batchGate({ settings, lastBatchAt: await lastBatchAt() }) : { open: true };
   const results = [];
 
   for (const s of plan.steps.slice(0, 15)) {
@@ -194,6 +201,7 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
         row.status = "planned";
         row.ref = String(post._id);
       } else if (s.kind === "ad_creatives") {
+        if (auto && !gate.open) throw new Error(`Waits for the next batch of ad changes. ${gate.reason}`);
         const c = shape.campaigns.find((x) => x.id === s.ad.campaignId);
         if (!c) throw new Error("That campaign doesn't exist");
         if (!s.ad.variants?.length) throw new Error("No ad copy was written");
@@ -201,6 +209,8 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
         const a = await proposeIdeaCreatives({ campaignId: c.id, campaignName: c.name, adsetId: s.ad.adsetId, language: s.language, variants: s.ad.variants, runAt, reason, ideaId });
         row.status = a?.status ?? "skipped (Ads is Off)";
       } else if (s.kind === "new_adset") {
+        if (auto && !settings.newAdsets) throw new Error("New ad sets are switched off (Ops → Settings → Ads rules); turn them on or schedule this yourself.");
+        if (auto && !gate.open) throw new Error(`Waits for the next batch of ad changes. ${gate.reason}`);
         const runAt = new Date(Math.max(noticeAt.getTime(), atIst(date, 6).getTime()));
         const a = await proposeIdeaAdset(s.adset, { runAt, reason, ideaId });
         row.status = a?.status ?? "skipped (Ads is Off)";
@@ -209,7 +219,11 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
         if (!e?.dailyBudget) throw new Error("That campaign or ad set has no budget of its own");
         const to = Math.round(s.budget.dailyBudget / 10) * 10;
         const total = [...shape.campaigns, ...shape.adsets].reduce((t, x) => t + (x.dailyBudget || 0), 0);
-        if (to < 100) throw new Error("Budget would be below ₹100/day");
+        // All four languages always run: no budget goes below the floor.
+        if (to < RULES.minBudget) throw new Error(`Budget would be below ₹${RULES.minBudget}/day (every language keeps running)`);
+        if (auto && Math.abs(to - e.dailyBudget) / e.dailyBudget > RULES.maxStepPct / 100) {
+          throw new Error(`A change over ${RULES.maxStepPct}% restarts Meta's learning; the agent doesn't make it on its own.`);
+        }
         if (total - e.dailyBudget + to > config.limits.maxDailySpend) throw new Error(`Would pass the ₹${config.limits.maxDailySpend}/day limit`);
         const big = Math.abs(to - e.dailyBudget) / e.dailyBudget > 0.2;
         const a = await propose("ads", {
