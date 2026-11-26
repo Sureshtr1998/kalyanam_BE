@@ -1209,4 +1209,16 @@ describe("old two-card pairs", () => {
     expect(cards[0].result.steps[0]).toMatchObject({ type: "comments.hide" });
     expect(String(cards[0]._id)).toBe(String(hide._id));
   });
+  it("folds finished pairs too, keeping the delete's result", async () => {
+    const { mergeLegacyPairs } = await import("../src/ops/actions.js");
+    await OpsAction.deleteMany({});
+    await OpsAction.create({ module: "comments", type: "comments.hide", status: "done", title: "Hide hate comment by Y (Facebook)", ranAt: new Date(Date.now() - 86400000), ref: { kind: "comment", id: "c8" } });
+    await OpsAction.create({ module: "comments", type: "comments.delete", status: "done", title: "Delete hidden comment (facebook)", ranAt: new Date(), result: { deleted: true }, ref: { kind: "comment", id: "c8" } });
+    expect(await mergeLegacyPairs()).toBe(1);
+    const cards = await OpsAction.find({ "ref.id": "c8" });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ type: "comments.delete", status: "done" });
+    expect(cards[0].result).toMatchObject({ deleted: true });
+    expect(cards[0].result.steps[0]).toMatchObject({ type: "comments.hide" });
+  });
 });

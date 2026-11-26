@@ -173,9 +173,9 @@ const runTick = async ({ config, t, done, deadline, source }) => {
   await resolvePage().catch(() => {});
 
   // Once: fold the old two-card pairs (hide + delete, Facebook + Instagram) into one card each.
-  if (!config.migrations?.mergePairs20261127) {
+  if (!config.migrations?.mergePairs20261127b) {
     await mergeLegacyPairs()
-      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergePairs20261127": new Date() } }))
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergePairs20261127b": new Date() } }))
       .catch((err) => console.error("[ops] merge pairs", err.message));
   }
 

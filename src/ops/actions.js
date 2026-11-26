@@ -150,7 +150,8 @@ export const mergeLegacyPairs = async () => {
   ];
   let merged = 0;
   for (const [first, next] of PAIRS) {
-    const followUps = await OpsAction.find({ type: next, status: { $in: ["scheduled", "shadow", "needs_you"] } });
+    // Waiting follow-ups and finished ones (history) alike.
+    const followUps = await OpsAction.find({ type: next, status: { $in: ["scheduled", "shadow", "needs_you", "done", "failed", "cancelled"] } });
     for (const f of followUps) {
       const refIds = [f.ref?.id, f.payload?.postId].filter(Boolean).map(String);
       const head = await OpsAction.findOne({
@@ -166,6 +167,9 @@ export const mergeLegacyPairs = async () => {
       head.effect = f.effect;
       head.runAt = f.runAt;
       head.status = f.status;
+      if (f.ranAt) head.ranAt = f.ranAt;
+      if (f.error) head.error = f.error;
+      if (f.status === "done") head.result = { ...head.result, ...(f.result ?? {}) };
       head.payload = { ...head.payload, ...f.payload, dedupeKey: head.payload?.dedupeKey };
       head.markModified("payload");
       await head.save();
