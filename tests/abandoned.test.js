@@ -218,7 +218,8 @@ describe("POST /manage/abandoned/email", () => {
     expect(res.body).toMatchObject({ sent: 1, results: [{ ok: true }] });
     expect(sendEmail).toHaveBeenCalledWith({
       to: [{ email: "ravi@example.test", name: "Ravi Kumar" }],
-      template_id: TEMPLATE,
+      // The template is fixed in the code since 2 Nov (b09f553); the env setting is ignored.
+      template_id: "complete_registration_en",
       variables: { name: "Ravi Kumar" },
     });
     const saved = await AbandonedCheckout.findById(r._id).lean();
