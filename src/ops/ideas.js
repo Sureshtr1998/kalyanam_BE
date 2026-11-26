@@ -4,7 +4,7 @@ import { execute, propose } from "./actions.js";
 import { THEME_NAMES } from "./postDesign.js";
 import { igConfigured } from "./meta.js";
 import { requestRenders } from "./organic.js";
-import { proposeIdeaCreatives } from "./adsCreative.js";
+import { CLAIM_RULES, proposeIdeaCreatives } from "./adsCreative.js";
 import { proposeIdeaAdset } from "./adsGrowth.js";
 
 /*
@@ -55,14 +55,17 @@ const STEP = {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["kicker", "headline", "subline", "theme", "primaryText", "title"],
+            required: ["kicker", "headline", "highlight", "bullets", "price", "cta", "primaryText", "title", "translation"],
             properties: {
-              kicker: { type: "string" },
-              headline: { type: "string" },
-              subline: { type: "string" },
-              theme: { type: "string", enum: THEME_NAMES },
+              kicker: { type: "string", description: "Pill on the image, max 6 words" },
+              headline: { type: "string", description: "Headline line 1, max 5 words" },
+              highlight: { type: "string", description: "Headline line 2 (the punchline), max 5 words" },
+              bullets: { type: "array", items: { type: "string" }, description: "Exactly 3 ticks, max 7 words each" },
+              price: { type: "string", description: "Price line, e.g. '₹351 a year'" },
+              cta: { type: "string", description: "Button text, max 4 words" },
               primaryText: { type: "string", description: "Max 220 characters" },
               title: { type: "string", description: "Max 40 characters" },
+              translation: { type: "string", description: "English translation of every line, for the owner" },
             },
           },
         },
@@ -139,7 +142,10 @@ ${config.brief}
 Rules:
 - Only these step kinds exist: organic_post, ad_creatives, new_adset, budget. Anything else (videos, reels, WhatsApp broadcasts, offline events, website changes, price changes, boosting organic posts) is an "unsupported" step whose summary says exactly what the owner must do.
 - Organic posts are never ads. One post per day per date at most; avoid days already taken.
-- Ads only inside the existing campaigns and ad sets listed (use their ids). One campaign per language; new ad sets are named "Language | Place | Audience".
+- Ads only inside the existing campaigns and ad sets listed (use their ids). One campaign per language; a new ad set follows the naming of the existing ad sets in its campaign.
+- Owner's standing rules for ads:
+${config.ads?.preferences ?? ""}
+${CLAIM_RULES}
 - Write post and ad text in the target language's native script (English only for English), warm and natural, never a literal translation. No competitor names, no promises beyond the brief, no fake urgency.
 - Budgets in ₹/day. The whole account must stay under ₹${config.limits.maxDailySpend}/day.
 - Dates: today is ${todayIst()} (IST). Use the dates the idea implies; otherwise the next sensible days. Fill fields of other step kinds with empty values.`,

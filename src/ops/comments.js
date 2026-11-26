@@ -38,7 +38,8 @@ Categories: hate, spam (links, scams, ads, bots), question, praise, other.
 The owner's rule: "hate" covers abuse, slurs, caste/religion hate, harassment and threats, AND any negative remark about the service or brand, in any language, e.g. "useless app", "fake", "scam", "waste of money", "I paid 351 no use", "no matches", "don't join". These are hidden and deleted, never answered in public.
 A neutral question that only asks something (e.g. "how do I get a refund?") is "question", not hate.
 For question and praise write a reply under 40 words in exactly the commenter's language and script.
-Never discuss refunds or anyone's personal details in public; move those to email. For price questions point to the pricing page.`;
+Never discuss refunds or anyone's personal details in public; move those to email.
+When someone shows interest ("interested", "details", "how to join", "price?", "is it real?"), answer briefly and invite them to register on the page in their language: Kannada seetharamakalyana.in/kn, Telugu seetharamakalyana.in/te, Tamil seetharamakalyana.in/ta, Hindi seetharamakalyana.in/hi, English seetharamakalyana.in. On Facebook write it as a full link with ?p=fc at the end (e.g. https://www.seetharamakalyana.in/kn?p=fc); on Instagram links can't be clicked, so give the short address and say "link in bio". Membership is ₹351 a year (pricing page: add /pricing to the language page).`;
 
 export const runCommentsCycle = async () => {
   const config = await getConfig();

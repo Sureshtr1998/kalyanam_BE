@@ -2,15 +2,16 @@ import crypto from "crypto";
 import { Router } from "express";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
-import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsMail, OpsPost, OpsReport, getConfig } from "../../ops/models.js";
+import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig } from "../../ops/models.js";
 import { cancel, execute, undo } from "../../ops/actions.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
-import { unitStates } from "../../ops/ads.js";
+import { adsSettings, unitStates } from "../../ops/ads.js";
+import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
 import { toolsOverview, updateTool } from "../../ops/tools.js";
 import { growth } from "../../ops/review.js";
-import { deletePostImage, renderDone, renderQueue } from "../../ops/organic.js";
+import { deletePostImage, organicSignups, renderDone, renderQueue } from "../../ops/organic.js";
 import { planIdea } from "../../ops/ideas.js";
-import { automationStatus, ensureAutomation } from "../../ops/automation.js";
+import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
 import { resolvePage } from "../../ops/meta.js";
 import { createRequest, deploy, devConfigured, followUp, listRequests } from "../../ops/dev.js";
@@ -40,7 +41,7 @@ const cronAuthorized = (req) => {
 const runTick = async (req, res) => {
   if (!cronAuthorized(req)) return res.status(401).json({ msg: "Unauthorized" });
   try {
-    return res.json({ ok: true, ran: await tick() });
+    return res.json({ ok: true, ran: await tick({ source: tickSource(req) }) });
   } catch (err) {
     console.error("[ops] tick", err);
     return res.status(500).json({ msg: "Tick failed" });
@@ -95,8 +96,6 @@ const connections = () => ({
 router.get(
   "/manage/ops/overview",
   wrap(async (_req, res) => {
-    // Opening the Ops tab is enough to switch the 15-minute schedule on (checked once a day).
-    await ensureAutomation().catch(() => {});
     await resolvePage().catch(() => {});
     const config = await getConfig();
     const [counts, feed, spend, account, weekly, rate] = await Promise.all([
@@ -113,6 +112,7 @@ router.get(
     return res.json({
       modes: config.modes,
       limits: config.limits,
+      ads: adsSettings(config),
       targets: config.targets,
       brief: config.brief,
       lastRuns: config.lastRuns,
@@ -292,6 +292,11 @@ router.get(
       unitStates().catch(() => []),
       OpsAction.find({ module: "ads" }).sort({ updatedAt: -1 }).limit(30).lean(),
     ]);
+    const [creatives, config, ideas] = await Promise.all([
+      OpsCreative.find().sort({ createdAt: -1 }).limit(12).lean(),
+      getConfig(),
+      loadIdeaLibrary(60).catch(() => []),
+    ]);
     const cpp = (a) => (a.paid ? a.spend / a.paid : Infinity);
     const ranked = [...ads].sort((a, b) => cpp(a) - cpp(b));
     return res.json({
@@ -304,6 +309,29 @@ router.get(
       worstAds: ranked.slice(-8).reverse(),
       placements,
       actions,
+      settings: adsSettings(config),
+      ideas: ideas.map(({ ads: names, ...r }) => ({ ...r, label: IDEAS[r.idea]?.label ?? "Other", ads: names.length })),
+      creatives: creatives.map((c) => ({
+        _id: c._id,
+        campaignName: c.campaignName,
+        adsetName: c.adsetName,
+        language: c.language,
+        status: c.status,
+        imageUrl: c.imageUrl,
+        design: c.design,
+        primaryText: c.primaryText,
+        title: c.title,
+        translation: c.translation,
+        utmContent: c.utmContent,
+        idea: c.idea,
+        ideaLabel: IDEAS[c.idea]?.label,
+        role: c.role,
+        angle: c.angle,
+        review: c.review,
+        verdict: c.verdict,
+        results: c.results,
+        createdAt: c.createdAt,
+      })),
     });
   })
 );
@@ -338,8 +366,13 @@ router.get(
 router.get(
   "/manage/ops/organic",
   wrap(async (_req, res) => {
-    const posts = await OpsPost.find({ publishAt: { $gte: new Date(Date.now() - 21 * 86400000) } }).sort({ publishAt: 1 }).lean();
-    return res.json({ posts });
+    const [posts, stats, signups] = await Promise.all([
+      OpsPost.find({ publishAt: { $gte: new Date(Date.now() - 21 * 86400000) } }).sort({ publishAt: 1 }).lean(),
+      OpsReport.findOne({ kind: "organic" }).sort({ createdAt: -1 }).lean(),
+      organicSignups(28),
+    ]);
+    // Live sign-up counts per tracking code (the stored report is refreshed daily).
+    return res.json({ posts, stats: stats ? { ...stats.data, period: stats.period } : null, signups: Object.fromEntries(signups) });
   })
 );
 
@@ -401,7 +434,7 @@ router.post(
   "/manage/ops/config",
   wrap(async (req, res) => {
     const config = await getConfig();
-    const { modes, limits, targets, brief } = req.body || {};
+    const { modes, limits, targets, brief, ads } = req.body || {};
     if (modes) {
       for (const [k, v] of Object.entries(modes)) {
         if (MODULES.includes(k) && MODES.includes(String(v))) config.modes[k] = v;
@@ -418,9 +451,26 @@ router.post(
         .map((t) => ({ month: t.month, members: Number(t.members) || 0, revenue: Number(t.revenue) || 0, spend: Number(t.spend) || 0 }));
     }
     if (typeof brief === "string") config.brief = brief.slice(0, 8000);
+    if (ads && typeof ads === "object") {
+      for (const k of ["rebalance", "pauseLosingAds", "newAdsets", "autoTopUp"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
+      for (const k of ["batchEveryDays", "topUpBelow", "topUpAmount"]) {
+        if (ads[k] != null && Number.isFinite(Number(ads[k])) && Number(ads[k]) >= 0) config.set(`ads.${k}`, Number(ads[k]));
+      }
+      if (typeof ads.alertEmail === "string") {
+        const list = ads.alertEmail.split(",").map((e) => e.trim()).filter(Boolean);
+        if (list.some((e) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e))) return res.status(400).json({ msg: "Alert email doesn't look right" });
+        config.set("ads.alertEmail", list.join(","));
+      }
+      if (typeof ads.preferences === "string") config.set("ads.preferences", ads.preferences.slice(0, 4000));
+      if ("handsOffUntil" in ads) {
+        const d = ads.handsOffUntil ? new Date(ads.handsOffUntil) : null;
+        if (d && Number.isNaN(d.getTime())) return res.status(400).json({ msg: "Hands-off date isn't a date" });
+        config.set("ads.handsOffUntil", d);
+      }
+    }
     config.updatedBy = by(req);
     await config.save();
-    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief });
+    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config) });
   })
 );
 
@@ -445,13 +495,13 @@ router.post(
   })
 );
 
-/** Re-creates the 15-minute schedule (normally automatic; this is the "Restart" button). */
+/** Runs the agent once now (the "Run now" button next to the automation status). Vercel Cron runs it every 15 minutes. */
 router.post(
   "/manage/ops/automation/start",
   wrap(async (_req, res) => {
-    const r = await ensureAutomation({ force: true });
-    if (!r.on) return res.status(400).json({ msg: r.reason });
-    return res.json({ msg: "Automation is on: the agent runs every 15 minutes", scheduleId: r.scheduleId });
+    const ran = await tick({ source: "manual", budgetMs: 50000 });
+    const failed = ran.filter((r) => !r.ok);
+    return res.json({ msg: failed.length ? `Ran, with ${failed.length} problem(s): ${failed.map((f) => f.name).join(", ")}` : "Ran the agent now. Vercel Cron runs it every 15 minutes.", ran });
   })
 );
 

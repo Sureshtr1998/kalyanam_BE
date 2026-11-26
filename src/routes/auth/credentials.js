@@ -29,6 +29,7 @@ import { buildRegistrationOrder } from "../../utils/orderBuilders.js";
 import { DEFAULT_STRICT } from "../../utils/matching.js";
 import { markCheckoutPaid, markConverted } from "../../utils/abandoned.js";
 import { newMemberReferralCode, payReferralReward } from "../../utils/referrals.js";
+import { acquisitionFrom, sendConversion, trackingFrom } from "../../utils/metaCapi.js";
 
 const router = Router();
 
@@ -171,6 +172,15 @@ const newMemberFrom = (reg, uniqueId, totalNoOfInterest, { commission, referrerI
     commission,
   });
 
+/** The member's details Meta matches a sign-up on (hashed in utils/metaCapi.js). */
+const memberForMeta = (user) => ({
+  email: user.basic?.email,
+  mobile: user.basic?.mobile,
+  fullName: user.basic?.fullName,
+  gender: user.basic?.gender,
+  externalId: String(user._id),
+});
+
 /**
  * Free registration (no order), only while the pricing level makes
  * registration free. Validated exactly like a paid one; the member gets that
@@ -186,11 +196,13 @@ const registerFree = async (req, res) => {
     throw new HttpError(402, "Registration needs payment. Please refresh the page and try again.");
   }
   const reg = record.registration;
+  const tracking = trackingFrom(req);
   const newUser = newMemberFrom(reg, await generateUniqueId(), record.interests, {
     commission: record.commission,
     referrerId: record.referrerId,
     referralCode: await newMemberReferralCode(reg.fullName),
   });
+  newUser.acquisition = acquisitionFrom(tracking);
 
   try {
     await newUser.save();
@@ -201,6 +213,14 @@ const registerFree = async (req, res) => {
     throw err;
   }
   await markConverted({ email: record.email, mobile: reg.mobile });
+  await sendConversion({
+    event: "CompleteRegistration",
+    eventId: tracking.eventId,
+    value: 0,
+    user: memberForMeta(newUser),
+    tracking,
+    contentName: "Free registration",
+  });
 
   notify({
     to: [{ email: record.email }],
@@ -258,6 +278,7 @@ router.post("/user-register", async (req, res) => {
       noOfInterest: record.interests,
       note: record.note,
     });
+    newUser.acquisition = acquisitionFrom(record.tracking);
 
     try {
       await newUser.save();
@@ -279,6 +300,17 @@ router.post("/user-register", async (req, res) => {
       paymentId,
     });
     await markCheckoutPaid(orderId);
+    // Server-side copy of the browser's sign-up event (same event id: Meta keeps one). Test payments (₹1) aren't sent.
+    if (record.amountCharged >= record.amount) {
+      await sendConversion({
+        event: "CompleteRegistration",
+        eventId: orderId,
+        value: record.amountCharged,
+        user: memberForMeta(newUser),
+        tracking: record.tracking,
+        contentName: "Annual membership",
+      });
+    }
     await markConverted({ email: record.email, mobile: reg.mobile });
     // Refer & earn: send the referring member their reward (never throws).
     await payReferralReward({

@@ -47,12 +47,18 @@ export const propose = async (module, fields, { dedupeKey } = {}) => {
   }
   let status = fields.status ?? "scheduled";
   if (mode === "shadow" && (status === "scheduled" || status === "needs_you")) status = "shadow";
-  return OpsAction.create({
+  const doc = await OpsAction.create({
     ...fields,
     module,
     status,
     payload: { ...(fields.payload ?? {}), ...(key ? { dedupeKey: key } : {}), mode },
   });
+  // Urgent alerts also go to the owner's email (imported lazily: alerts.js reads models and mail).
+  if (status === "info" && fields.priority === "urgent") {
+    const { alertOwner } = await import("./alerts.js");
+    await alertOwner(doc);
+  }
+  return doc;
 };
 
 /** Runs one action now. Safe to call twice: only one caller can claim it. */

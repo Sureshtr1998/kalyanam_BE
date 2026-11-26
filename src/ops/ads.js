@@ -1,25 +1,39 @@
 import User from "../models/User.js";
 import Broker from "../models/Broker.js";
 import { AdSnapshot, OpsAction, getConfig } from "./models.js";
-import { decide, emergencies } from "./adsEngine.js";
+import { RULES, adDecisions, calibration, decide, emergencies, languageCoverage, languageOf } from "./adsEngine.js";
+import { IDEAS, judgeNewAds } from "./adsIdeas.js";
 import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
 import {
+  adIssuesFrom,
   dayIn,
   fetchAccount,
+  fetchAds,
   fetchInsights,
   fetchStructure,
   graphAll,
   accountId,
   setDailyBudget,
+  setStatus,
 } from "./meta.js";
 
 /*
- * Meta ads for the ops agent: a daily snapshot of every campaign, ad set, ad
- * and placement (kept forever, so any window can be charted), the funds
- * check, and the weekly budget decisions from adsEngine.js.
+ * Meta ads for the ops agent:
+ *  - every 3 hours: a snapshot of every campaign, ad set, ad and placement
+ *    (kept forever), plus the alarms (funds, account, disapproved ads,
+ *    stalled delivery), which are emailed to the owner;
+ *  - Monday: budget decisions from adsEngine.js (moves between languages,
+ *    cuts, raises), each with the notice period;
+ *  - batch days (adsGrowth.js): paused ads, fresh ads, new ad sets.
  */
 
 const TZ_FALLBACK = "Asia/Kolkata";
+
+/** The owner's ads settings as a plain object (Ops → Settings → Ads rules). */
+export const adsSettings = (config) => config.toObject?.().ads ?? config.ads ?? {};
+const DAY = 86400000;
+const STRUCTURE_TYPES = ["ads.creative_launch", "ads.pause_ad", "ads.new_adset"];
+const BUDGET_TYPES = ["ads.budget", "ads.rebalance"];
 
 const upsertRows = (level, rows, extra = {}) =>
   rows.length
@@ -34,10 +48,11 @@ const upsertRows = (level, rows, extra = {}) =>
       )
     : null;
 
+const dayExpr = (field, tz) => ({ $dateToString: { format: "%Y-%m-%d", date: field, timezone: tz } });
+
 /** Real joins and net earnings per day from our own database. */
 const joinsAndEarnings = async (since, tz) => {
   const sinceDate = new Date(`${since}T00:00:00Z`);
-  const day = (field) => ({ $dateToString: { format: "%Y-%m-%d", date: field, timezone: tz } });
   const NET = {
     $subtract: [
       { $ifNull: ["$transactions.amountPaid", 0] },
@@ -47,10 +62,10 @@ const joinsAndEarnings = async (since, tz) => {
   const earnPipe = [
     { $unwind: "$transactions" },
     { $match: { "transactions.dateOfTrans": { $gte: sinceDate } } },
-    { $group: { _id: day("$transactions.dateOfTrans"), earned: { $sum: NET } } },
+    { $group: { _id: dayExpr("$transactions.dateOfTrans", tz), earned: { $sum: NET } } },
   ];
   const [joins, e1, e2] = await Promise.all([
-    User.aggregate([{ $match: { createdAt: { $gte: sinceDate } } }, { $group: { _id: day("$createdAt"), n: { $sum: 1 } } }]),
+    User.aggregate([{ $match: { createdAt: { $gte: sinceDate } } }, { $group: { _id: dayExpr("$createdAt", tz), n: { $sum: 1 } } }]),
     User.aggregate(earnPipe),
     Broker.aggregate(earnPipe),
   ]);
@@ -60,6 +75,20 @@ const joinsAndEarnings = async (since, tz) => {
     const row = out.get(e._id) ?? { joined: 0, earned: 0 };
     row.earned += e.earned;
     out.set(e._id, row);
+  }
+  return out;
+};
+
+/** Joins per day per mother tongue ("kannada" → { "2026-11-20": 12 }), the real result of each language campaign. */
+const joinsByLanguage = async (since, tz) => {
+  const rows = await User.aggregate([
+    { $match: { createdAt: { $gte: new Date(`${since}T00:00:00Z`) } } },
+    { $group: { _id: { d: dayExpr("$createdAt", tz), l: { $toLower: "$basic.motherTongue" } }, n: { $sum: 1 } } },
+  ]);
+  const out = new Map();
+  for (const r of rows) {
+    if (!out.has(r._id.l)) out.set(r._id.l, new Map());
+    out.get(r._id.l).set(r._id.d, r.n);
   }
   return out;
 };
@@ -136,44 +165,13 @@ const avgSpend = async (yesterday) => {
   return rows.length ? rows.reduce((t, r) => t + r.spend, 0) / rows.length : 0;
 };
 
-/** Builds the budget-owning units from stored snapshots (completed days only). */
-const buildUnits = async (structure, yesterday) => {
-  const since = new Date(Date.parse(yesterday) - 13 * 86400000).toISOString().slice(0, 10);
-  const active = (s) => s === "ACTIVE";
-  const units = [];
-  const lastChange = await lastChanges();
-
-  for (const c of structure.campaigns.filter((c) => active(c.status))) {
-    const sets = structure.adsets.filter((s) => s.campaignId === c.id && active(s.status));
-    const adsetBudgets = sets.some((s) => s.dailyBudget);
-    const owners = adsetBudgets ? sets.filter((s) => s.dailyBudget) : [c];
-    for (const o of owners) {
-      const level = adsetBudgets ? "adset" : "campaign";
-      const rows = await AdSnapshot.find(
-        level === "adset"
-          ? { level: "adset", entityId: o.id, date: { $gte: since, $lte: yesterday } }
-          : { level: "campaign", entityId: o.id, date: { $gte: since, $lte: yesterday } }
-      ).sort({ date: 1 }).lean();
-      // Campaign units use the highest ad-set frequency as their fatigue signal.
-      if (level === "campaign" && rows.length) {
-        const f = await AdSnapshot.find({ level: "adset", campaignId: o.id, date: yesterday }).lean();
-        rows.at(-1).frequency7 = Math.max(0, ...f.map((x) => x.frequency7 ?? 0));
-      }
-      const edited = level === "adset" ? [o.updatedAt] : sets.map((s) => s.updatedAt);
-      const agentChange = lastChange.get(o.id);
-      units.push({
-        id: o.id,
-        campaignId: c.id,
-        level,
-        name: level === "adset" ? `${c.name} › ${o.name}` : c.name,
-        dailyBudget: o.dailyBudget,
-        days: rows,
-        lastChangeAt: maxDate([...edited, agentChange?.any]),
-        lastBudgetChangeAt: agentChange?.budget ?? null,
-      });
-    }
-  }
-  return units;
+/** Real members per Meta-counted member over the last 14 completed days (see adsEngine.calibration). */
+export const accountCalibration = async (yesterday) => {
+  const rows = await AdSnapshot.find({ level: "account", date: { $lte: yesterday } }).sort({ date: -1 }).limit(14).lean();
+  return calibration({
+    metaPaid: rows.reduce((t, r) => t + (r.paid || 0), 0),
+    realJoins: rows.reduce((t, r) => t + (r.joined || 0), 0),
+  });
 };
 
 const maxDate = (dates) => {
@@ -181,52 +179,145 @@ const maxDate = (dates) => {
   return t.length ? new Date(Math.max(...t)) : null;
 };
 
-/** When the agent last changed each entity (any change / budget change). */
+/** When the agent last changed each entity: any change, budget change, ad or ad-set change. */
 const lastChanges = async () => {
-  const done = await OpsAction.find({ module: "ads", status: "done", ranAt: { $gte: new Date(Date.now() - 30 * 86400000) } }).lean();
+  const done = await OpsAction.find({ module: "ads", status: "done", ranAt: { $gte: new Date(Date.now() - 30 * DAY) } }).lean();
   const out = new Map();
-  for (const a of done) {
-    const id = a.payload?.entityId;
-    if (!id) continue;
+  const mark = (id, kind, at) => {
+    if (!id) return;
     const row = out.get(id) ?? {};
-    row.any = maxDate([row.any, a.ranAt]);
-    if (a.type === "ads.budget") row.budget = maxDate([row.budget, a.ranAt]);
+    row.any = maxDate([row.any, at]);
+    row[kind] = maxDate([row[kind], at]);
     out.set(id, row);
+  };
+  for (const a of done) {
+    const p = a.payload ?? {};
+    if (BUDGET_TYPES.includes(a.type)) {
+      for (const id of [p.entityId, ...(p.moves ?? []).map((m) => m.entityId)]) mark(id, "budget", a.ranAt);
+    } else if (STRUCTURE_TYPES.includes(a.type)) {
+      for (const id of [p.campaignId, p.adsetId, a.result?.adsetId]) mark(id, "structure", a.ranAt);
+    }
   }
   return out;
 };
 
-/** ₹ of daily budget the agent added in the last 7 days. */
+/** When the last batch of ad / ad-set changes was planned (shadow ones count, so shadow mode keeps the real rhythm). */
+export const lastBatchAt = async () => {
+  const last = await OpsAction.findOne({ type: { $in: STRUCTURE_TYPES }, status: { $in: ["scheduled", "shadow", "running", "done"] } })
+    .sort({ createdAt: -1 })
+    .lean();
+  return last?.createdAt ?? null;
+};
+
+/** Builds the budget-owning units from stored snapshots (completed days only), with real joins per language. */
+const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK) => {
+  const since = new Date(Date.parse(yesterday) - 13 * DAY).toISOString().slice(0, 10);
+  const active = (s) => s === "ACTIVE";
+  const units = [];
+  const changes = await lastChanges();
+  const real = await joinsByLanguage(since, tz).catch(() => new Map());
+
+  for (const c of structure.campaigns.filter((c) => active(c.status))) {
+    const sets = structure.adsets.filter((s) => s.campaignId === c.id && active(s.status));
+    const adsetBudgets = sets.some((s) => s.dailyBudget);
+    const owners = adsetBudgets ? sets.filter((s) => s.dailyBudget) : [c];
+    // Real joins only line up with a whole language campaign.
+    const language = languageOf(c.name);
+    const realDays = !adsetBudgets && language !== "English" ? real.get(language.toLowerCase()) ?? new Map() : null;
+    for (const o of owners) {
+      const level = adsetBudgets ? "adset" : "campaign";
+      /** @type {any[]} */
+      const rows = await AdSnapshot.find({ level, entityId: o.id, date: { $gte: since, $lte: yesterday } }).sort({ date: 1 }).lean();
+      // Campaign units use the highest ad-set frequency as their fatigue signal.
+      if (level === "campaign" && rows.length) {
+        const f = await AdSnapshot.find({ level: "adset", campaignId: o.id, date: yesterday }).lean();
+        rows.at(-1).frequency7 = Math.max(0, ...f.map((x) => x.frequency7 ?? 0));
+      }
+      if (realDays) for (const r of rows) r.real = realDays.get(r.date) ?? 0;
+      const edited = level === "adset" ? [o.updatedAt] : sets.map((s) => s.updatedAt);
+      const ids = [o.id, c.id, ...sets.map((s) => s.id)];
+      units.push({
+        id: o.id,
+        campaignId: c.id,
+        level,
+        language,
+        name: level === "adset" ? `${c.name} › ${o.name}` : c.name,
+        dailyBudget: o.dailyBudget,
+        days: rows,
+        lastChangeAt: maxDate([...edited, changes.get(o.id)?.any]),
+        lastBudgetChangeAt: changes.get(o.id)?.budget ?? null,
+        lastStructureChangeAt: maxDate(ids.map((id) => changes.get(id)?.structure)),
+      });
+    }
+  }
+  return units;
+};
+
+/** ₹ of daily budget the agent added in the last 7 days (moves add nothing overall). */
 const increasedThisWeek = async () => {
-  const done = await OpsAction.find({ type: "ads.budget", status: "done", ranAt: { $gte: new Date(Date.now() - 7 * 86400000) } }).lean();
+  const done = await OpsAction.find({ type: "ads.budget", status: "done", ranAt: { $gte: new Date(Date.now() - 7 * DAY) } }).lean();
   return done.reduce((t, a) => t + Math.max(0, (a.payload?.to ?? 0) - (a.payload?.from ?? 0)), 0);
 };
 
 /**
- * Daily: snapshot + emergencies. Weekly (or when forced): budget and
- * creative decisions, each with the configured notice period.
+ * Every 3 hours: snapshot + alarms. Weekly (or when forced): budget
+ * decisions, each with the configured notice period.
  */
 export const runAdsCycle = async ({ weekly = false } = {}) => {
   const config = await getConfig();
+  const settings = adsSettings(config);
   const snap = await takeSnapshot();
   const avg = await avgSpend(snap.yesterday);
   const funds = { available: snap.account.available ?? snap.account.spendCapLeft, avgDailySpend: avg };
-  const budgetTotal = [...snap.structure.campaigns, ...snap.structure.adsets]
+  const activeCampaigns = snap.structure.campaigns.filter((c) => c.status === "ACTIVE");
+  const activeIds = new Set(activeCampaigns.map((c) => c.id));
+  const budgetTotal = [...activeCampaigns, ...snap.structure.adsets.filter((s) => activeIds.has(s.campaignId))]
     .filter((e) => e.status === "ACTIVE" && e.dailyBudget)
     .reduce((t, e) => t + e.dailyBudget, 0);
-  const todayRow = await AdSnapshot.findOne({ level: "account", date: snap.today }).lean();
+  const [todayRow, recent] = await Promise.all([
+    AdSnapshot.findOne({ level: "account", date: snap.today }).lean(),
+    AdSnapshot.find({ level: "account", date: { $lte: snap.yesterday } }).sort({ date: -1 }).limit(4).lean(),
+  ]);
+  const ads = await fetchAds().catch(() => []);
+  // Spend "stalled" only when yesterday is also far below the days before (not just a new budget).
+  const typical = recent.length > 1 ? recent.slice(1).reduce((t, r) => t + r.spend, 0) / (recent.length - 1) : null;
+  const yesterdaySpend = recent[0]?.date === snap.yesterday && typical && recent[0].spend < typical * 0.5 ? recent[0].spend : null;
 
-  for (const e of emergencies({ funds, today: todayRow, budgetTotal })) {
-    await notice("ads", { ...e, payload: { dedupeKey: `${e.type}:${snap.today}` } });
+  const alarms = emergencies({
+    funds,
+    today: todayRow,
+    budgetTotal,
+    settings,
+    accountStatus: snap.account.status,
+    adIssues: adIssuesFrom(ads, activeIds),
+    yesterdaySpend,
+    // Empty ad lists mean the read failed, not that nothing runs.
+    uncovered: ads.length ? languageCoverage({ campaigns: snap.structure.campaigns, adsets: snap.structure.adsets, ads }) : [],
+  });
+  for (const e of alarms) {
+    const key = ["ads.disapproved", "ads.issues", "ads.language_gap"].includes(e.type) ? `${e.type}:${e.reason.slice(0, 120)}` : `${e.type}:${snap.today}`;
+    await notice("ads", { ...e, payload: { dedupeKey: key } });
   }
-  if (!weekly) return { snapshot: snap.today, decisions: 0 };
+  // New ads that have run 7+ days get their verdict against their ad set (feeds the idea library).
+  const judged = await judgeNewAds().catch(() => []);
+  for (const j of judged) {
+    const c = j.creative;
+    const word = { win: "won", lose: "lost", even: "came out even", unclear: "got too little delivery" }[j.verdict];
+    await notice("ads", {
+      type: "ads.verdict",
+      title: `New ad ${word}: ${c.campaignName}${c.adsetName ? ` › ${c.adsetName}` : ""} (${IDEAS[c.idea]?.label ?? c.idea ?? "idea not tagged"}, ${c.role ?? "test"})`,
+      reason: `${j.note} The idea library now counts this result.${j.verdict === "lose" ? " Ads this far behind are paused on the next batch day if they stay ≥ 1.8× their campaign." : ""}`,
+      effect: "Alert only.",
+      payload: { dedupeKey: `verdict:${c._id}` },
+    });
+  }
+  if (!weekly) return { snapshot: snap.today, alarms: alarms.length, judged: judged.length, decisions: 0 };
 
-  const units = await buildUnits(snap.structure, snap.yesterday);
-  const result = decide({ units, limits: config.limits, funds, increasedThisWeek: await increasedThisWeek() });
+  const units = await buildUnits(snap.structure, snap.yesterday, snap.tz);
+  const calib = await accountCalibration(snap.yesterday);
+  const result = decide({ units, limits: config.limits, settings, funds, calib, increasedThisWeek: await increasedThisWeek() });
   let made = 0;
-  // Creative refreshes are planned by the Monday "adsPlan" job (adsGrowth.js), not here.
-  for (const d of result.decisions.filter((x) => x.type === "ads.budget")) {
-    const isBudget = true;
+  for (const d of result.decisions) {
     await propose(
       "ads",
       {
@@ -236,39 +327,96 @@ export const runAdsCycle = async ({ weekly = false } = {}) => {
         effect: d.effect,
         payload: d.payload,
         ref: { kind: "meta", id: d.unitId },
-        // Budget steps run after the notice period; creative refreshes need new artwork first.
-        status: isBudget ? "scheduled" : "needs_you",
-        runAt: isBudget ? hoursFromNow(config.limits.adNoticeHours) : undefined,
+        runAt: hoursFromNow(config.limits.adNoticeHours),
       },
       { dedupeKey: `${d.type}:${d.unitId}` }
     );
     made++;
   }
-  return { snapshot: snap.today, decisions: made, states: result.evaluated.map((e) => ({ id: e.unit.id, name: e.unit.name, state: e.state, notes: e.notes, metrics: e.metrics })) };
+  return {
+    snapshot: snap.today,
+    decisions: made,
+    calib,
+    average: result.average,
+    states: result.evaluated.map((e) => ({ id: e.unit.id, name: e.unit.name, state: e.state, flags: e.flags, notes: e.notes })),
+  };
 };
 
-/** Current state of every unit, for the Ads screen (no Meta call). */
+/** Current state of every unit, for the Ads screen and the planners (no Meta call). */
 export const unitStates = async () => {
   const config = await getConfig();
   const latest = await AdSnapshot.findOne({ level: "account" }).sort({ date: -1 }).lean();
   if (!latest) return [];
-  const yesterday = new Date(Date.parse(latest.date) - 86400000).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.parse(latest.date) - DAY).toISOString().slice(0, 10);
   const todays = await AdSnapshot.find({ date: latest.date, level: { $in: ["campaign", "adset"] } }).lean();
   const structure = {
     campaigns: todays.filter((r) => r.level === "campaign").map((r) => ({ id: r.entityId, name: r.name, dailyBudget: r.dailyBudget, status: r.status ?? "ACTIVE" })),
     adsets: todays.filter((r) => r.level === "adset").map((r) => ({ id: r.entityId, name: r.name, campaignId: r.campaignId, dailyBudget: r.dailyBudget, status: r.status ?? "ACTIVE" })),
   };
   const units = await buildUnits(structure, yesterday);
-  return decide({ units, limits: config.limits, funds: { available: null, avgDailySpend: 0 } }).evaluated.map((e) => ({
+  const calib = await accountCalibration(yesterday);
+  const result = decide({ units, limits: config.limits, settings: { ...adsSettings(config), rebalance: false }, funds: { available: null, avgDailySpend: 0 }, calib });
+  return result.evaluated.map((e) => ({
     id: e.unit.id,
     campaignId: e.unit.campaignId,
     name: e.unit.name,
+    language: e.unit.language,
     level: e.unit.level,
     dailyBudget: e.unit.dailyBudget,
     state: e.state,
+    flags: e.flags,
     notes: e.notes,
     metrics: e.metrics,
   }));
+};
+
+/** Batch day: schedules pauses for ads that cost far more than their campaign. Returns the ad sets left thin. */
+export const planAdPauses = async (runAt) => {
+  const [ads, structure] = await Promise.all([fetchAds(), fetchStructure()]);
+  const activeCampaigns = new Set(structure.campaigns.filter((c) => c.status === "ACTIVE").map((c) => c.id));
+  const activeSets = new Set(structure.adsets.filter((s) => s.status === "ACTIVE").map((s) => s.id));
+  const live = ads.filter((a) => a.effective_status === "ACTIVE" && activeCampaigns.has(a.campaign_id) && activeSets.has(a.adset_id));
+  const since = new Date(Date.now() - 14 * DAY).toISOString().slice(0, 10);
+  const [adRows, campaignRows] = await Promise.all([
+    AdSnapshot.aggregate([
+      { $match: { level: "ad", date: { $gte: since } } },
+      { $group: { _id: "$entityId", spend: { $sum: "$spend" }, paid: { $sum: "$paid" } } },
+    ]),
+    AdSnapshot.aggregate([
+      { $match: { level: "campaign", date: { $gte: since } } },
+      { $group: { _id: "$entityId", spend: { $sum: "$spend" }, paid: { $sum: "$paid" } } },
+    ]),
+  ]);
+  const stat = new Map(adRows.map((r) => [r._id, r]));
+  const campaignCpp14 = new Map(campaignRows.map((r) => [r._id, r.paid ? r.spend / r.paid : Infinity]));
+  const { pauses, thin } = adDecisions({
+    ads: live.map((a) => ({
+      id: a.id,
+      name: a.name,
+      adsetId: a.adset_id,
+      campaignId: a.campaign_id,
+      createdAt: a.created_time,
+      spend14: stat.get(a.id)?.spend ?? 0,
+      paid14: stat.get(a.id)?.paid ?? 0,
+    })),
+    campaignCpp14,
+  });
+  const proposed = [];
+  for (const p of pauses) {
+    const left = live.filter((a) => a.adset_id === p.adsetId).length - pauses.filter((x) => x.adsetId === p.adsetId).length;
+    proposed.push(
+      await propose("ads", {
+        type: "ads.pause_ad",
+        title: `Pause ${p.name}`,
+        reason: `${p.reason} It pulls its campaign's cost up; the other ads in the ad set take over its spend.`,
+        effect: `Pauses this ad. Its ad set keeps ${left} active ad${left === 1 ? "" : "s"}.`,
+        payload: { adId: p.adId, adsetId: p.adsetId, campaignId: p.campaignId, name: p.name },
+        ref: { kind: "meta", id: `pause:${p.adId}` },
+        runAt,
+      })
+    );
+  }
+  return { paused: proposed.filter(Boolean).length, thin };
 };
 
 handle("ads.budget", async (action) => {
@@ -283,9 +431,56 @@ handle("ads.budget", async (action) => {
   return { from, to };
 });
 
-// Older queued refresh cards: running one just records it (new ones go through ads.creative_launch).
-handle("ads.creative_refresh", async () => ({ recorded: true }));
-
 handleUndo("ads.budget", async (action) => {
   await setDailyBudget(action.payload.entityId, action.payload.from);
 });
+
+// Money moves from one unit to another: the cut runs first, so total spend never goes up.
+handle("ads.rebalance", async (action) => {
+  const { moves } = action.payload;
+  const structure = await fetchStructure();
+  const all = [...structure.campaigns, ...structure.adsets];
+  for (const m of moves) {
+    const current = all.find((e) => e.id === m.entityId);
+    if (!current) throw new Error(`${m.name} no longer exists`);
+    if (current.status !== "ACTIVE") throw new Error(`${m.name} is ${String(current.status).toLowerCase()}; not moving budget.`);
+    if (current.dailyBudget !== m.from) {
+      throw new Error(`${m.name} is now ₹${current.dailyBudget}/day, not ₹${m.from}; someone changed it. Skipped so nothing is overwritten.`);
+    }
+  }
+  const done = [];
+  try {
+    for (const m of moves) {
+      await setDailyBudget(m.entityId, m.to);
+      done.push(m);
+    }
+  } catch (err) {
+    for (const m of done.reverse()) await setDailyBudget(m.entityId, m.from).catch(() => {});
+    throw err;
+  }
+  return { moves: moves.map((m) => ({ entityId: m.entityId, from: m.from, to: m.to })) };
+});
+
+handleUndo("ads.rebalance", async (action) => {
+  // Receiver back down first, then the donor back up.
+  for (const m of [...action.payload.moves].reverse()) await setDailyBudget(m.entityId, m.from);
+});
+
+handle("ads.pause_ad", async (action) => {
+  const { adId, adsetId } = action.payload;
+  const ads = await fetchAds();
+  const ad = ads.find((a) => a.id === adId);
+  if (!ad) throw new Error("This ad no longer exists");
+  if (ad.effective_status !== "ACTIVE") return { skipped: `Already ${String(ad.effective_status).toLowerCase()}` };
+  const activeInSet = ads.filter((a) => a.adset_id === adsetId && a.effective_status === "ACTIVE").length;
+  if (activeInSet <= RULES.adMinActive) throw new Error(`Only ${activeInSet} active ads left in this ad set; not pausing.`);
+  await setStatus(adId, "PAUSED");
+  return { paused: adId };
+});
+
+handleUndo("ads.pause_ad", async (action) => {
+  if (action.result?.paused) await setStatus(action.result.paused, "ACTIVE");
+});
+
+// Older queued refresh cards: running one just records it (new ones go through ads.creative_launch).
+handle("ads.creative_refresh", async () => ({ recorded: true }));

@@ -220,6 +220,47 @@ describe("POST /user-register (registration fulfilment)", () => {
     expect(record.registration.passwordHash).toBeUndefined();
   });
 
+  it("tells Meta about the sign-up from the server and saves where the member came from", async () => {
+    const meta = [];
+    const realFetch = globalThis.fetch;
+    const token = process.env.META_ADS_TOKEN;
+    process.env.META_ADS_TOKEN = "test-token";
+    globalThis.fetch = async (url, init) => {
+      if (String(url).startsWith("https://graph.facebook.com/")) {
+        meta.push({ url: String(url), body: new URLSearchParams(String(init.body)) });
+        return new Response(JSON.stringify({ events_received: 1 }));
+      }
+      return realFetch(url, init);
+    };
+    try {
+      const { body } = await api()
+        .post("/api/create-order")
+        .set("X-Forwarded-For", "203.0.113.9")
+        .set("User-Agent", "Mozilla/5.0 (Linux; Android 14) FB_IAB")
+        .send({
+          purpose: "registration",
+          registration: registrationForm(),
+          tracking: { fbp: "fb.1.1700000000000.123", fbc: "fb.1.1700000000000.AbC", utmSource: "meta", utmCampaign: "kn", utmContent: "kn_why351", landing: "/kn" },
+        });
+      const res = await api().post("/api/user-register").send(paidOrder(body.orderId));
+      expect(res.status).toBe(200);
+      expect(meta).toHaveLength(1);
+      expect(meta[0].url).toMatch(/\/1199725088340553\/events$/);
+      const [event] = JSON.parse(meta[0].body.get("data"));
+      expect(event).toMatchObject({ event_name: "CompleteRegistration", event_id: body.orderId, action_source: "website", custom_data: { value: REGISTRATION_FEE, currency: "INR" } });
+      expect(event.user_data).toMatchObject({ client_ip_address: "203.0.113.9", fbp: "fb.1.1700000000000.123", fbc: "fb.1.1700000000000.AbC" });
+      // Contact details only as SHA-256 hashes.
+      expect(event.user_data.em[0]).toMatch(/^[a-f0-9]{64}$/);
+      expect(JSON.stringify(event)).not.toContain("asha@example.test");
+      const user = await User.findOne({ "basic.email": "asha@example.test" }).lean();
+      expect(user.acquisition).toMatchObject({ utmSource: "meta", utmContent: "kn_why351", landing: "/kn" });
+    } finally {
+      globalThis.fetch = realFetch;
+      if (token === undefined) delete process.env.META_ADS_TOKEN;
+      else process.env.META_ADS_TOKEN = token;
+    }
+  });
+
   it("is idempotent: browser and webhook retry create one account", async () => {
     const orderId = await paidRegistration();
     const first = await api().post("/api/user-register").send(paidOrder(orderId));

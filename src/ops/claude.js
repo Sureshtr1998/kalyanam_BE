@@ -51,8 +51,10 @@ const costOf = (tier, usage) => {
 /**
  * Asks Claude and returns parsed JSON matching `schema` (or plain text when
  * no schema is given). The stable `system` text is cached between calls.
+ * `images`: [{ mediaType: "image/jpeg", data: <base64> }], shown before the prompt.
+ * @param {{ task: string, tier?: string, system: string, prompt: string, schema?: object, maxTokens?: number, images?: Array<{ mediaType: string, data: string }> }} p
  */
-export const ask = async ({ task, tier = "sort", system, prompt, schema, maxTokens = 2000 }) => {
+export const ask = async ({ task, tier = "sort", system, prompt, schema, maxTokens = 2000, images = [] }) => {
   const api = getClient();
   if (!api) throw new ClaudeUnavailable("ANTHROPIC_API_KEY is not set");
 
@@ -67,7 +69,18 @@ export const ask = async ({ task, tier = "sort", system, prompt, schema, maxToke
     model: t.model,
     max_tokens: maxTokens,
     system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content: prompt }],
+    // Images (e.g. the best ads, to see what their cards say) go before the text.
+    messages: [
+      {
+        role: "user",
+        content: images.length
+          ? [
+              ...images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } })),
+              { type: "text", text: prompt },
+            ]
+          : prompt,
+      },
+    ],
     output_config: { effort: t.effort, ...(schema ? { format: { type: "json_schema", schema } } : {}) },
   };
   // Opus thinks before answering, so it gets more time than the 45 s default.

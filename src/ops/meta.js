@@ -180,9 +180,23 @@ export const setStatus = (entityId, status) => graphPost(entityId, { status });
 
 /* ------------------------- creating ads and ad sets ------------------------ */
 
-/** Every ad with its ad set, status and creative id. */
+/** Every ad with its ad set, status, age, creative id and any delivery issue. */
 export const fetchAds = () =>
-  graphAll(`${accountId()}/ads`, { fields: "id,name,adset_id,campaign_id,effective_status,creative{id}", limit: 300 });
+  graphAll(`${accountId()}/ads`, {
+    fields: "id,name,adset_id,campaign_id,effective_status,created_time,creative{id},issues_info",
+    limit: 300,
+  });
+
+/** Ads Meta has disapproved or flagged, in campaigns that are meant to be running. */
+export const adIssuesFrom = (ads, activeCampaignIds) =>
+  ads
+    .filter((a) => ["DISAPPROVED", "WITH_ISSUES"].includes(a.effective_status) && activeCampaignIds.has(a.campaign_id))
+    .map((a) => ({
+      id: a.id,
+      name: a.name,
+      effective_status: a.effective_status,
+      issue: a.issues_info?.[0]?.error_summary || a.issues_info?.[0]?.error_message || "",
+    }));
 
 /** Uploads a JPEG (base64) to the ad account's image library; returns its hash. */
 export const uploadAdImage = async (base64, name) => {
@@ -200,19 +214,45 @@ export const fetchCreativeSpec = async (adId) => {
 
 export const createCreative = (fields) => graphPost(`${accountId()}/adcreatives`, fields);
 
+/**
+ * An ad's image as base64 (for Claude to see what the card says), or null.
+ * Image ads give image_url; others fall back to the thumbnail. Max 2 MB.
+ */
+export const fetchAdImage = async (adId) => {
+  try {
+    const ad = await graphGet(adId, { fields: "creative{image_url,thumbnail_url}" });
+    const url = ad.creative?.image_url || ad.creative?.thumbnail_url;
+    if (!url) return null;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const type = String(res.headers.get("content-type") || "").split(";")[0];
+    if (!res.ok || !/^image\/(jpeg|png|gif|webp)$/.test(type)) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    return buf.length <= 2 * 1024 * 1024 ? { mediaType: type, data: buf.toString("base64") } : null;
+  } catch {
+    return null;
+  }
+};
+
 /** Copies an ad into an ad set (keeps its tracking and settings), paused. */
 export const copyAd = async (adId, adsetId) => {
   const r = await graphPost(`${adId}/copies`, { adset_id: adsetId, status_option: "PAUSED" });
   return r.copied_ad_id ?? r.ad_object_ids?.[0]?.copied_id;
 };
 
-/** Copies an ad set with its ads, paused. */
+/**
+ * Copies an ad set without its ads, paused. (A deep copy of an ad set with
+ * more than 3 ads exceeds Meta's synchronous copy limit, so ads are copied
+ * one by one with copyAd.)
+ */
 export const copyAdset = async (adsetId) => {
-  const r = await graphPost(`${adsetId}/copies`, { deep_copy: "true", status_option: "PAUSED" });
+  const r = await graphPost(`${adsetId}/copies`, { deep_copy: "false", status_option: "PAUSED" });
   return r.copied_adset_id ?? r.ad_object_ids?.[0]?.copied_id;
 };
 
 export const fetchAdset = (adsetId) => graphGet(adsetId, { fields: "id,name,campaign_id,daily_budget,targeting,effective_status" });
+
+/** True when Meta's Advantage+ audience is on: ages and gender are then only suggestions, and age_min can't go above 25. */
+export const usesAdvantageAudience = (targeting) => Number(targeting?.targeting_automation?.advantage_audience) === 1;
 
 /** Finds Meta's location key for a city, region or country name. */
 export const searchLocation = async (q) => {
@@ -354,10 +394,18 @@ const settle = async (p) => {
   }
 };
 
+/** The organic tracking code in a post's text (…?p=fkn1127), if any. */
+export const codeIn = (text = "") => String(text).match(/[?&]p=([a-z0-9]{2,16})/i)?.[1]?.toLowerCase() ?? null;
+
+const metricValue = (r, name) => r?.data?.find((m) => m.name === name)?.values?.[0]?.value ?? r?.data?.find((m) => m.name === name)?.total_value?.value ?? null;
+
 /**
- * How recent organic posts did (last `days` days): reach where Meta gives it,
- * plus reactions, comments and shares (Facebook) or likes and comments
- * (Instagram). Missing insight metrics are left out rather than failing.
+ * How recent organic posts did (last `days` days): reach, engagement
+ * (reactions + comments + shares on Facebook; likes + comments + saves +
+ * shares on Instagram), link clicks (Facebook) and profile visits
+ * (Instagram, where links in captions can't be clicked), plus the post's
+ * tracking code so sign-ups can be matched. Missing metrics are left out
+ * rather than failing.
  */
 export const fetchPostPerformance = async (days = 28) => {
   await resolvePage();
@@ -373,29 +421,53 @@ export const fetchPostPerformance = async (days = 28) => {
     }, token)
   );
   for (const p of fb?.data ?? []) {
-    const reach = await settle(graphGet(`${p.id}/insights`, { metric: "post_impressions_unique" }, token));
+    const [reach, clicks] = await Promise.all([
+      settle(graphGet(`${p.id}/insights`, { metric: "post_impressions_unique" }, token)),
+      settle(graphGet(`${p.id}/insights`, { metric: "post_clicks_by_type" }, token)),
+    ]);
+    const byType = metricValue(clicks, "post_clicks_by_type");
     out.push({
+      id: p.id,
       platform: "facebook",
       at: p.created_time,
       text: String(p.message || "").slice(0, 160),
-      reach: reach?.data?.[0]?.values?.[0]?.value ?? null,
+      code: codeIn(p.message),
+      reach: metricValue(reach, "post_impressions_unique"),
       engagement: (p.reactions?.summary?.total_count ?? 0) + (p.comments?.summary?.total_count ?? 0) + (p.shares?.count ?? 0),
+      linkClicks: byType && typeof byType === "object" ? Number(byType["link clicks"] ?? 0) : null,
     });
   }
   if (IG()) {
     const ig = await settle(graphGet(`${IG()}/media`, { fields: "id,caption,timestamp,like_count,comments_count,media_type", limit: 40 }, token));
     for (const m of (ig?.data ?? []).filter((x) => Date.parse(x.timestamp) / 1000 >= since)) {
-      const reach = await settle(graphGet(`${m.id}/insights`, { metric: "reach" }, token));
+      const [reach, extra, visits] = await Promise.all([
+        settle(graphGet(`${m.id}/insights`, { metric: "reach" }, token)),
+        settle(graphGet(`${m.id}/insights`, { metric: "saved,shares" }, token)),
+        settle(graphGet(`${m.id}/insights`, { metric: "profile_visits" }, token)),
+      ]);
       out.push({
+        id: m.id,
         platform: "instagram",
         at: m.timestamp,
         text: String(m.caption || "").slice(0, 160),
-        reach: reach?.data?.[0]?.values?.[0]?.value ?? null,
-        engagement: (m.like_count ?? 0) + (m.comments_count ?? 0),
+        code: codeIn(m.caption),
+        format: m.media_type,
+        reach: metricValue(reach, "reach"),
+        engagement: (m.like_count ?? 0) + (m.comments_count ?? 0) + (metricValue(extra, "saved") ?? 0) + (metricValue(extra, "shares") ?? 0),
+        profileVisits: metricValue(visits, "profile_visits"),
       });
     }
   }
   return out;
+};
+
+/** Times of the Facebook posts already scheduled in Meta (e.g. by hand in Business Suite). */
+export const fetchScheduledTimes = async () => {
+  await resolvePage();
+  if (!PAGE()) return [];
+  const token = await pageToken();
+  const r = await settle(graphGet(`${PAGE()}/scheduled_posts`, { fields: "id,scheduled_publish_time", limit: 100 }, token));
+  return (r?.data ?? []).map((p) => Number(p.scheduled_publish_time)).filter(Boolean).map((s) => new Date(s * 1000));
 };
 
 /** IST dates (YYYY-MM-DD) that already have a Facebook post scheduled in Meta (e.g. posted by hand). */

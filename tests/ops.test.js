@@ -15,7 +15,10 @@ vi.mock("../src/ops/mail.js", () => ({
 const triage = vi.fn();
 const ideaPlan = vi.fn();
 const organicPlan = vi.fn();
-const metaRead = vi.hoisted(() => ({ scheduledDays: [], performance: [] }));
+const adsWrite = vi.fn();
+const organicReview = vi.fn(() => ({ reviews: [] }));
+const adsReview = vi.fn();
+const metaRead = vi.hoisted(() => ({ scheduledDays: [], scheduledTimes: [], performance: [], structure: { campaigns: [], adsets: [] }, ads: null }));
 const commentTriage = vi.fn();
 const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})) }));
 const hidden = [];
@@ -35,9 +38,12 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
     url_tags: "utm_source=meta",
   })),
   uploadAdImage: vi.fn(async () => "hash_1"),
+  fetchAdImage: vi.fn(async (id) => ({ mediaType: "image/jpeg", data: Buffer.from(`img-${id}`).toString("base64") })),
   fetchScheduledDays: vi.fn(async () => metaRead.scheduledDays),
+  fetchScheduledTimes: vi.fn(async () => metaRead.scheduledTimes),
   fetchPostPerformance: vi.fn(async () => metaRead.performance),
-  fetchAds: vi.fn(async () => [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
+  fetchAds: vi.fn(async () => metaRead.ads ?? [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
+  fetchStructure: vi.fn(async () => metaRead.structure),
   createCreative: vi.fn(async () => ({ id: "cr_1" })),
   copyAd: vi.fn(async () => "ad_new"),
   graphPost: vi.fn(async () => ({ success: true })),
@@ -50,7 +56,7 @@ vi.mock("../src/ops/claude.js", () => ({
   spendSummary: async () => ({ totalUsd: 1.5, totalCalls: 10, monthUsd: 0.5, byTask: [] }),
   inrRate: async () => 88,
   ClaudeUnavailable: class extends Error {},
-  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
+  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : task === "ads.creatives" ? adsWrite() : task === "ads.review" ? adsReview() : task === "organic.review" ? organicReview() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
 }));
 
 const { api, createUser, tokenFor } = await import("./helpers.js");
@@ -80,7 +86,7 @@ const qstashCalls = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, init) => {
   if (String(url).startsWith("https://qstash.upstash.io/")) {
-    qstashCalls.push({ url: String(url), headers: init?.headers });
+    qstashCalls.push({ url: String(url), method: init?.method ?? "GET", headers: init?.headers });
     return new Response(JSON.stringify({ scheduleId: "scd_test" }), { status: 201 });
   }
   return realFetch(url, init);
@@ -313,12 +319,97 @@ describe("ad automation", () => {
     expect(res.status).toBe(409);
   });
 
-  it("puts ad creatives in the render queue next to posts", async () => {
+  it("puts ad creatives in the render queue next to posts, with the ad card's fields", async () => {
     await OpsPost.deleteMany({});
     await OpsCreative.deleteMany({});
-    await OpsCreative.create({ language: "Telugu", design: { headline: "కొత్త ప్రారంభం", theme: "cream" } });
+    await OpsCreative.create({ language: "Telugu", design: { headline: "కొత్త ప్రారంభం", highlight: "మీ కుటుంబం కోసం", bullets: ["ఒకటి", "రెండు", "మూడు"], price: "₹351", cta: "నమోదు", theme: "ad" } });
     const q = await api().get("/api/ops/render-queue").set({ "x-internal-secret": process.env.INTERNAL_ROUTE_SECRET });
-    expect(q.body.posts).toEqual([expect.objectContaining({ kind: "ad", language: "Telugu", headline: "కొత్త ప్రారంభం" })]);
+    expect(q.body.posts).toEqual([
+      expect.objectContaining({ kind: "ad", language: "Telugu", headline: "కొత్త ప్రారంభం", highlight: "మీ కుటుంబం కోసం", bullets: ["ఒకటి", "రెండు", "మూడు"], cta: "నమోదు" }),
+    ]);
+  });
+
+  it("moves budget between languages (cut first) and undoes it", async () => {
+    metaRead.structure = {
+      campaigns: [
+        { id: "c_te", name: "SRK | Telugu", dailyBudget: 2100, status: "ACTIVE" },
+        { id: "c_kn", name: "SRK | Kannada", dailyBudget: 1700, status: "ACTIVE" },
+      ],
+      adsets: [],
+    };
+    metaCalls.setDailyBudget.mockClear();
+    const a = await OpsAction.create({
+      module: "ads", type: "ads.rebalance", status: "scheduled", title: "Move", runAt: new Date(),
+      payload: { moves: [{ entityId: "c_te", name: "SRK | Telugu", from: 2100, to: 1800 }, { entityId: "c_kn", name: "SRK | Kannada", from: 1700, to: 2000 }] },
+    });
+    await execute(a._id);
+    expect((await OpsAction.findById(a._id)).status).toBe("done");
+    expect(metaCalls.setDailyBudget.mock.calls).toEqual([["c_te", 1800], ["c_kn", 2000]]);
+
+    metaCalls.setDailyBudget.mockClear();
+    await api().post(`/api/manage/ops/actions/${a._id}/undo`).set("x-auth-token", await admin());
+    expect(metaCalls.setDailyBudget.mock.calls).toEqual([["c_kn", 1700], ["c_te", 2100]]);
+  });
+
+  it("skips a budget move when someone changed a budget in the meantime", async () => {
+    metaRead.structure = { campaigns: [{ id: "c_te", name: "SRK | Telugu", dailyBudget: 2500, status: "ACTIVE" }, { id: "c_kn", name: "SRK | Kannada", dailyBudget: 1700, status: "ACTIVE" }], adsets: [] };
+    metaCalls.setDailyBudget.mockClear();
+    const a = await OpsAction.create({
+      module: "ads", type: "ads.rebalance", status: "scheduled", title: "Move", runAt: new Date(),
+      payload: { moves: [{ entityId: "c_te", name: "SRK | Telugu", from: 2100, to: 1800 }, { entityId: "c_kn", name: "SRK | Kannada", from: 1700, to: 2000 }] },
+    });
+    await execute(a._id);
+    const after = await OpsAction.findById(a._id);
+    expect(after.status).toBe("failed");
+    expect(after.error).toMatch(/someone changed it/);
+    expect(metaCalls.setDailyBudget).not.toHaveBeenCalled();
+  });
+
+  it("pauses a losing ad, but never the third-last one", async () => {
+    metaCalls.setStatus.mockClear();
+    metaRead.ads = ["a1", "a2", "a3"].map((id) => ({ id, name: id, adset_id: "s1", campaign_id: "c_te", effective_status: "ACTIVE" }));
+    const pause = (adId) => OpsAction.create({ module: "ads", type: "ads.pause_ad", status: "scheduled", title: "Pause", runAt: new Date(), payload: { adId, adsetId: "s1", campaignId: "c_te" } });
+    const first = await pause("a1");
+    await execute(first._id);
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("a1", "PAUSED");
+
+    metaRead.ads[0].effective_status = "PAUSED";
+    const second = await pause("a2");
+    await execute(second._id);
+    expect((await OpsAction.findById(second._id)).error).toMatch(/Only 2 active ads/);
+    metaRead.ads = null;
+  });
+
+  it("emails urgent alerts to the admins", async () => {
+    const owner = await createUser({ rest: { isAdmin: true } });
+    const { notice } = await import("../src/ops/actions.js");
+    await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "2 ads disapproved by Meta", reason: "KN-09: Personal attributes", effect: "Alert only.", payload: { dedupeKey: "t1" } });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ to: owner.basic.email });
+    expect(sent[0].subject).toMatch(/^\[SRK Ops\] 2 ads disapproved/);
+    // The same alert within a day isn't sent again.
+    await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "2 ads disapproved by Meta", reason: "x", effect: "x", payload: { dedupeKey: "t1" } });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("saves the ads rules from Settings", async () => {
+    const res = await api()
+      .post("/api/manage/ops/config")
+      .set("x-auth-token", await admin())
+      .send({ ads: { handsOffUntil: "2026-12-10", batchEveryDays: 21, newAdsets: true, autoTopUp: true, topUpBelow: 8000, alertEmail: "owner@example.com" } });
+    expect(res.status).toBe(200);
+    expect(res.body.ads).toMatchObject({ batchEveryDays: 21, newAdsets: true, autoTopUp: true, alertEmail: "owner@example.com", rebalance: true });
+    expect(new Date(res.body.ads.handsOffUntil).toISOString().slice(0, 10)).toBe("2026-12-10");
+    const bad = await api().post("/api/manage/ops/config").set("x-auth-token", await admin()).send({ ads: { alertEmail: "not an email" } });
+    expect(bad.status).toBe(400);
+  });
+
+  it("plans no ad changes before the hands-off date", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live", "ads.handsOffUntil": new Date(Date.now() + 5 * 86400000) } }, { upsert: true });
+    const { runAdsPlanning } = await import("../src/ops/adsGrowth.js");
+    const r = /** @type {any} */ (await runAdsPlanning());
+    expect(r.skipped).toMatch(/Hands off until/);
+    expect(await OpsAction.countDocuments({ type: { $in: ["ads.pause_ad", "ads.creative_launch", "ads.new_adset"] } })).toBe(0);
   });
 });
 
@@ -490,23 +581,47 @@ describe("plan an idea", () => {
   });
 });
 
-describe("automation starts itself", () => {
-  it("creates the 15-minute schedule when the Ops tab is first opened, once a day at most", async () => {
+describe("automation (Vercel Cron)", () => {
+  const cronTick = () =>
+    api().post("/api/ops/tick").set({ "x-internal-secret": process.env.INTERNAL_ROUTE_SECRET, "user-agent": "vercel-cron/1.0 (+https://vercel.com/docs/cron-jobs)" });
+
+  it("never creates a QStash schedule; the first Vercel Cron tick removes the old one, once", async () => {
+    // Vercel Cron authenticates with CRON_SECRET (set in production).
+    process.env.CRON_SECRET ??= "cron-test";
     qstashCalls.length = 0;
     const token = tokenFor(await createUser({ rest: { isAdmin: true } }));
-    const first = await api().get("/api/manage/ops/overview").set("x-auth-token", token);
-    expect(first.body.automation).toMatchObject({ ready: true, scheduled: true });
-    expect(qstashCalls).toHaveLength(1);
-    expect(qstashCalls[0].url).toMatch(/schedules\/.*ops\/tick$/);
-    expect(qstashCalls[0].headers["Upstash-Cron"]).toBe("*/15 * * * *");
-    expect(qstashCalls[0].headers["Upstash-Schedule-Id"]).toBe("ops-tick");
-
     await api().get("/api/manage/ops/overview").set("x-auth-token", token);
+    expect(qstashCalls).toHaveLength(0);
+
+    expect((await cronTick()).status).toBe(200);
+    expect(qstashCalls).toEqual([expect.objectContaining({ method: "DELETE", url: expect.stringMatching(/schedules\/ops-tick$/) })]);
+    await cronTick();
     expect(qstashCalls).toHaveLength(1);
 
-    const restart = await api().post("/api/manage/ops/automation/start").set("x-auth-token", token);
-    expect(restart.status).toBe(200);
-    expect(qstashCalls).toHaveLength(2);
+    const o = await api().get("/api/manage/ops/overview").set("x-auth-token", token);
+    expect(o.body.automation).toMatchObject({ ready: true, healthy: true, source: "vercel" });
+  });
+
+  it("runs one tick at a time", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { tickLockUntil: new Date(Date.now() + 60000) } }, { upsert: true });
+    const r = await cronTick();
+    expect(r.body.ran).toEqual([expect.objectContaining({ result: "Another run is in progress" })]);
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { tickLockUntil: null } });
+  });
+
+  it("raises an urgent alert after missed runs", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "lastRuns.tick": { at: new Date(Date.now() - 3 * 3600000), ok: true } } }, { upsert: true });
+    await cronTick();
+    const a = await OpsAction.findOne({ type: "ops.missed_runs" });
+    expect(a).toMatchObject({ priority: "urgent" });
+    expect(a.title).toMatch(/last one was 3 h/);
+  });
+
+  it("lets an admin run it now", async () => {
+    const token = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const r = await api().post("/api/manage/ops/automation/start").set("x-auth-token", token);
+    expect(r.status).toBe(200);
+    expect(r.body.msg).toMatch(/Ran|problem/);
   });
 });
 
@@ -523,30 +638,182 @@ describe("render pass", () => {
 });
 
 describe("organic planner", () => {
-  it("leaves days already scheduled in Meta alone and plans from post performance", async () => {
+  /** Next Monday (IST) as YYYY-MM-DD, and an IST time on a day after it. */
+  const nextMondayKey = () => {
+    const ist = new Date(Date.now() + 5.5 * 3600000);
+    const add = ((8 - ist.getUTCDay()) % 7) || 7;
+    return new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + add)).toISOString().slice(0, 10);
+  };
+  const istAt = (dayKey, plusDays, hour) => new Date(Date.parse(dayKey) + plusDays * 86400000 + (hour - 5.5) * 3600000);
+  const planned = (day, extra = {}) => ({
+    day, language: "Kannada", idea: "community", format: "card", angle: "Community", topic: `Topic ${day}`, kicker: "k", headline: `h${day}`, subline: "s",
+    highlight: "", bullets: [], price: "", cta: "ಇಂದೇ ನೋಂದಾಯಿಸಿ", caption: "ನಿಮ್ಮ ಮಗಳಿಗೆ ಸರಿಯಾದ ಸಂಬಂಧ?", hashtags: ["KannadaMatrimony", "#Bengaluru"], theme: "saffron", ...extra,
+  });
+
+  it("fills only free evenings, learns from sign-ups, and caps join posts at 1 in 3", async () => {
     const { planWeek } = await import("../src/ops/organic.js");
     const { ask } = await import("../src/ops/claude.js");
     await OpsPost.deleteMany({});
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
-    // Next Monday (IST) and the Wednesday after it, which the owner already filled by hand.
-    const ist = new Date(Date.now() + 5.5 * 3600000);
-    const add = ((8 - ist.getUTCDay()) % 7) || 7;
-    const mondayKey = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + add)).toISOString().slice(0, 10);
-    const wednesdayKey = new Date(Date.parse(mondayKey) + 2 * 86400000).toISOString().slice(0, 10);
-    metaRead.scheduledDays = [wednesdayKey];
+    const monday = nextMondayKey();
+    // Wednesday evening is taken by hand; Tuesday only has a 12:30 safety post, so its evening is free.
+    metaRead.scheduledTimes = [istAt(monday, 2, 19.5), istAt(monday, 1, 12.5)];
     metaRead.performance = [
-      { platform: "facebook", at: "2026-11-20", text: "ಕುಟುಂಬದ ಆಶೀರ್ವಾದ", reach: 900, engagement: 81 },
-      { platform: "instagram", at: "2026-11-21", text: "Why join", reach: 400, engagement: 4 },
+      { platform: "facebook", at: "2026-11-20", text: "ಕುಟುಂಬದ ಆಶೀರ್ವಾದ https://www.seetharamakalyana.in/kn?p=fkn1120", code: "fkn1120", reach: 900, engagement: 81, linkClicks: 40 },
+      { platform: "instagram", at: "2026-11-21", text: "Why join", code: null, reach: 400, engagement: 4, profileVisits: 9 },
     ];
-    const post = (day) => ({ day, language: "Kannada", topic: `Topic ${day}`, kicker: "k", headline: `h${day}`, subline: "s", theme: "saffron", caption: "c" });
-    organicPlan.mockReturnValue({ posts: [0, 1, 2, 3, 4, 5, 6].map(post) });
+    await createUser({ rest: { acquisition: { utmSource: "facebook", utmMedium: "organic", utmContent: "fkn1120" } } });
+    await createUser({ rest: { acquisition: { utmSource: "facebook", utmMedium: "organic", utmContent: "fkn1120" } } });
+    organicPlan.mockReturnValue({ posts: [0, 1, 2, 3, 4, 5, 6].map((d) => planned(d, d < 4 ? { format: "join", highlight: "ಟೈಮ್‌ಪಾಸ್ ಅಲ್ಲ", bullets: ["a", "b", "c"], price: "₹351" } : {})) });
+
+    await (await import("../src/ops/models.js")).OpsComment.create({ platform: "facebook", commentId: "c_q1", text: "Is this site real? How do I see contact numbers?", category: "question", createdAt: new Date() });
+    // The quality check drops one post (a false claim it can't fix) and fixes another.
+    organicReview.mockReturnValueOnce({
+      reviews: [
+        { index: 0, claimsOk: false, languageOk: true, problems: ["Promises a match"], fixed: null },
+        { index: 1, claimsOk: true, languageOk: false, problems: ["Literal translation"], fixed: { kicker: "k", headline: "ಸರಿಯಾದ ಸಾಲು", subline: "s", highlight: "", bullets: [], price: "", cta: "ನೋಂದಾಯಿಸಿ", caption: "ಸರಿಪಡಿಸಿದ" } },
+      ],
+    });
 
     const r = await planWeek();
-    expect(r).toMatchObject({ planned: 6, skippedDays: 1, learnedFrom: 2 });
-    const days = (await OpsPost.find().lean()).map((p) => new Date(p.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(0, 10));
-    expect(days).not.toContain(wednesdayKey);
+    expect(r).toMatchObject({ planned: 5, dropped: 1, skippedDays: 1, learnedFrom: 2 });
+    const posts = await OpsPost.find().sort({ publishAt: 1 }).lean();
+    const days = posts.map((p) => new Date(p.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(0, 10));
+    expect(days).not.toContain(new Date(Date.parse(monday) + 2 * 86400000).toISOString().slice(0, 10));
+    expect(posts.filter((p) => p.format === "join").length).toBeLessThanOrEqual(2);
+    expect(posts.every((p) => p.idea === "community")).toBe(true);
+    expect(posts.find((p) => p.design?.headline === "ಸರಿಯಾದ ಸಾಲು")?.review).toMatch(/Fixed by the check/);
+    // Every post at 7:30 pm IST with a tracking code for its language and date.
+    for (const p of posts) {
+      const t = new Date(p.publishAt.getTime() + 5.5 * 3600000);
+      expect([t.getUTCHours(), t.getUTCMinutes()]).toEqual([19, 30]);
+      expect(p.code).toMatch(/^(kn|te|ta|hi|en)\d{4}$/);
+    }
+    // The five languages take turns.
+    expect(new Set(posts.map((p) => p.language)).size).toBeGreaterThanOrEqual(4);
     const call = ask.mock.calls.findLast(([o]) => o.task === "organic.plan")[0];
-    expect(call.prompt).toContain("ಕುಟುಂಬದ ಆಶೀರ್ವಾದ");
     expect(call.prompt).toMatch(/Plan exactly 6 post/);
+    expect(call.prompt).toMatch(/2 sign-ups traced/);
+    expect(call.prompt).toMatch(/2 sign-ups, reach 900, engagement 81, link clicks 40/);
+    expect(call.system).toMatch(/At most 2 this week/);
+    expect(call.system).toMatch(/answer \(Answer a family's doubt\)/);
+    expect(call.prompt).toMatch(/Is this site real\? How do I see contact numbers\?/);
+  });
+
+  it("writes the Facebook caption with a tracked link and the Instagram one with link in bio", async () => {
+    const { captionFor } = await import("../src/ops/organic.js");
+    const p = { language: "Telugu", code: "te1201", caption: "మీ కుటుంబానికి సరైన సంబంధం?", cta: "ఇప్పుడే నమోదు చేసుకోండి", hashtags: ["TeluguMatrimony", "Hyderabad", "Vizag", "Brahmin"] };
+    const fb = captionFor(p, "facebook");
+    expect(fb).toContain("ఇప్పుడే నమోదు చేసుకోండి: https://www.seetharamakalyana.in/te?p=fte1201");
+    expect(fb).toContain("#TeluguMatrimony #Hyderabad #Vizag");
+    expect(fb).not.toContain("#Brahmin");
+    const ig = captionFor(p, "instagram");
+    expect(ig).toContain("seetharamakalyana.in/te (link in bio)");
+    expect(ig).toContain("#Brahmin");
+    // Older posts keep their own caption.
+    expect(captionFor({ caption: "old caption seetharamakalyana.in" }, "facebook")).toBe("old caption seetharamakalyana.in");
+  });
+
+  it("draws join posts in the ad layout with the language's address", async () => {
+    await OpsPost.deleteMany({});
+    await OpsCreative.deleteMany({});
+    await OpsPost.create({ publishAt: new Date(Date.now() + 86400000), language: "Tamil", format: "join", topic: "Why 351", caption: "c", design: { headline: "ஏனெனில் திருமணம்", highlight: "டைம்பாஸ் அல்ல", bullets: ["a"], cta: "பதிவு", theme: "ad" }, status: "design" });
+    await OpsPost.create({ publishAt: new Date(Date.now() + 2 * 86400000), language: "English", topic: "How it works", caption: "c", design: { headline: "Three steps" }, status: "design" });
+    const q = await api().get("/api/ops/render-queue").set({ "x-internal-secret": process.env.INTERNAL_ROUTE_SECRET });
+    expect(q.body.posts).toEqual([
+      expect.objectContaining({ kind: "ad", language: "Tamil", url: "seetharamakalyana.in/ta", highlight: "டைம்பாஸ் அல்ல" }),
+      expect.objectContaining({ kind: "post", language: "English", url: "seetharamakalyana.in" }),
+    ]);
+  });
+
+  it("counts sign-ups per post code for the Organic screen", async () => {
+    await createUser({ rest: { acquisition: { utmSource: "instagram", utmMedium: "organic", utmContent: "bio" } } });
+    await createUser({ rest: { acquisition: { utmSource: "meta", utmMedium: "paid", utmContent: "kn_why351" } } });
+    const res = await api().get("/api/manage/ops/organic").set("x-auth-token", await tokenFor(await createUser({ rest: { isAdmin: true } })));
+    expect(res.status).toBe(200);
+    expect(res.body.signups).toMatchObject({ bio: 1 });
+    expect(res.body.signups.kn_why351).toBeUndefined();
+  });
+});
+
+describe("ad idea engine", () => {
+  const variant = (role, idea, extra = {}) => ({
+    idea, role, angle: `${role} angle`, kicker: "ಪಿಲ್", headline: "ಸಾಲು", highlight: "ಪಂಚ್", bullets: ["a", "b", "c"], price: "₹351", cta: "ನೋಂದಾಯಿಸಿ",
+    primaryText: "ಪಠ್ಯ", title: "ಶೀರ್ಷಿಕೆ", translation: "English version", ...extra,
+  });
+
+  it("writes one proven and one test variant from the library, images and families' questions, and drops what fails the check", async () => {
+    const { AdSnapshot, OpsComment } = await import("../src/ops/models.js");
+    const { planCreativeRefresh } = await import("../src/ops/adsCreative.js");
+    const { ask } = await import("../src/ops/claude.js");
+    await Promise.all([AdSnapshot.deleteMany({}), OpsCreative.deleteMany({}), OpsComment.deleteMany({})]);
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live" } }, { upsert: true });
+    const day = new Date(Date.now() - 2 * 86400000).toISOString().slice(0, 10);
+    await AdSnapshot.create([
+      { level: "adset", entityId: "s_kn", name: "Kannada | Karnataka | Parents 45-65", campaignId: "c_kn", date: day },
+      { level: "ad", entityId: "ad_kn1", name: "KN-07 Parents Communities 2", campaignName: "SRK | Kannada", campaignId: "c_kn", adsetId: "s_kn", date: day, spend: 4000, paid: 22 },
+      { level: "ad", entityId: "ad_kn2", name: "KN-09 Parents Why 351", campaignName: "SRK | Kannada", campaignId: "c_kn", adsetId: "s_kn", date: day, spend: 4000, paid: 12 },
+    ]);
+    await OpsComment.create({ platform: "facebook", commentId: "c_doubt", text: "Contact number plz, not able to register 9876543210", category: "question", createdAt: new Date() });
+    metaRead.ads = [
+      { id: "ad_kn1", name: "KN-07 Parents Communities 2", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" },
+      { id: "ad_kn2", name: "KN-09 Parents Why 351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" },
+    ];
+    adsWrite.mockReturnValue({ variants: [variant("proven", "community"), variant("test", "horoscope", { bullets: ["100% verified profiles", "b", "c"] })] });
+    adsReview.mockReturnValue({
+      reviews: [
+        { index: 0, claimsOk: true, languageOk: true, problems: [], fixed: null },
+        { index: 1, claimsOk: false, languageOk: true, problems: ["Says 100% verified"], fixed: null },
+      ],
+    });
+
+    const r = await planCreativeRefresh({ campaignId: "c_kn", campaignName: "SRK | Kannada", adsetId: "s_kn", adsetName: "Kannada | Karnataka | Parents 45-65", notes: ["Tired."], runAt: new Date(Date.now() + 86400000) });
+    expect(r).toMatchObject({ creatives: 1, ideas: ["proven:community"] });
+    const call = ask.mock.calls.findLast(([o]) => o.task === "ads.creatives")[0];
+    expect(call.images).toHaveLength(2);
+    expect(call.prompt).toMatch(/Proven idea for this language and audience: community/);
+    expect(call.prompt).toMatch(/Contact number plz, not able to register \[number\]/);
+    expect(call.prompt).not.toContain("9876543210");
+    const saved = await OpsCreative.find().lean();
+    expect(saved).toEqual([expect.objectContaining({ idea: "community", role: "proven", review: expect.stringMatching(/Passed/) })]);
+    const action = await OpsAction.findOne({ type: "ads.creative_launch" });
+    expect(action.reason).toMatch(/dropped 1 variant/);
+    expect(action.reason).toMatch(/Proven idea: Your community/);
+    metaRead.ads = null;
+  });
+
+  it("judges a new ad against its ad set after 7 days", async () => {
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    const { judgeNewAds } = await import("../src/ops/adsIdeas.js");
+    await Promise.all([AdSnapshot.deleteMany({}), OpsCreative.deleteMany({})]);
+    const liveAt = new Date(Date.now() - 8 * 86400000);
+    await OpsCreative.create({ campaignName: "SRK | Kannada", adsetId: "s_kn", adId: "ad_new", status: "live", liveAt, idea: "horoscope", role: "test", design: { headline: "h" } });
+    const day = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+    await AdSnapshot.create([
+      { level: "ad", entityId: "ad_new", date: day, spend: 2000, paid: 10 },
+      { level: "adset", entityId: "s_kn", date: day, spend: 9000, paid: 30 },
+    ]);
+    const judged = await judgeNewAds();
+    expect(judged).toEqual([expect.objectContaining({ verdict: "win" })]);
+    expect((await OpsCreative.findOne({ adId: "ad_new" })).verdict).toBe("win");
+    expect(await judgeNewAds()).toHaveLength(0);
+  });
+});
+
+describe("stored brief fix", () => {
+  it("corrects the two wrong sentences once and keeps the owner's other edits", async () => {
+    const { getConfig } = await import("../src/ops/models.js");
+    await OpsConfig.create({
+      _id: "ops",
+      brief: "Owner's own line.\n- Joining costs ₹351 (one time). Paid members get credits.\n- Profiles are checked by our team before they get the verified badge.",
+    });
+    const c = await getConfig();
+    expect(c.brief).toContain("Owner's own line.");
+    expect(c.brief).toContain("Membership costs ₹351 a year (annual).");
+    expect(c.brief).toContain("confirmed by OTP");
+    expect(c.brief).not.toMatch(/one time|checked by our team/);
+    // Later edits by the owner aren't touched again.
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { brief: "Joining costs ₹351 (one time)." } });
+    expect((await getConfig()).brief).toBe("Joining costs ₹351 (one time).");
   });
 });

@@ -183,6 +183,15 @@ const userSchema = new Schema(
     // Admins use the site as normal members and also get the admin panel.
     // Only set directly in the database or by another admin.
     isAdmin: { type: Boolean, default: false },
+    // Where the member came from (the ad's utm tags or Meta click id), saved at sign-up.
+    acquisition: {
+      utmSource: String,
+      utmMedium: String,
+      utmCampaign: String,
+      utmContent: String,
+      fbclid: String,
+      landing: String,
+    },
     // Referral (basic.referralId holds the broker's code). The broker is paid
     // a commission per referred registration, outside the site.
     brokerUnlinked: { type: Boolean, default: false },

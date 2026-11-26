@@ -8,6 +8,7 @@ import razorpay from "../../config/razorpay.js";
 import { publishQStash } from "../../config/upStash.js";
 import { isTestPayer } from "../../utils/constants.js";
 import { getPricing } from "../../utils/pricing.js";
+import { trackingFrom } from "../../utils/metaCapi.js";
 import {
   markCheckoutFailed,
   markCheckoutPaid,
@@ -59,6 +60,8 @@ router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
     let record;
     if (purpose === "registration") {
       record = await buildRegistrationOrder(req.body.registration || {});
+      // Meta cookies and the ad's utm tags, for the server-side sign-up event (utils/metaCapi.js).
+      record.tracking = trackingFrom(req);
     } else if (purpose === "broker") {
       record = await buildBrokerOrder(req.body.broker || {});
     } else {

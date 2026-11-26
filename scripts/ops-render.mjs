@@ -11,7 +11,7 @@
 import fs from "fs";
 import path from "path";
 import { chromium } from "playwright";
-import { SIZE, postHtml } from "../src/ops/postDesign.js";
+import { SIZE, adHtml, postHtml } from "../src/ops/postDesign.js";
 
 export const renderCards = async (posts) => {
   const browser = await chromium.launch();
@@ -19,7 +19,8 @@ export const renderCards = async (posts) => {
     const page = await browser.newPage({ viewport: SIZE, deviceScaleFactor: 1 });
     const out = [];
     for (const post of posts) {
-      await page.setContent(postHtml(post), { waitUntil: "load" });
+      // Ad cards use the winning ads' layout; organic posts use the post card.
+      await page.setContent(post.kind === "ad" ? adHtml(post) : postHtml(post), { waitUntil: "load" });
       await page.waitForSelector("body[data-ready='1']", { timeout: 15000 });
       out.push({ post, image: await page.screenshot({ type: "jpeg", quality: 92 }) });
     }
@@ -35,6 +36,7 @@ const SAMPLES = [
   { id: "tamil", language: "Tamil", theme: "maroon", kicker: "திருமண வாழ்த்துக்கள்", headline: "உங்கள் வாழ்க்கைத் துணையை இங்கே கண்டறியுங்கள்", subline: "குடும்பத்தின் ஆசியுடன் ஒரு புதிய பயணம்" },
   { id: "hindi", language: "Hindi", theme: "green", kicker: "क्यों जुड़ें", headline: "सही रिश्ता, परिवार की सहमति से", subline: "सत्यापित प्रोफ़ाइल, सरल प्रक्रिया" },
   { id: "english", language: "English", theme: "saffron", kicker: "How matching works", headline: "Matches that respect your family's values", subline: "Language, community and horoscope, all in one place" },
+  { id: "ad-kannada", kind: "ad", language: "Kannada", kicker: "₹351 ಯಾಕೆ, ಉಚಿತ ಯಾಕಿಲ್ಲ?", headline: "ಯಾಕೆಂದರೆ ಮದುವೆ", highlight: "ಟೈಮ್‌ಪಾಸ್ ಅಲ್ಲ.", bullets: ["ಪಾವತಿಸಿ ನೋಂದಣಿ, ಸುಮ್ಮನೆ ನೋಡುವವರು ದೂರ", "OTP ಮೂಲಕ ಪರಿಶೀಲಿಸಿದ ಪ್ರೊಫೈಲ್‌ಗಳು", "ಏಜೆಂಟ್‌ಗಳಿಲ್ಲ, ಸೇಲ್ಸ್ ಕರೆಗಳಿಲ್ಲ"], price: "ವರ್ಷಕ್ಕೆ ₹351", cta: "ಇಂದೇ ನೋಂದಾಯಿಸಿ" },
 ];
 
 const api = async (route, body) => {

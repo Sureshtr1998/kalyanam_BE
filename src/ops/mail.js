@@ -1,5 +1,6 @@
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
+import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import { simpleParser } from "mailparser";
 
 /*
@@ -109,14 +110,38 @@ export const sendMail = async ({ to, subject, text, inReplyTo }) => {
 };
 
 const send = async (transport, { to, subject, text, inReplyTo }) => {
-  const info = await transport.sendMail({
+  const message = {
     from: { name: "Seetha Rama Kalyana Support", address: USER() },
     to,
-    subject: subject?.toLowerCase().startsWith("re:") ? subject : `Re: ${subject || "your message"}`,
+    subject: /^(re:|\[srk ops\])/i.test(subject || "") ? subject : `Re: ${subject || "your message"}`,
     text,
+    date: new Date(),
     ...(inReplyTo ? { inReplyTo, references: inReplyTo } : {}),
-  });
+  };
+  // Built once, so the copy in Sent is byte-for-byte what was sent.
+  const raw = await new MailComposer(message).compile().build();
+  const info = await transport.sendMail({ envelope: { from: USER(), to }, raw });
+  await saveToSent(raw);
   return { messageId: info.messageId };
+};
+
+/**
+ * SMTP doesn't keep a copy, so the sent mail is also put in the mailbox's
+ * Sent folder over IMAP: replies show in Titan webmail like any other.
+ * Never throws: the mail has already gone out.
+ */
+export const saveToSent = async (raw) => {
+  let client;
+  try {
+    client = await connectImap();
+    const boxes = await client.list();
+    const sent = boxes.find((b) => b.specialUse === "\\Sent") ?? boxes.find((b) => /^(inbox[./])?sent( items| mail)?$/i.test(b.path));
+    await client.append(sent?.path ?? "Sent", raw, ["\\Seen"]);
+  } catch (err) {
+    console.error("[ops] save to Sent", err.message);
+  } finally {
+    await client?.logout().catch(() => {});
+  }
 };
 
 /** Checks the login works (used by the Settings "Test" button). */

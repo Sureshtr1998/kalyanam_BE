@@ -1,12 +1,12 @@
 import { OpsConfig, getConfig } from "./models.js";
-import { runDue } from "./actions.js";
+import { notice, runDue } from "./actions.js";
 import { metaConfigured, pageConfigured, resolvePage } from "./meta.js";
 import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
 import { runSupportCycle } from "./support.js";
 import { runCommentsCycle } from "./comments.js";
-import { planWeek, requestRenders, settlePublished } from "./organic.js";
+import { planWeek, recordOrganicStats, requestRenders, settlePublished } from "./organic.js";
 import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
@@ -64,6 +64,13 @@ const JOBS = [
     run: () => planWeek(),
   },
   {
+    // How organic posts did and the sign-ups traced to their links (read-only; for the Organic screen and /weekly-posts).
+    name: "organicStats",
+    ready: () => pageConfigured(),
+    due: (last, t) => last?.date !== t.date && t.hour >= 7,
+    run: () => recordOrganicStats(),
+  },
+  {
     name: "seoWeekly",
     ready: (c) => c.modes.seo !== "off" && seoConfigured() && claudeConfigured(),
     due: (last, t) => t.day === 1 && t.hour >= 11 && last?.date !== t.date,
@@ -101,8 +108,12 @@ const attempt = async (name, fn) => {
   }
 };
 
-/** Runs one tick. `only` forces a single job by name (from the panel's "Run now"). */
-export const tick = async ({ only, budgetMs = 50000 } = {}) => {
+/**
+ * Runs one tick. `only` forces a single job by name (from the panel's "Run now").
+ * `source`: "vercel" (Vercel Cron, every 15 minutes), "qstash" (the old schedule), "manual" or "other".
+ * @param {{ only?: string, budgetMs?: number, source?: string }} [p]
+ */
+export const tick = async ({ only, budgetMs = 50000, source = "other" } = {}) => {
   const deadline = Date.now() + budgetMs;
   const config = await getConfig();
   const t = ist();
@@ -116,11 +127,39 @@ export const tick = async ({ only, budgetMs = 50000 } = {}) => {
     return done;
   }
 
+  // One tick at a time: a second call while one runs just returns.
+  const locked = await OpsConfig.findOneAndUpdate(
+    { _id: "ops", $or: [{ tickLockUntil: null }, { tickLockUntil: { $lt: new Date() } }] },
+    { $set: { tickLockUntil: new Date(deadline + 20000) } }
+  );
+  if (!locked) return [{ name: "tick", ok: true, result: "Another run is in progress" }];
+  try {
+    return await runTick({ config, t, done, deadline, source });
+  } finally {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { tickLockUntil: null } }).catch(() => {});
+  }
+};
+
+const runTick = async ({ config, t, done, deadline, source }) => {
+  // The owner hears about gaps: runs should come every 15 minutes.
+  const previous = config.lastRuns?.tick?.at;
+  const gapMinutes = previous ? (Date.now() - new Date(previous).getTime()) / 60000 : 0;
+  if (gapMinutes > 45) {
+    await notice("tools", {
+      type: "ops.missed_runs",
+      priority: "urgent",
+      title: `The Ops agent missed runs: the last one was ${Math.floor(gapMinutes / 60)} h ${Math.round(gapMinutes % 60)} min ago`,
+      reason: "It should run every 15 minutes (Vercel Cron). Anything due in the gap (replies, verifications, ad changes) runs now.",
+      effect: "If this repeats, check Vercel → the kalyanam-be project → Settings → Cron Jobs.",
+      payload: { dedupeKey: `missed_runs:${t.date}` },
+    }).catch(() => {});
+  }
+
   // Find the Facebook Page / Instagram account from the token (cached for an hour).
   await resolvePage().catch(() => {});
 
-  // Make sure the 15-minute schedule exists (a no-op most of the time; recovers it if deleted).
-  await ensureAutomation().catch(() => {});
+  // Vercel Cron is the timer now; the first tick from it removes the old QStash schedule.
+  await ensureAutomation({ source }).catch(() => {});
 
   // In-app "OTP not received" help requests: verify the ones past their wait (only when the admin switch is on).
   await getAutoVerifySettings()
@@ -149,7 +188,7 @@ export const tick = async ({ only, budgetMs = 50000 } = {}) => {
 
   // Anything that became due while the jobs ran (e.g. comment replies) goes out now.
   if (Date.now() < deadline - 5000) await runDue(deadline);
-  await record("tick", { at: new Date(), date: t.date, ok: done.every((d) => d.ok) });
+  await record("tick", { at: new Date(), date: t.date, ok: done.every((d) => d.ok), source });
   return done;
 };
 

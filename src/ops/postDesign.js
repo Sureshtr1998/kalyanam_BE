@@ -88,7 +88,7 @@ const corner = (color, cls) =>
 
 /**
  * One post card.
- * @param {{ language: string, kicker?: string, headline: string, subline?: string, theme?: string }} post
+ * @param {{ language: string, kicker?: string, headline: string, subline?: string, theme?: string, url?: string }} post
  */
 export const postHtml = (post, assets = designAssets()) => {
   const t = THEMES[post.theme] ?? THEMES.saffron;
@@ -126,7 +126,7 @@ ${corner(t.accent, "tl")}${corner(t.accent, "tr")}${corner(t.accent, "br")}${cor
   <div class="middle"><h1 id="h">${esc(post.headline)}</h1>${post.subline ? `<p class="sub" id="s">${esc(post.subline)}</p>` : ""}</div>
 </div>
 <div class="rule"></div>
-<div class="brand"><img src="${assets.logo}" alt=""><div><b>Seetha Rama Kalyana</b><span>seetharamakalyana.in</span></div></div>
+<div class="brand"><img src="${assets.logo}" alt=""><div><b>Seetha Rama Kalyana</b><span>${esc(post.url || "seetharamakalyana.in")}</span></div></div>
 <script>
 // Fit: largest headline size (≤ ${script ? 92 : 104}px) whose lines all fit, at most 4 lines, block within the middle area.
 document.fonts.ready.then(() => {
@@ -140,6 +140,67 @@ document.fonts.ready.then(() => {
     size -= 4;
   }
   if (s) { let ss = 38; while (box.scrollHeight > box.clientHeight + 1 && ss > 26) { ss -= 2; s.style.fontSize = ss + "px"; } }
+  document.body.dataset.ready = "1";
+});
+</script>
+</body></html>`;
+};
+
+/**
+ * One ad card, in the layout of the account's winning ads (KN-09 "Why 351",
+ * the Communities ads): cream card with a soft frame, logo and name on top, an
+ * outlined pill, a two-line headline (dark, then orange), a white box of
+ * ticks, a price line, an orange button and the site address.
+ * @param {{ language: string, kicker?: string, headline: string, highlight?: string, bullets?: string[], price?: string, cta?: string, url?: string }} ad
+ */
+export const adHtml = (ad, assets = designAssets()) => {
+  const script = fontFor(ad.language);
+  const head = script ? `"${script}", "Noto Sans"` : `"Noto Sans"`;
+  const bullets = (ad.bullets ?? []).filter(Boolean).slice(0, 3);
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+${assets.fontCss}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:${SIZE.width}px;height:${SIZE.height}px;overflow:hidden}
+body{background:radial-gradient(circle at 50% 0%,#fde3c4 0%,#fff7ee 38%,#fffaf5 100%);color:#431407;font-family:${head};-webkit-font-smoothing:antialiased}
+.card{position:absolute;inset:30px;border:3px solid #f6c88a;border-radius:44px;display:flex;flex-direction:column;align-items:center;padding:36px 64px 44px}
+.brand{display:flex;align-items:center;gap:20px}
+.brand img{width:96px;height:96px;border-radius:50%;box-shadow:0 0 0 5px #f8d7a8}
+.brand b{font-family:"Noto Sans";font-weight:600;font-size:36px;color:#7c2d12}
+.main{flex:1;width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:34px;text-align:center}
+.pill{border:3px solid #c2410c;color:#c2410c;border-radius:999px;padding:12px 38px;font-weight:700;font-size:36px;line-height:1.35}
+h1{font-weight:700;line-height:1.3;text-wrap:balance}
+h1 .a{display:block;color:#431407}
+h1 .b{display:block;color:#c2410c}
+.ticks{background:#fff;border:2px solid #f3dcc0;border-radius:28px;padding:26px 40px;display:flex;flex-direction:column;gap:14px;text-align:left;max-width:100%}
+.ticks div{display:flex;gap:18px;font-size:32px;line-height:1.4;color:#431407}
+.ticks i{font-style:normal;color:#c2410c;font-weight:700;font-family:"Noto Sans"}
+.price{color:#c2410c;font-weight:700;font-size:40px}
+.cta{background:#c2410c;color:#fff;border-radius:999px;padding:24px 64px;font-weight:700;font-size:40px;box-shadow:0 14px 30px #c2410c40;line-height:1.3;text-align:center}
+.url{margin-top:24px;font-family:"Noto Sans";font-weight:600;font-size:30px;color:#431407}
+</style></head><body>
+<div class="card">
+  <div class="brand"><img src="${assets.logo}" alt=""><b>Seetha Rama Kalyana</b></div>
+  <div class="main" id="m">
+    ${ad.kicker ? `<div class="pill">${esc(ad.kicker)}</div>` : ""}
+    <h1 id="h"><span class="a">${esc(ad.headline)}</span>${ad.highlight ? `<span class="b">${esc(ad.highlight)}</span>` : ""}</h1>
+    ${bullets.length ? `<div class="ticks">${bullets.map((b) => `<div><i>✓</i><span>${esc(b)}</span></div>`).join("")}</div>` : ""}
+    ${ad.price ? `<div class="price">${esc(ad.price)}</div>` : ""}
+  </div>
+  ${ad.cta ? `<div class="cta">${esc(ad.cta)}</div>` : ""}
+  <div class="url">${esc(ad.url || "seetharamakalyana.in")}</div>
+</div>
+<script>
+// Fit: largest headline (≤ 84px) that keeps every block inside the card.
+document.fonts.ready.then(() => {
+  const h = document.getElementById("h"), m = document.getElementById("m");
+  let size = 84;
+  for (;;) {
+    h.style.fontSize = size + "px";
+    if ((m.scrollHeight <= m.clientHeight + 1 && h.scrollWidth <= h.clientWidth + 1) || size <= 44) break;
+    size -= 4;
+  }
+  let t = 32;
+  while (m.scrollHeight > m.clientHeight + 1 && t > 24) { t -= 2; document.querySelectorAll(".ticks div").forEach((d) => (d.style.fontSize = t + "px")); }
   document.body.dataset.ready = "1";
 });
 </script>

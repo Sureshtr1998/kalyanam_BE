@@ -10,6 +10,14 @@ const { Schema, model } = mongoose;
 export const MODES = ["off", "shadow", "live"];
 export const MODULES = ["ads", "organic", "support", "comments", "seo", "dev", "tools"];
 
+/** The owner's standing wishes for Meta ads; the agent reads them before planning anything. */
+export const DEFAULT_ADS_PREFERENCES = `- Ads run in all 4 languages (Kannada, Telugu, Tamil, Hindi) at all times. Budgets, ad sets and ads may change, but never leave a language without ads.
+- One campaign per language. Audiences are ad sets inside it: Parents 45-65 and Young 24-34.
+- No NRI, outside-home-state or new-language ad sets unless the owner asks.
+- "SRK | Women safety" was paused by the owner: never restart or change it.
+- Organic posts are never boosted or turned into ads.
+- Never claim contact details are shared only after both families agree (paid members unlock contacts with credits).`;
+
 const ConfigSchema = new Schema(
   {
     _id: { type: String, default: "ops" },
@@ -34,7 +42,7 @@ const ConfigSchema = new Schema(
       scaleRoas: { type: Number, default: 1.5 },
       // Net revenue per paid member after GST and fees (₹), until real attribution exists.
       netRevenuePerMember: { type: Number, default: 285 },
-      // Cost per paid member that counts as losing (₹, 3-day rolling).
+      // Real cost per member (Meta's count corrected by our own joins) that counts as losing (₹, 7 and 14 days).
       losingCostPerMember: { type: Number, default: 420 },
       // Don't scale when prepaid funds cover fewer days than this.
       minRunwayDays: { type: Number, default: 5 },
@@ -44,6 +52,26 @@ const ConfigSchema = new Schema(
       commentDeleteHours: { type: Number, default: 24 },
       // Monthly Claude API budget (USD); the agent stops calling Claude past it.
       claudeMonthlyUsd: { type: Number, default: 100 },
+    },
+    // How the ads agent paces itself (rules in adsEngine.js and the meta-ads-playbook skill).
+    ads: {
+      // No new ads, paused ads or new ad sets before this date. Budget moves are still allowed.
+      handsOffUntil: { type: Date, default: null },
+      // Days between batches of ad changes (new ads, paused ads, new ad sets).
+      batchEveryDays: { type: Number, default: 14 },
+      // Move budget from expensive languages to cheap ones (total unchanged).
+      rebalance: { type: Boolean, default: true },
+      // Pause ads that cost far more per member than the rest of their campaign.
+      pauseLosingAds: { type: Boolean, default: true },
+      // New ad sets: off until each ad set gets close to Meta's ~50 sign-ups a week.
+      newAdsets: { type: Boolean, default: false },
+      // Meta auto top-up: when prepaid funds fall below `topUpBelow`, Meta adds `topUpAmount`.
+      autoTopUp: { type: Boolean, default: true },
+      topUpBelow: { type: Number, default: 8000 },
+      topUpAmount: { type: Number, default: 15000 },
+      // Who gets urgent alerts by email (blank = every admin's account email).
+      alertEmail: { type: String, default: "" },
+      preferences: { type: String, default: DEFAULT_ADS_PREFERENCES },
     },
     // Monthly targets, e.g. [{ month: "2026-12", members: 600, revenue: 210000, spend: 200000 }].
     targets: [{ month: String, members: Number, revenue: Number, spend: Number, _id: false }],
@@ -55,6 +83,10 @@ const ConfigSchema = new Schema(
     lastRuns: { type: Schema.Types.Mixed, default: {} },
     // Highest IMAP UID already read from the support inbox.
     mailLastUid: { type: Number, default: 0 },
+    // Only one tick runs at a time (Vercel Cron can occasionally call twice).
+    tickLockUntil: { type: Date, default: null },
+    // One-time data fixes already applied, by name.
+    migrations: { type: Schema.Types.Mixed, default: {} },
     updatedBy: String,
   },
   { versionKey: false, timestamps: true, minimize: false }
@@ -186,7 +218,27 @@ const PostSchema = new Schema(
     imageFileId: String,
     imageDeletedAt: Date,
     // The card the agent designs (rendered by the "Ops render" GitHub Action).
-    design: { kicker: String, headline: String, subline: String, theme: String },
+    // "join" posts use the winning ads' layout (ticks, price, button); "card" posts the mandala card.
+    format: { type: String, enum: ["card", "join"], default: "card" },
+    design: {
+      kicker: String,
+      headline: String,
+      subline: String,
+      theme: String,
+      highlight: String,
+      bullets: { type: [String], default: undefined },
+      price: String,
+      cta: String,
+    },
+    // Why this post (one English line, shown to the owner), its idea (adsIdeas.IDEAS) and the quality check's note.
+    angle: String,
+    idea: String,
+    review: String,
+    // Call to register (post's language) and hashtags, added per platform: Facebook gets the tracked link.
+    cta: String,
+    hashtags: { type: [String], default: undefined },
+    // Tracking code in the post's link, e.g. "kn1127" (Facebook link ?p=fkn1127): sign-ups from it are counted.
+    code: String,
     renderRequests: { type: Number, default: 0 },
     renderRequestedAt: Date,
     platforms: [{ type: String, enum: ["facebook", "instagram"] }],
@@ -211,13 +263,40 @@ const CreativeSchema = new Schema(
     baseAdId: String,
     // The weakest ad in the ad set, paused when the new one goes live.
     replaceAdId: String,
-    design: { kicker: String, headline: String, subline: String, theme: String },
+    // Ad cards copy the layout of the winning ads: pill, two-line headline, ticks, price, button.
+    design: {
+      kicker: String,
+      headline: String,
+      subline: String,
+      theme: String,
+      highlight: String,
+      bullets: { type: [String], default: undefined },
+      price: String,
+      cta: String,
+    },
+    // "Parents 45-65", "Young 24-34", ... (from the ad set name), so the words fit the audience.
+    audience: String,
     primaryText: String,
     title: String,
+    // English version of everything on the ad, for the owner to check.
+    translation: String,
+    // Own utm_content, so this ad's joins can be told apart from the ad it was copied from.
+    utmContent: String,
     imageUrl: String,
     imageFileId: String,
     status: { type: String, enum: ["design", "ready", "live", "cancelled", "failed"], default: "design" },
     adId: String,
+    // The idea behind it (adsIdeas.IDEAS) and whether it repeats a proven idea or tests a new one.
+    idea: String,
+    role: { type: String, enum: ["proven", "test"] },
+    // One line on the angle, and what the quality check changed, for the owner.
+    angle: String,
+    review: String,
+    // When it went live, and its verdict against its ad set after 7+ days (adsIdeas.judgeNewAds).
+    liveAt: Date,
+    verdict: { type: String, enum: ["win", "even", "lose", "unclear"] },
+    verdictAt: Date,
+    results: { type: Schema.Types.Mixed },
     renderRequests: { type: Number, default: 0 },
     renderRequestedAt: Date,
   },
@@ -243,7 +322,7 @@ export const OpsUsage = model("OpsUsage", UsageSchema);
 /** The weekly business review and other long reports. */
 const ReportSchema = new Schema(
   {
-    kind: { type: String, enum: ["weekly", "seo", "monthly"], required: true },
+    kind: { type: String, enum: ["weekly", "seo", "monthly", "organic"], required: true },
     period: String,
     body: String,
     data: { type: Schema.Types.Mixed },
@@ -253,15 +332,38 @@ const ReportSchema = new Schema(
 export const OpsReport = model("OpsReport", ReportSchema);
 
 /** The single config document, created with defaults on first use. */
+/**
+ * One-time fixes to the stored brief (26 Nov 2026): membership is ₹351 a
+ * YEAR, and the verified badge only means email + mobile confirmed by OTP
+ * (Terms section 7). Only the two wrong sentences are replaced; the rest of
+ * the owner's edits stay.
+ */
+const BRIEF_FIXES = [
+  [/Joining costs ₹351 \(one time\)\./g, "Membership costs ₹351 a year (annual)."],
+  [
+    /Profiles are checked by our team before they get the verified badge\./g,
+    "The verified badge means the member's email and mobile number were confirmed by OTP. We do not verify identity, age, marital status, caste, income, photos or background.",
+  ],
+];
+const migrate = async (doc) => {
+  if (doc.migrations?.brief20261126) return doc;
+  let brief = doc.brief || "";
+  for (const [from, to] of BRIEF_FIXES) brief = brief.replace(from, to);
+  doc.brief = brief;
+  doc.set("migrations.brief20261126", new Date());
+  await doc.save();
+  return doc;
+};
+
 export const getConfig = async () => {
   const doc = await OpsConfig.findById("ops");
-  return doc ?? OpsConfig.create({ _id: "ops", brief: DEFAULT_BRIEF });
+  return doc ? migrate(doc) : OpsConfig.create({ _id: "ops", brief: DEFAULT_BRIEF, migrations: { brief20261126: new Date() } });
 };
 
 export const DEFAULT_BRIEF = `Seetha Rama Kalyana (seetharamakalyana.in) is a matrimony site for Kannada, Telugu, Tamil and Hindi families.
-- Joining costs ₹351 (one time). Paid members get interest credits to send interests and unlock contacts.
+- Membership costs ₹351 a year (annual). Paid members get interest credits to send interests and unlock contacts.
 - Support mail: contactus@seetharamakalyana.in.
-- Profiles are checked by our team before they get the verified badge.
+- The verified badge means the member's email and mobile number were confirmed by OTP. We do not verify identity, age, marital status, caste, income, photos or background.
 Rules for every reply and post:
 - Reply in the same language and script the person used.
 - Never promise anything not written here. Never name competitors.

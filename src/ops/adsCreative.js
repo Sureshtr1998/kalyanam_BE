@@ -1,49 +1,114 @@
 import imagekit from "../config/imageKit.js";
 import { AdSnapshot, OpsAction, OpsCreative, getConfig } from "./models.js";
 import { ask } from "./claude.js";
-import { Defer, handle, handleUndo, hoursFromNow, propose } from "./actions.js";
-import { THEME_NAMES } from "./postDesign.js";
-import { copyAd, createCreative, fetchAds, fetchCreativeSpec, graphPost, setStatus, uploadAdImage } from "./meta.js";
+import { Defer, handle, handleUndo, propose } from "./actions.js";
+import { languageOf } from "./adsEngine.js";
+import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphPost, setStatus, uploadAdImage } from "./meta.js";
+import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaOf, loadIdeaLibrary, organicWinners, pickIdeas } from "./adsIdeas.js";
+
+export { languageOf, audienceOf };
 
 /*
- * Fresh creatives for tired ad sets, fully automatic:
- *  1. Find the campaign's best ad (lowest cost per paid member) and the ad
- *     set's weakest active ad.
- *  2. Claude writes two new variants in the campaign's language, modelled on
- *     the best ad's message; their image cards are designed and rendered
- *     like organic posts (Chromium, correct Indic shaping).
- *  3. After the notice period the new ads go live: the best ad is copied
- *     into the ad set (keeping its link, CTA, pixel and settings) with the
- *     new image and text, and the weakest ad is paused.
- * At most once per campaign every 14 days, so ads aren't kept in learning.
- * "Pause / undo" pauses the new ads and restarts the paused one.
+ * Fresh ads for an ad set, fully automatic (planned on batch days, see
+ * adsGrowth.js):
+ *  1. The ad set's audience comes from its name (Parents 45-65, Young 24-34).
+ *  2. The idea engine (adsIdeas.js) picks the ideas: one PROVEN idea for
+ *     this language and audience, one TEST of the most promising untried one.
+ *  3. Claude (Opus) sees the best and worst ads' actual images and numbers,
+ *     families' own questions, the brides' share, the season and organic
+ *     winners' messages, and writes one variant per idea, in the campaign's
+ *     language, with an English translation for the owner.
+ *  4. A second Claude pass (Sonnet) checks every claim against the allowed
+ *     list and the language's naturalness; it fixes or drops bad variants.
+ *  3. The cards are drawn in the winning ads' layout (postDesign.adHtml),
+ *     rendered by Chromium in the "Ops render" GitHub Action.
+ *  4. After the notice period each variant goes live as a copy of the ad
+ *     set's best ad (link, button, pixel) with the new image and text and
+ *     its own utm_content, so its joins can be told apart.
+ * Weak ads are paused separately (ads.pause_ad), in the same batch.
+ * "Pause / undo" pauses the new ads again.
  */
 
-const LANGS = ["Kannada", "Telugu", "Tamil", "Hindi", "Marathi", "English"];
-export const languageOf = (name = "") => LANGS.find((l) => new RegExp(l, "i").test(name)) ?? "English";
+const CODES = { Kannada: "kn", Telugu: "te", Tamil: "ta", Hindi: "hi", Marathi: "mr", English: "en" };
 
-const SCHEMA = {
+/** What new ads may and may not say. Read together with the editable brief. */
+export const CLAIM_RULES = `Facts you may use (nothing else):
+- Membership is ₹351 a year. Paid sign-up keeps casual browsers away ("marriage isn't time-pass").
+- Email and mobile number are OTP-verified (that is what the verified badge means).
+- No agents or brokers, no sales calls.
+- Matches within your language and community (caste, sub-caste), gothra; horoscope matching is available.
+Never say or imply: that contact details are shared only after both families agree (paid members unlock contacts with credits); that we verify identity, age, caste, income, photos or background; guaranteed matches or marriages; "100% verified" or "safe"; any number of members, success stories or testimonials; competitor names; discounts, deadlines or "limited" offers; crossed-out or reference prices.`;
+
+const VARIANT = {
   type: "object",
   additionalProperties: false,
-  required: ["variants"],
+  required: ["idea", "role", "angle", "kicker", "headline", "highlight", "bullets", "price", "cta", "primaryText", "title", "translation"],
   properties: {
-    variants: {
+    idea: { type: "string", enum: IDEA_KEYS, description: "The idea this variant carries" },
+    role: { type: "string", enum: ["proven", "test"], description: "proven = the proven idea in new words; test = the idea being tried" },
+    angle: { type: "string", description: "One line in English: the angle and why it should work for this audience" },
+    kicker: { type: "string", description: "Pill at the top of the image: a short question or label, max 6 words, in the language's script" },
+    headline: { type: "string", description: "Headline line 1 (dark), max 5 words" },
+    highlight: { type: "string", description: "Headline line 2 (orange), max 5 words: the punchline" },
+    bullets: { type: "array", items: { type: "string" }, description: "Exactly 3 ticks, max 7 words each" },
+    price: { type: "string", description: "Price line, e.g. '₹351 a year', in the language" },
+    cta: { type: "string", description: "Button text, max 4 words, e.g. 'Register today'" },
+    primaryText: { type: "string", description: "Ad primary text above the image, max 220 characters, same language" },
+    title: { type: "string", description: "Ad headline under the image, max 40 characters, same language" },
+    translation: { type: "string", description: "English translation of every line above (pill, headline, ticks, price, button, primary text, title), for the owner to check" },
+  },
+};
+const SCHEMA = { type: "object", additionalProperties: false, required: ["variants"], properties: { variants: { type: "array", items: VARIANT } } };
+
+/** The quality check's answer: per variant, whether claims and language pass, and a fixed version if needed. */
+const FIXED = { ...VARIANT, required: VARIANT.required.filter((k) => k !== "idea" && k !== "role"), properties: Object.fromEntries(Object.entries(VARIANT.properties).filter(([k]) => k !== "idea" && k !== "role")) };
+const REVIEW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reviews"],
+  properties: {
+    reviews: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["kicker", "headline", "subline", "theme", "primaryText", "title"],
+        required: ["index", "claimsOk", "languageOk", "problems", "fixed"],
         properties: {
-          kicker: { type: "string", description: "2–4 words on the image, in the language's script" },
-          headline: { type: "string", description: "Image headline, max 8 words, same language" },
-          subline: { type: "string", description: "One line on the image, max 10 words, same language" },
-          theme: { type: "string", enum: THEME_NAMES },
-          primaryText: { type: "string", description: "Ad primary text, max 220 characters, same language" },
-          title: { type: "string", description: "Ad headline under the image, max 40 characters, same language" },
+          index: { type: "integer" },
+          claimsOk: { type: "boolean", description: "Every statement is in the allowed facts; nothing on the never-say list" },
+          languageOk: { type: "boolean", description: "Natural, correct and warm in the language and script; not a literal translation" },
+          problems: { type: "array", items: { type: "string" }, description: "Each problem in one English line" },
+          fixed: { anyOf: [FIXED, { type: "null" }], description: "A corrected version keeping the same idea, or null when it passes or can't be saved" },
         },
       },
     },
   },
+};
+
+/** Second pass: checks claims and language, fixes what it can, drops what it can't. */
+export const reviewVariants = async ({ variants, language, audience, config }) => {
+  const { reviews } = await ask({
+    task: "ads.review",
+    tier: "write",
+    system: `You check Meta ads for Seetha Rama Kalyana before they go live. Be strict.
+${config.brief}
+${CLAIM_RULES}
+For each variant: claimsOk is false if any line states or implies something outside the allowed facts or on the never-say list. languageOk is false if the ${language} text is unnatural, wrong, awkward or a literal translation, or doesn't suit "${audience}".
+When something is wrong and can be fixed without changing the idea, return a fixed version (all fields, same language, with an updated English translation); otherwise fixed is null.`,
+    prompt: variants.map((v, i) => `Variant ${i}:\n${JSON.stringify(v)}`).join("\n\n"),
+    schema: REVIEW_SCHEMA,
+    maxTokens: 8000,
+  });
+  const out = [];
+  for (const [i, v] of variants.entries()) {
+    const r = reviews.find((x) => x.index === i);
+    if (!r || (r.claimsOk && r.languageOk)) {
+      out.push({ ...v, review: "Passed the claims and language check." });
+    } else if (r.fixed) {
+      out.push({ ...v, ...r.fixed, idea: v.idea, role: v.role, review: `Fixed by the check: ${r.problems.join("; ")}` });
+    }
+  }
+  return { kept: out, dropped: variants.length - out.length, problems: reviews.flatMap((r) => r.problems) };
 };
 
 /** Ad performance over the last 14 days, keyed by ad id. */
@@ -51,92 +116,185 @@ const adStats = async () => {
   const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
   const rows = await AdSnapshot.aggregate([
     { $match: { level: "ad", date: { $gte: since } } },
-    { $group: { _id: "$entityId", name: { $first: "$name" }, spend: { $sum: "$spend" }, paid: { $sum: "$paid" } } },
+    { $group: { _id: "$entityId", name: { $first: "$name" }, spend: { $sum: "$spend" }, paid: { $sum: "$paid" }, leads: { $sum: "$leads" } } },
   ]);
   return new Map(rows.map((r) => [r._id, r]));
 };
 const cpp = (s) => (s?.paid ? s.spend / s.paid : Infinity);
+const rupees = (n) => (Number.isFinite(n) ? `₹${Math.round(n)}` : "no members yet");
+
+/** The ad set in a campaign that most needs fresh ads (highest 7-day frequency yesterday). */
+export const tiredAdset = async (campaignId) => {
+  const latest = await AdSnapshot.find({ level: "adset", campaignId, frequency7: { $ne: null } }).sort({ date: -1, frequency7: -1 }).limit(1).lean();
+  return latest[0] ? { adsetId: latest[0].entityId, adsetName: latest[0].name } : null;
+};
+
+/** utm_content for a new ad, e.g. "kn_ops_parents_1201a". */
+const utmFor = (language, audienceKey, i) => {
+  const d = new Date(Date.now() + 5.5 * 3600000);
+  const mmdd = `${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+  return `${CODES[language] ?? "xx"}_ops_${audienceKey}_${mmdd}${"abc"[i] ?? i}`;
+};
+
+/** Sets utm_content in the ad's link (when it carries one) and in its url_tags. */
+export const withUtmContent = (link, urlTags, value) => {
+  let nextLink = link;
+  try {
+    const u = new URL(link);
+    if (u.searchParams.has("utm_content")) {
+      u.searchParams.set("utm_content", value);
+      nextLink = u.toString();
+    }
+  } catch {
+    // Not a URL Meta would accept anyway; leave it.
+  }
+  const tags = new URLSearchParams(urlTags || "");
+  tags.set("utm_content", value);
+  return { link: nextLink, urlTags: tags.toString() };
+};
+
+const copyOf = async (adId) => {
+  const spec = await fetchCreativeSpec(adId).catch(() => null);
+  const link = spec?.object_story_spec?.link_data;
+  return { text: link?.message ?? "", headline: link?.name ?? "" };
+};
 
 /**
- * Plans a creative refresh for one tired unit (campaign or ad set).
- * Returns the proposed action, or a reason it was skipped.
+ * Plans fresh ads for one ad set: one variant on its best PROVEN idea and one
+ * TEST of the most promising untried idea. Returns the action, or why it was skipped.
+ * @param {{ campaignId: string, campaignName: string, adsetId: string, adsetName?: string, notes?: string[], runAt: Date }} p
  */
-export const planCreativeRefresh = async (unit) => {
+export const planCreativeRefresh = async ({ campaignId, campaignName, adsetId, adsetName = "", notes = [], runAt }) => {
   const config = await getConfig();
-  const campaignId = unit.level === "campaign" ? unit.id : unit.campaignId;
   const recent = await OpsAction.findOne({
     type: "ads.creative_launch",
-    "payload.campaignId": campaignId,
+    "payload.adsetId": adsetId,
     status: { $in: ["scheduled", "shadow", "done", "running"] },
     createdAt: { $gte: new Date(Date.now() - 14 * 86400000) },
   });
-  if (recent) return { skipped: "Creatives for this campaign changed in the last 14 days" };
+  if (recent) return { skipped: `${adsetName || adsetId} got new ads in the last 14 days` };
 
-  const [ads, stats] = await Promise.all([fetchAds(), adStats()]);
+  const [ads, stats, library, doubts, brides, organic, known] = await Promise.all([
+    fetchAds(),
+    adStats(),
+    loadIdeaLibrary(60),
+    familyDoubts().catch(() => []),
+    bridesShare().catch(() => null),
+    organicWinners().catch(() => []),
+    OpsCreative.find({ adId: { $ne: null }, idea: { $ne: null } }).select("adId idea").lean(),
+  ]);
+  const ideaByAd = new Map(known.map((c) => [c.adId, c.idea]));
   const active = ads.filter((a) => a.campaign_id === campaignId && a.effective_status === "ACTIVE");
   if (!active.length) return { skipped: "No active ads in this campaign" };
+  const ranked = [...active].filter((a) => (stats.get(a.id)?.paid ?? 0) >= 2).sort((a, b) => cpp(stats.get(a.id)) - cpp(stats.get(b.id)));
+  const inSet = ranked.filter((a) => a.adset_id === adsetId);
+  // Copy the ad set's own best ad (its link and button suit the audience), else the campaign's.
+  const base = inSet[0] ?? ranked[0] ?? active.find((a) => a.adset_id === adsetId) ?? active[0];
+  const worst = [...active]
+    .filter((a) => (stats.get(a.id)?.spend ?? 0) >= 500)
+    .sort((a, b) => cpp(stats.get(b.id)) - cpp(stats.get(a.id)))
+    .slice(0, 2);
 
-  // Target ad set: the tired one itself, or the campaign's ad set with the highest frequency.
-  let adsetId = unit.level === "adset" ? unit.id : null;
-  if (!adsetId) {
-    const latest = await AdSnapshot.find({ level: "adset", campaignId, frequency7: { $ne: null } }).sort({ date: -1, frequency7: -1 }).limit(1).lean();
-    adsetId = latest[0]?.entityId ?? active[0].adset_id;
-  }
-  const base = [...active].filter((a) => (stats.get(a.id)?.paid ?? 0) >= 2).sort((a, b) => cpp(stats.get(a.id)) - cpp(stats.get(b.id)))[0] ?? active[0];
-  const inSet = active.filter((a) => a.adset_id === adsetId && a.id !== base.id);
-  const worst = inSet.filter((a) => (stats.get(a.id)?.spend ?? 0) >= 300).sort((a, b) => cpp(stats.get(b.id)) - cpp(stats.get(a.id)))[0] ?? null;
-
-  const spec = await fetchCreativeSpec(base.id).catch(() => null);
-  const link = spec?.object_story_spec?.link_data;
-  const language = languageOf(unit.name);
+  const language = languageOf(campaignName);
+  const audience = audienceOf(adsetName);
+  const best = ranked.slice(0, 3);
+  const { proven, tests } = pickIdeas({ library, language, audience: audience.key });
+  const ideaLine = (k) => `${k} (${IDEAS[k].label}): ${IDEAS[k].hint}`;
+  const describe = async (a) => {
+    const s = stats.get(a.id);
+    const c = await copyOf(a.id);
+    return `- "${a.name}" [idea: ${ideaOf(a.name, ideaByAd.get(a.id))}]${a.adset_id === adsetId ? " (this ad set)" : ""}: ${rupees(s?.spend ?? 0)} spent, ${s?.paid ?? 0} members, ${rupees(cpp(s))} each. Text: ${c.text.slice(0, 300) || "(image only)"} | Headline: ${c.headline || "-"}`;
+  };
+  // The cards' own words matter most, so Claude sees the images: the 2 best ads, then the most expensive one.
+  const shown = [...best.slice(0, 2), ...worst.filter((w) => !best.some((b) => b.id === w.id)).slice(0, 1)];
+  const images = (await Promise.all(shown.map((a) => fetchAdImage(a.id)))).filter(Boolean);
+  const imageNote = images.length
+    ? `The ${images.length} image(s) above are, in order: ${shown.slice(0, images.length).map((a) => `"${a.name}"`).join(", ")}.`
+    : "No ad images could be loaded.";
+  const today = new Date(Date.now() + 5.5 * 3600000).toISOString().slice(0, 10);
 
   const { variants } = await ask({
     task: "ads.creatives",
     tier: "ads",
-    system: `You write Meta ad creatives for Seetha Rama Kalyana, a matrimony site for families.
+    images,
+    system: `You write Meta ads for Seetha Rama Kalyana, a matrimony site for families.
 ${config.brief}
-Write in the given language and its native script (English only if the language is English), natural and warm, never a literal translation.
-Model the new ads on the winning ad's angle but say it differently. Never name competitors, never promise matches or safety beyond the brief, no fake urgency, no reference prices.`,
-    prompt: `Campaign: ${unit.name} (language: ${language}).
-Why: ${unit.notes?.join(" ") || "the same people keep seeing the same ads"}.
-Winning ad "${base.name}" (cost per paid member ₹${Number.isFinite(cpp(stats.get(base.id))) ? Math.round(cpp(stats.get(base.id))) : "?"}):
-text: ${link?.message ?? "(unknown)"}
-headline: ${link?.name ?? "(unknown)"}
-Write 2 new variants.`,
+${CLAIM_RULES}
+Owner's standing rules:
+${config.ads?.preferences ?? ""}
+The ideas you may use:
+${IDEA_KEYS.map((k) => `- ${ideaLine(k)}`).join("\n")}
+How to write:
+- Write in ${language} in its native script (English only if the language is English). Natural and warm, the way a family in that region speaks; never a literal translation.
+- The image has: a pill (short question or label), a two-line headline (line 2 is the punchline), three ticks, a price line and a button. Keep every line short; people scroll fast on phones.
+- Speak to this audience only: ${audience.label}.
+- Variant 1 is the PROVEN idea in fresh words: keep what makes the winning cards work (you can see them), say it differently.
+- Variant 2 TESTS a new idea: pick one of the test candidates, or answer one of the families' questions below with the "answer" idea. Make it clearly different from variant 1.
+- Use families' own words where they fit. Never print dates or deadlines; a festival or wedding season may only be named if you are sure it falls within 3 weeks of ${today} in this region.`,
+    prompt: `Campaign: ${campaignName} (${language}). Ad set: ${adsetName || adsetId} (${audience.key}).
+Why new ads now: ${notes.join(" ") || "the same people keep seeing the same ads"}.
+${imageNote}
+Proven idea for this language and audience: ${proven ? `${ideaLine(proven.idea)} (₹${Math.round(proven.cpp)} per member, ${proven.where})` : "none proven yet; use the idea of the cheapest ad below"}.
+Test candidates: ${tests.length ? tests.map((t) => `${t.idea} (${t.why})`).join("; ") : "none; test an 'answer' to a family's question"}.
+Best ads in this campaign (last 14 days):
+${(await Promise.all(best.map(describe))).join("\n") || "- none with 2+ members yet"}
+Most expensive ads:
+${(await Promise.all(worst.map(describe))).join("\n") || "- none"}
+What families asked or doubted in the last 14 days:
+${doubts.slice(0, 20).join("\n") || "- nothing recorded"}
+${brides ? `Brides are ${Math.round(brides.share * 100)}% of new members (${brides.women} of ${brides.total} in 14 days); daughters' families are the gap.` : ""}
+Organic posts that brought sign-ups (their message only):
+${organic.join("\n") || "- none traced yet"}
+Write 2 variants: 1 = proven, 2 = test.`,
     schema: SCHEMA,
     maxTokens: 12000,
   });
 
+  const checked = await reviewVariants({ variants: variants.slice(0, 2), language, audience: audience.label, config });
+  if (!checked.kept.length) {
+    return { skipped: `The quality check rejected both variants: ${checked.problems.join("; ").slice(0, 300)}` };
+  }
+
   const created = [];
-  for (const v of variants.slice(0, 2)) {
+  for (const [i, v] of checked.kept.entries()) {
     created.push(
       await OpsCreative.create({
         campaignId,
-        campaignName: unit.name,
+        campaignName,
         adsetId,
+        adsetName,
         language,
+        audience: audience.key,
+        idea: v.idea,
+        role: v.role,
+        angle: v.angle,
+        review: v.review,
         baseAdId: base.id,
-        replaceAdId: worst?.id,
-        design: { kicker: v.kicker, headline: v.headline, subline: v.subline, theme: v.theme },
+        design: { kicker: v.kicker, headline: v.headline, highlight: v.highlight, bullets: v.bullets.slice(0, 3), price: v.price, cta: v.cta, theme: "ad" },
         primaryText: v.primaryText,
         title: v.title,
+        translation: v.translation,
+        utmContent: utmFor(language, audience.key, i),
       })
     );
   }
+  const label = (v) => `${v.role === "proven" ? "Proven idea" : "Test"}: ${IDEAS[v.idea]?.label ?? v.idea}`;
   const action = await propose(
     "ads",
     {
       type: "ads.creative_launch",
-      title: `2 fresh ads for ${unit.name}`,
-      reason: `${unit.notes?.join(" ") || "Ad fatigue."} New versions of the best ad "${base.name}"${worst ? `; the weakest ad "${worst.name}" gets paused` : ""}. Headlines: “${variants.map((v) => v.headline).join("”, “")}”.`,
-      effect: `Copies "${base.name}" into the ad set twice with the new images and text, starts them, ${worst ? `pauses "${worst.name}"` : "pauses nothing"}. The ad set re-learns for ~3 days.`,
-      payload: { campaignId, adsetId, creativeIds: created.map((c) => String(c._id)), baseAdId: base.id, replaceAdId: worst?.id ?? null },
-      ref: { kind: "meta", id: `creative:${campaignId}` },
-      runAt: hoursFromNow(config.limits.adNoticeHours),
+      title: `${created.length} new ads for ${campaignName} › ${adsetName || "ad set"}`,
+      reason: `${notes.join(" ") || "Ad fatigue."} Built on "${base.name}" (${rupees(cpp(stats.get(base.id)))} per member).${checked.dropped ? ` The quality check dropped ${checked.dropped} variant.` : ""}\n${checked.kept
+        .map((v, i) => `${i + 1}. ${label(v)}. ${v.angle}\n   ${v.review}\n   In English: ${v.translation}`)
+        .join("\n")}`,
+      effect: `Adds ${created.length} ads next to the current ones in ${adsetName || "the ad set"} (same link, button and pixel as "${base.name}", own utm_content). Each is judged win / even / lose against the ad set after 7 days. The ad set re-learns for ~3 days.`,
+      payload: { campaignId, adsetId, creativeIds: created.map((c) => String(c._id)), baseAdId: base.id, replaceAdId: null, ideas: checked.kept.map((v) => `${v.role}:${v.idea}`) },
+      ref: { kind: "meta", id: `creative:${adsetId}` },
+      runAt,
     },
-    { dedupeKey: `ads.creative_launch:${campaignId}` }
+    { dedupeKey: `ads.creative_launch:${adsetId}` }
   );
-  return { action: action?._id ?? null, creatives: created.length };
+  return { action: action?._id ?? null, creatives: created.length, ideas: checked.kept.map((v) => `${v.role}:${v.idea}`) };
 };
 
 const toBase64 = async (url) => {
@@ -160,25 +318,29 @@ handle("ads.creative_launch", async (action) => {
   const adIds = [];
   for (const c of creatives.filter((x) => x.status === "ready")) {
     const hash = await uploadAdImage(await toBase64(c.imageUrl), `ops-${c._id}.jpg`);
-    const linkData = { ...story.link_data, image_hash: hash, message: c.primaryText, name: c.title };
+    const utm = c.utmContent ? withUtmContent(story.link_data.link, spec.url_tags, c.utmContent) : { link: story.link_data.link, urlTags: spec.url_tags };
+    const linkData = { ...story.link_data, link: utm.link, image_hash: hash, message: c.primaryText, name: c.title };
     delete linkData.picture;
     delete linkData.child_attachments;
+    const code = CODES[c.language] ?? "XX";
     const creative = await createCreative({
-      name: `Ops | ${c.language} | ${c.design.headline}`.slice(0, 100),
+      name: `Ops | ${c.language} | ${c.design?.headline ?? ""}`.slice(0, 100),
       object_story_spec: { ...story, link_data: linkData },
-      ...(spec.url_tags ? { url_tags: spec.url_tags } : {}),
+      ...(utm.urlTags ? { url_tags: utm.urlTags } : {}),
       ...(spec.degrees_of_freedom_spec ? { degrees_of_freedom_spec: spec.degrees_of_freedom_spec } : {}),
     });
     const adId = await copyAd(p.baseAdId, p.adsetId);
     if (!adId) throw new Error("Meta didn't return the copied ad");
-    await graphPost(adId, { creative: { creative_id: creative.id }, name: `${c.language}-OPS ${c.design.headline}`.slice(0, 100) });
+    await graphPost(adId, { creative: { creative_id: creative.id }, name: `${code.toUpperCase()}-OPS ${c.utmContent ?? ""} ${c.design?.headline ?? ""}`.trim().slice(0, 100) });
     await setStatus(adId, "ACTIVE");
     c.adId = adId;
     c.status = "live";
+    c.liveAt = new Date();
     await c.save();
     adIds.push(adId);
     if (c.imageFileId) await imagekit.deleteFile(c.imageFileId).catch(() => {});
   }
+  // Older cards also paused the weakest ad here; new batches pause through ads.pause_ad.
   if (p.replaceAdId) await setStatus(p.replaceAdId, "PAUSED");
   return { adIds, paused: p.replaceAdId ?? null };
 });
@@ -190,40 +352,59 @@ handleUndo("ads.creative_launch", async (action) => {
 
 /**
  * New ads from given copy (an owner's idea): adds them next to the existing
- * ads, copying the campaign's best ad for link, CTA and tracking. Nothing is
+ * ads, copying the ad set's best ad for link, button and tracking. Nothing is
  * paused. Returns the proposed action.
  */
 export const proposeIdeaCreatives = async ({ campaignId, campaignName, adsetId, language, variants, runAt, reason, ideaId }) => {
   const [ads, stats] = await Promise.all([fetchAds(), adStats()]);
   const active = ads.filter((a) => a.campaign_id === campaignId && a.effective_status === "ACTIVE");
   if (!active.length) throw new Error(`No active ads in ${campaignName} to copy the setup from`);
-  const base = [...active].filter((a) => (stats.get(a.id)?.paid ?? 0) >= 2).sort((a, b) => cpp(stats.get(a.id)) - cpp(stats.get(b.id)))[0] ?? active[0];
-  const target = adsetId && active.some((a) => a.adset_id === adsetId) ? adsetId : base.adset_id;
+  const ranked = [...active].filter((a) => (stats.get(a.id)?.paid ?? 0) >= 2).sort((a, b) => cpp(stats.get(a.id)) - cpp(stats.get(b.id)));
+  const target = adsetId && active.some((a) => a.adset_id === adsetId) ? adsetId : (ranked[0] ?? active[0]).adset_id;
+  const base = ranked.find((a) => a.adset_id === target) ?? ranked[0] ?? active.find((a) => a.adset_id === target) ?? active[0];
+  const adsetName = (await AdSnapshot.findOne({ level: "adset", entityId: target }).sort({ date: -1 }).lean())?.name ?? "";
+  const audience = audienceOf(adsetName);
   const created = [];
-  for (const v of variants.slice(0, 3)) {
+  for (const [i, v] of variants.slice(0, 3).entries()) {
     created.push(
       await OpsCreative.create({
         campaignId,
         campaignName,
         adsetId: target,
+        adsetName,
         language,
+        audience: audience.key,
         baseAdId: base.id,
-        design: { kicker: v.kicker, headline: v.headline, subline: v.subline, theme: v.theme },
+        design: {
+          kicker: v.kicker,
+          headline: v.headline,
+          // Older idea plans had a single subline; it becomes the orange line.
+          highlight: v.highlight ?? v.subline,
+          bullets: v.bullets?.slice(0, 3),
+          price: v.price,
+          cta: v.cta,
+          theme: "ad",
+        },
         primaryText: v.primaryText,
         title: v.title,
+        translation: v.translation,
+        utmContent: utmFor(language, audience.key, i),
+        // An owner's idea is always a test.
+        idea: IDEA_KEYS.includes(v.idea) ? v.idea : undefined,
+        role: "test",
       })
     );
   }
-  return propose(
-    "ads",
-    {
-      type: "ads.creative_launch",
-      title: `${created.length} new ad${created.length > 1 ? "s" : ""} for ${campaignName}`,
-      reason: `${reason} Headlines: “${variants.map((v) => v.headline).join("”, “")}”.`,
-      effect: `Copies "${base.name}" (link, button, tracking) with the new images and text and starts ${created.length > 1 ? "them" : "it"} next to the current ads. Nothing is paused.`,
-      payload: { campaignId, adsetId: target, creativeIds: created.map((c) => String(c._id)), baseAdId: base.id, replaceAdId: null, ideaId },
-      ref: { kind: "meta", id: `idea-creative:${ideaId}:${campaignId}` },
-      runAt,
-    }
-  );
+  return propose("ads", {
+    type: "ads.creative_launch",
+    title: `${created.length} new ad${created.length > 1 ? "s" : ""} for ${campaignName}`,
+    reason: `${reason} Headlines: “${variants.map((v) => [v.headline, v.highlight ?? v.subline].filter(Boolean).join(" ")).join("”, “")}”.${variants
+      .filter((v) => v.translation)
+      .map((v, i) => `\n${i + 1}. In English: ${v.translation}`)
+      .join("")}`,
+    effect: `Copies "${base.name}" (link, button, tracking) with the new images and text and starts ${created.length > 1 ? "them" : "it"} next to the current ads, each with its own utm_content. Nothing is paused.`,
+    payload: { campaignId, adsetId: target, creativeIds: created.map((c) => String(c._id)), baseAdId: base.id, replaceAdId: null, ideaId },
+    ref: { kind: "meta", id: `idea-creative:${ideaId}:${campaignId}` },
+    runAt,
+  });
 };
