@@ -59,7 +59,7 @@ const JOBS = [
   },
   {
     name: "organicPlan",
-    ready: (c) => c.modes.organic !== "off" && pageConfigured() && claudeConfigured(),
+    ready: (c) => c.modes.organic !== "off" && c.organic?.planEvenings && pageConfigured() && claudeConfigured(),
     due: (last, t) => t.day === 4 && t.hour >= 10 && last?.date !== t.date,
     run: () => planWeek(),
   },

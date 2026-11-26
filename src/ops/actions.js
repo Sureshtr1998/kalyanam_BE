@@ -76,7 +76,9 @@ export const execute = async (id, by = "agent") => {
     return action.save();
   }
   try {
-    action.result = (await fn(action)) ?? { ok: true };
+    const out = (await fn(action)) ?? { ok: true };
+    if (out.next) return await continueWith(action, out);
+    action.result = out;
     action.status = "done";
   } catch (err) {
     if (err instanceof Defer) {
@@ -104,6 +106,35 @@ export const execute = async (id, by = "agent") => {
     }).catch(() => {});
   }
   return saved;
+};
+
+/**
+ * A step that leads to another (hide a comment, then delete it; schedule on
+ * Facebook, then post on Instagram) keeps one card: the same action is
+ * re-scheduled with the next step instead of a second card being added.
+ * The finished steps are kept in result.steps.
+ */
+const continueWith = async (action, { next, ...result }) => {
+  const steps = [...(action.result?.steps ?? []), { type: action.type, title: action.title, at: new Date(), result }];
+  const mode = (await getConfig()).modes[action.module] ?? "off";
+  action.result = { steps };
+  action.markModified("result");
+  action.ranAt = new Date();
+  if (mode === "off") {
+    // Module switched off meanwhile: the step that ran stands, nothing more is scheduled.
+    action.status = "done";
+    return action.save();
+  }
+  action.type = next.type;
+  if (next.title) action.title = next.title;
+  if (next.reason) action.reason = next.reason;
+  if (next.effect) action.effect = next.effect;
+  action.payload = { ...action.payload, ...(next.payload ?? {}) };
+  action.markModified("payload");
+  action.runAt = next.runAt ?? new Date();
+  action.error = undefined;
+  action.status = mode === "shadow" ? "shadow" : "scheduled";
+  return action.save();
 };
 
 /** Reverses a done action (pauses what it created, restores what it changed). */

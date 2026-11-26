@@ -4,7 +4,7 @@ import { mailConfigured, sendMail } from "./mail.js";
 
 /*
  * Urgent alerts by email, so the owner hears about them without opening the
- * panel: Meta funds or account problems, disapproved ads, stalled delivery,
+ * panel: Meta account problems, disapproved ads, stalled delivery,
  * vendor warnings. Sent from the support mailbox to the alert address in
  * Ops → Settings (blank = every admin's account email). Each alert is sent
  * once; the feed dedupes repeats for 24 hours.

@@ -44,14 +44,17 @@ const ConfigSchema = new Schema(
       netRevenuePerMember: { type: Number, default: 285 },
       // Real cost per member (Meta's count corrected by our own joins) that counts as losing (₹, 7 and 14 days).
       losingCostPerMember: { type: Number, default: 420 },
-      // Don't scale when prepaid funds cover fewer days than this.
-      minRunwayDays: { type: Number, default: 5 },
       // Hours of notice before support replies, verification and ad changes run.
       supportDelayHours: { type: Number, default: 8 },
       adNoticeHours: { type: Number, default: 24 },
       commentDeleteHours: { type: Number, default: 24 },
       // Monthly Claude API budget (USD); the agent stops calling Claude past it.
       claudeMonthlyUsd: { type: Number, default: 100 },
+    },
+    organic: {
+      // The agent plans the evening posts itself. Off while the owner's /weekly-posts fill the
+      // evenings: Meta's API can't see posts scheduled by hand in Business Suite.
+      planEvenings: { type: Boolean, default: false },
     },
     // How the ads agent paces itself (rules in adsEngine.js and the meta-ads-playbook skill).
     ads: {
@@ -65,10 +68,6 @@ const ConfigSchema = new Schema(
       pauseLosingAds: { type: Boolean, default: true },
       // New ad sets: off until each ad set gets close to Meta's ~50 sign-ups a week.
       newAdsets: { type: Boolean, default: false },
-      // Meta auto top-up: when prepaid funds fall below `topUpBelow`, Meta adds `topUpAmount`.
-      autoTopUp: { type: Boolean, default: true },
-      topUpBelow: { type: Number, default: 8000 },
-      topUpAmount: { type: Number, default: 15000 },
       // Who gets urgent alerts by email (blank = every admin's account email).
       alertEmail: { type: String, default: "" },
       preferences: { type: String, default: DEFAULT_ADS_PREFERENCES },

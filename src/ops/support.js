@@ -1,6 +1,6 @@
 import User from "../models/User.js";
 import { notify } from "../config/msg91Email.js";
-import { OpsMail, getConfig } from "./models.js";
+import { OpsAction, OpsMail, getConfig } from "./models.js";
 import { ask } from "./claude.js";
 import { fetchNewMail, sendMail } from "./mail.js";
 import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
@@ -124,6 +124,22 @@ export const runSupportCycle = async () => {
   return mails.length;
 };
 
+const WAITING = ["scheduled", "needs_you", "shadow"];
+
+/** Cancels the older reply cards a newer mail now covers, and says so on the new card. */
+const supersede = async (earlier, doc) => {
+  if (!earlier.length) return;
+  await OpsAction.updateMany(
+    { _id: { $in: earlier.map((a) => a._id) }, status: { $in: WAITING } },
+    { $set: { status: "cancelled", decidedBy: "agent", error: "Replaced: they wrote again, and one reply now answers all their mails." } }
+  );
+  const fresh = await OpsAction.find({ module: "support", "ref.id": String(doc._id), status: { $in: WAITING } });
+  for (const a of fresh) {
+    a.reason = `They wrote ${earlier.length + 1} times; this one reply answers all of them. ${a.reason ?? ""}`;
+    await a.save();
+  }
+};
+
 const handleMail = async (config, m, delay) => {
   if (await OpsMail.exists({ uid: m.uid, messageId: m.messageId })) return;
   const doc = await OpsMail.create({ ...m, category: "unknown" });
@@ -146,16 +162,36 @@ const handleMail = async (config, m, delay) => {
     return doc.save();
   }
 
+  // Mails from the same person still waiting for a reply: one reply answers them all.
+  const earlier = await OpsAction.find({
+    module: "support",
+    type: "support.reply",
+    status: { $in: WAITING },
+    "payload.to": m.from.email,
+    "ref.kind": "mail",
+  }).lean();
+  const earlierMails = earlier.length
+    ? await OpsMail.find({ _id: { $in: earlier.map((a) => a.ref.id) } }).select("text").lean()
+    : [];
+  const thread = earlierMails.length
+    ? `${m.text.slice(0, 3000)}\n\n--- Their earlier mail${earlierMails.length > 1 ? "s" : ""}, not answered yet ---\n${earlierMails.map((e) => String(e.text || "").slice(0, 1500)).join("\n---\n")}`
+    : m.text;
+  const finish = async () => {
+    await supersede(earlier, doc);
+    doc.status = "handled";
+    return doc.save();
+  };
+
   const t = await ask({
     task: "support.triage",
     tier: "sort",
     system: TRIAGE_SYSTEM,
-    prompt: `From: ${m.from.name} <${m.from.email}>\nSubject: ${m.subject}\n\n${m.text.slice(0, 4000)}`,
+    prompt: `From: ${m.from.name} <${m.from.email}>\nSubject: ${m.subject}\n\n${thread.slice(0, 6000)}`,
     schema: TRIAGE_SCHEMA,
     maxTokens: 400,
   });
   Object.assign(doc, { category: t.category, language: t.language, summary: t.summary });
-  const mail = { ...m, language: t.language };
+  const mail = { ...m, text: thread, language: t.language };
   const ref = { kind: "mail", id: String(doc._id) };
   const who = `${m.from.name || m.from.email}`;
 
@@ -205,14 +241,12 @@ const handleMail = async (config, m, delay) => {
         ref,
       });
     }
-    doc.status = "handled";
-    return doc.save();
+    return finish();
   }
 
   if (t.category === "profile_change") {
     await handleProfileChange(config, doc, mail, t, ref, who, delay);
-    doc.status = "handled";
-    return doc.save();
+    return finish();
   }
 
   if (t.category === "refund") {
@@ -232,11 +266,11 @@ const handleMail = async (config, m, delay) => {
       payload: { userId: user?._id ? String(user._id) : null, payments, to: m.from.email, subject: m.subject, inReplyTo: m.messageId, draft: doc.draft },
       ref,
     });
-    doc.status = "handled";
-    return doc.save();
+    return finish();
   }
 
-  const urgent = t.category === "urgent";
+  // An earlier urgent mail keeps the reply urgent even if the newest one reads calmer.
+  const urgent = t.category === "urgent" || earlier.some((a) => a.priority === "urgent");
   doc.draft = await draftReply(
     config,
     mail,
@@ -256,8 +290,7 @@ const handleMail = async (config, m, delay) => {
     ref,
     runAt: urgent ? undefined : hoursFromNow(delay),
   });
-  doc.status = "handled";
-  return doc.save();
+  return finish();
 };
 
 /*

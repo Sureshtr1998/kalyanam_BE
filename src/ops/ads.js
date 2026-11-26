@@ -20,8 +20,9 @@ import {
 /*
  * Meta ads for the ops agent:
  *  - every 3 hours: a snapshot of every campaign, ad set, ad and placement
- *    (kept forever), plus the alarms (funds, account, disapproved ads,
- *    stalled delivery), which are emailed to the owner;
+ *    (kept forever), plus the alarms (account status, disapproved ads,
+ *    stalled delivery, a language without ads), which are emailed to the owner.
+ *    Prepaid funds are recorded for the panel but never drive a decision;
  *  - Monday: budget decisions from adsEngine.js (moves between languages,
  *    cuts, raises), each with the notice period;
  *  - batch days (adsGrowth.js): paused ads, fresh ads, new ad sets.
@@ -159,12 +160,6 @@ export const takeSnapshot = async (days = 14) => {
   return { account, structure, today, yesterday, tz };
 };
 
-/** Average spend of the last 3 completed days. */
-const avgSpend = async (yesterday) => {
-  const rows = await AdSnapshot.find({ level: "account", date: { $lte: yesterday } }).sort({ date: -1 }).limit(3).lean();
-  return rows.length ? rows.reduce((t, r) => t + r.spend, 0) / rows.length : 0;
-};
-
 /** Real members per Meta-counted member over the last 14 completed days (see adsEngine.calibration). */
 export const accountCalibration = async (yesterday) => {
   const rows = await AdSnapshot.find({ level: "account", date: { $lte: yesterday } }).sort({ date: -1 }).limit(14).lean();
@@ -267,8 +262,6 @@ export const runAdsCycle = async ({ weekly = false } = {}) => {
   const config = await getConfig();
   const settings = adsSettings(config);
   const snap = await takeSnapshot();
-  const avg = await avgSpend(snap.yesterday);
-  const funds = { available: snap.account.available ?? snap.account.spendCapLeft, avgDailySpend: avg };
   const activeCampaigns = snap.structure.campaigns.filter((c) => c.status === "ACTIVE");
   const activeIds = new Set(activeCampaigns.map((c) => c.id));
   const budgetTotal = [...activeCampaigns, ...snap.structure.adsets.filter((s) => activeIds.has(s.campaignId))]
@@ -284,10 +277,8 @@ export const runAdsCycle = async ({ weekly = false } = {}) => {
   const yesterdaySpend = recent[0]?.date === snap.yesterday && typical && recent[0].spend < typical * 0.5 ? recent[0].spend : null;
 
   const alarms = emergencies({
-    funds,
     today: todayRow,
     budgetTotal,
-    settings,
     accountStatus: snap.account.status,
     adIssues: adIssuesFrom(ads, activeIds),
     yesterdaySpend,
@@ -299,23 +290,34 @@ export const runAdsCycle = async ({ weekly = false } = {}) => {
     await notice("ads", { ...e, payload: { dedupeKey: key } });
   }
   // New ads that have run 7+ days get their verdict against their ad set (feeds the idea library).
+  // New ads launched together are judged together: one alert per ad set, not one per ad.
   const judged = await judgeNewAds().catch(() => []);
+  const WORD = { win: "won", lose: "lost", even: "came out even", unclear: "got too little delivery" };
+  const groups = new Map();
   for (const j of judged) {
-    const c = j.creative;
-    const word = { win: "won", lose: "lost", even: "came out even", unclear: "got too little delivery" }[j.verdict];
+    const key = j.creative.adsetId ?? j.creative.campaignId ?? String(j.creative._id);
+    groups.set(key, [...(groups.get(key) ?? []), j]);
+  }
+  for (const list of groups.values()) {
+    const c0 = list[0].creative;
+    const where = `${c0.campaignName}${c0.adsetName ? ` › ${c0.adsetName}` : ""}`;
+    const label = (c) => `${IDEAS[c.idea]?.label ?? c.idea ?? "idea not tagged"} (${c.role ?? "test"})`;
     await notice("ads", {
       type: "ads.verdict",
-      title: `New ad ${word}: ${c.campaignName}${c.adsetName ? ` › ${c.adsetName}` : ""} (${IDEAS[c.idea]?.label ?? c.idea ?? "idea not tagged"}, ${c.role ?? "test"})`,
-      reason: `${j.note} The idea library now counts this result.${j.verdict === "lose" ? " Ads this far behind are paused on the next batch day if they stay ≥ 1.8× their campaign." : ""}`,
+      title: (list.length === 1
+        ? `New ad ${WORD[list[0].verdict]}: ${where} (${label(c0)})`
+        : `${list.length} new ads judged in ${where}: ${list.map((j) => `${IDEAS[j.creative.idea]?.label ?? "untagged"} ${WORD[j.verdict]}`).join(", ")}`
+      ).slice(0, 160),
+      reason: `${list.map((j) => `${label(j.creative)}: ${WORD[j.verdict]}. ${j.note}`).join("\n")}\nThe idea library now counts these results.${list.some((j) => j.verdict === "lose") ? " Ads this far behind are paused on the next batch day if they stay ≥ 1.8× their campaign." : ""}`,
       effect: "Alert only.",
-      payload: { dedupeKey: `verdict:${c._id}` },
+      payload: { dedupeKey: `verdict:${list.map((j) => j.creative._id).join(",")}` },
     });
   }
   if (!weekly) return { snapshot: snap.today, alarms: alarms.length, judged: judged.length, decisions: 0 };
 
   const units = await buildUnits(snap.structure, snap.yesterday, snap.tz);
   const calib = await accountCalibration(snap.yesterday);
-  const result = decide({ units, limits: config.limits, settings, funds, calib, increasedThisWeek: await increasedThisWeek() });
+  const result = decide({ units, limits: config.limits, settings, calib, increasedThisWeek: await increasedThisWeek() });
   let made = 0;
   for (const d of result.decisions) {
     await propose(
@@ -355,7 +357,7 @@ export const unitStates = async () => {
   };
   const units = await buildUnits(structure, yesterday);
   const calib = await accountCalibration(yesterday);
-  const result = decide({ units, limits: config.limits, settings: { ...adsSettings(config), rebalance: false }, funds: { available: null, avgDailySpend: 0 }, calib });
+  const result = decide({ units, limits: config.limits, settings: { ...adsSettings(config), rebalance: false }, calib });
   return result.evaluated.map((e) => ({
     id: e.unit.id,
     campaignId: e.unit.campaignId,

@@ -139,8 +139,8 @@ Write plainly for a busy owner reading on a phone. Next steps must be concrete a
     prompt: `Last review (your memory):
 ${last?.body ?? "None — this is the first review."}
 
-Daily account numbers, last 14 days (spend ₹ / Meta paid / real joins / earned ₹ / funds):
-${days.map((d) => `${d.date}: ${Math.round(d.spend)} / ${d.paid} / ${d.joined ?? "-"} / ${Math.round(d.earned ?? 0)}${d.funds != null ? ` / funds ${Math.round(d.funds)}` : ""}`).join("\n")}
+Daily account numbers, last 14 days (spend ₹ / Meta paid / real joins / earned ₹). Prepaid funds are the owner's job and never a reason for an ad change:
+${days.map((d) => `${d.date}: ${Math.round(d.spend)} / ${d.paid} / ${d.joined ?? "-"} / ${Math.round(d.earned ?? 0)}`).join("\n")}
 
 Ad units now: ${states.map((s) => `${s.name}: ${s.state} (₹${s.dailyBudget}/day, 7d cost/member ₹${Number.isFinite(s.metrics.cpp7) ? Math.round(s.metrics.cpp7) : "∞"}, ${s.metrics.roas7.toFixed(2)}x) ${s.notes.join(" ")}`).join("\n") || "no data yet"}
 

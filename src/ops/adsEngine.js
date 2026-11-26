@@ -233,18 +233,18 @@ const avgCpp = (list, key) => {
  * Turns unit states into budget decisions, in this order:
  *  1. Moves: expensive → cheap, total daily budget unchanged.
  *  2. Cuts: losing units nobody could take the money from.
- *  3. Raises: winners, only with funds, headroom and a unit that spends its budget.
+ *  3. Raises: winners with headroom and a unit that spends its budget.
+ * Prepaid funds are never a reason to raise, cut or hold: the owner keeps the account funded.
  * Fresh ads for tired units are planned separately, on batch days.
  * @param {object} p
  * @param {Array} p.units
  * @param {object} p.limits OpsConfig.limits
  * @param {object} [p.settings] OpsConfig.ads
- * @param {{ available: number|null, avgDailySpend: number }} p.funds
  * @param {number} [p.increasedThisWeek] rupees of daily budget the agent already added in the last 7 days
  * @param {number} [p.calib] real members per Meta member
  * @param {Date} [p.now]
  */
-export const decide = ({ units, limits, settings = {}, funds, increasedThisWeek = 0, calib = 1, now = new Date() }) => {
+export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, calib = 1, now = new Date() }) => {
   const evaluated = units.map((u) => ({ unit: u, ...classify(u, limits, now, { calib }) }));
   const decisions = [];
   const used = new Set();
@@ -333,10 +333,6 @@ export const decide = ({ units, limits, settings = {}, funds, increasedThisWeek 
   }
 
   // 3. Raises for winners.
-  const runway = funds?.available != null && funds.avgDailySpend > 0 ? funds.available / funds.avgDailySpend : null;
-  const fundsOk = settings.autoTopUp
-    ? !(funds?.available != null && funds.avgDailySpend > 0 && funds.available < funds.avgDailySpend * 0.6)
-    : runway == null || runway >= limits.minRunwayDays;
   const weekBase = Math.max(0, totalBudget - increasedThisWeek);
   let headroom = Math.min(limits.maxDailySpend - totalBudget, (weekBase * limits.maxWeeklyIncreasePct) / 100 - increasedThisWeek);
 
@@ -346,10 +342,6 @@ export const decide = ({ units, limits, settings = {}, funds, increasedThisWeek 
     if (!u.dailyBudget) continue;
     if (!budgetFree(u, now)) {
       e.notes.push("Budget already changed this week; next step after 7 days.");
-      continue;
-    }
-    if (!fundsOk) {
-      e.notes.push(settings.autoTopUp ? "Would scale, but prepaid funds are nearly out (auto top-up may have failed)." : `Would scale, but prepaid funds cover only ${runway?.toFixed(1)} days.`);
       continue;
     }
     if (e.metrics.spendRate7 != null && e.metrics.spendRate7 < RULES.minSpendRate) {
@@ -376,7 +368,7 @@ export const decide = ({ units, limits, settings = {}, funds, increasedThisWeek 
     });
   }
 
-  return { evaluated, decisions, runway, totalBudget, average: { cpp7: avg7, cpp14: avg14 }, calib };
+  return { evaluated, decisions, totalBudget, average: { cpp7: avg7, cpp14: avg14 }, calib };
 };
 
 /**
@@ -430,16 +422,14 @@ const ACCOUNT_STATUS = { 2: "disabled", 3: "unsettled (a payment failed)", 7: "u
 /**
  * Alarms that can't wait for the weekly cycle. Urgent ones are emailed to the owner.
  * @param {object} p
- * @param {{ available: number|null, avgDailySpend: number }} p.funds
  * @param {object} [p.today] today's account snapshot row
  * @param {number} [p.budgetTotal] sum of active daily budgets
- * @param {object} [p.settings] OpsConfig.ads
  * @param {number} [p.accountStatus] Meta account_status
  * @param {Array} [p.adIssues] ads that are disapproved or have delivery issues
  * @param {number|null} [p.yesterdaySpend]
  * @param {Array<{ language: string, problem: string }>} [p.uncovered] required languages with no ads running (languageCoverage)
  */
-export const emergencies = ({ funds, today, budgetTotal, settings = {}, accountStatus, adIssues = [], yesterdaySpend = null, uncovered = [] }) => {
+export const emergencies = ({ today, budgetTotal, accountStatus, adIssues = [], yesterdaySpend = null, uncovered = [] }) => {
   const out = [];
   if (uncovered.length) {
     out.push({
@@ -449,29 +439,6 @@ export const emergencies = ({ funds, today, budgetTotal, settings = {}, accountS
       reason: `Your rule: ads run in all 4 languages at all times. ${uncovered.map((u) => `${u.language}: ${u.problem}`).join("; ")}.`,
       effect: "Turn that language's campaign back on in Ads Manager (or add ads/budget). The agent never turns a language off.",
     });
-  }
-  if (funds?.available != null && funds.avgDailySpend > 0) {
-    const days = funds.available / funds.avgDailySpend;
-    if (settings.autoTopUp) {
-      // Meta adds funds below the top-up line; only shout when it clearly hasn't.
-      if (funds.available < funds.avgDailySpend * 0.6) {
-        out.push({
-          type: "ads.funds_low",
-          priority: "urgent",
-          title: `Meta funds ₹${Math.round(funds.available)}: auto top-up may have failed`,
-          reason: `Auto top-up should add ₹${settings.topUpAmount ?? 15000} below ₹${settings.topUpBelow ?? 8000}, but the balance covers only ${Math.round(days * 24)} hours at ~₹${Math.round(funds.avgDailySpend)}/day.`,
-          effect: "Check Meta Billing (payment method, top-up rule). The agent cannot pay for you.",
-        });
-      }
-    } else if (days < 3) {
-      out.push({
-        type: "ads.funds_low",
-        priority: "urgent",
-        title: days < 1 ? "Meta ads stop today: top up now" : `Meta funds last ~${days.toFixed(1)} days`,
-        reason: `Prepaid balance ₹${Math.round(funds.available)} at ~₹${Math.round(funds.avgDailySpend)}/day. Ads pause when it hits zero and restart in learning.`,
-        effect: "Top up in Meta Billing. The agent cannot pay for you.",
-      });
-    }
   }
   if (accountStatus != null && accountStatus !== 1) {
     out.push({
@@ -507,7 +474,7 @@ export const emergencies = ({ funds, today, budgetTotal, settings = {}, accountS
       type: "ads.delivery_stalled",
       priority: "urgent",
       title: `Ads spent only ₹${Math.round(yesterdaySpend)} yesterday (budgets ₹${Math.round(budgetTotal)})`,
-      reason: "Under 40% of the daily budgets went out. Usual causes: funds ran out, an account spending limit, disapproved ads or a billing hold.",
+      reason: "Under 40% of the daily budgets went out. Usual causes: an account spending limit, disapproved ads, a payment problem or a billing hold.",
       effect: "Check Ads Manager → Delivery and Billing. Alert only.",
     });
   }

@@ -9,7 +9,6 @@ const limits = {
   scaleRoas: 1.5,
   netRevenuePerMember: 285,
   losingCostPerMember: 420,
-  minRunwayDays: 5,
 };
 const now = new Date("2026-12-20T06:00:00Z");
 const DAY = 86400000;
@@ -126,7 +125,7 @@ describe("decide: moving money between languages", () => {
   ];
 
   it("moves ₹300/day from Telugu to Kannada and leaves the rest alone", () => {
-    const { decisions } = decide({ units: live(), limits, settings: { rebalance: true, autoTopUp: true }, funds: { available: 20000, avgDailySpend: 9000 }, calib: 1.215, now });
+    const { decisions } = decide({ units: live(), limits, settings: { rebalance: true }, calib: 1.215, now });
     expect(decisions).toHaveLength(1);
     expect(decisions[0]).toMatchObject({ type: "ads.rebalance" });
     expect(decisions[0].payload.moves).toEqual([
@@ -136,7 +135,7 @@ describe("decide: moving money between languages", () => {
   });
 
   it("keeps the total daily budget the same", () => {
-    const { decisions } = decide({ units: live(), limits, settings: { rebalance: true }, funds: { available: null, avgDailySpend: 0 }, now });
+    const { decisions } = decide({ units: live(), limits, settings: { rebalance: true }, now });
     const m = decisions[0].payload.moves;
     expect(m[0].to + m[1].to).toBe(m[0].from + m[1].from);
   });
@@ -146,7 +145,7 @@ describe("decide: moving money between languages", () => {
     // Telugu brought many real joins, Kannada few.
     for (const r of units[1].days) r.real = 12;
     for (const r of units[0].days) r.real = 3;
-    const { decisions, evaluated } = decide({ units, limits, settings: { rebalance: true }, funds: { available: null, avgDailySpend: 0 }, now });
+    const { decisions, evaluated } = decide({ units, limits, settings: { rebalance: true }, now });
     expect(decisions).toHaveLength(0);
     expect(evaluated.find((e) => e.unit.id === "TE").notes.join(" ")).toMatch(/don't confirm/);
   });
@@ -154,19 +153,19 @@ describe("decide: moving money between languages", () => {
   it("doesn't give more to a language that can't spend what it has", () => {
     const units = live();
     units[0].dailyBudget = 2500; // spends ₹1,686 of ₹2,500
-    const { decisions } = decide({ units, limits, settings: { rebalance: true }, funds: { available: null, avgDailySpend: 0 }, now });
+    const { decisions } = decide({ units, limits, settings: { rebalance: true }, now });
     expect(decisions.filter((d) => d.type === "ads.rebalance")).toHaveLength(0);
   });
 
   it("can be switched off", () => {
-    const { decisions } = decide({ units: live(), limits, settings: { rebalance: false }, funds: { available: null, avgDailySpend: 0 }, now });
+    const { decisions } = decide({ units: live(), limits, settings: { rebalance: false }, now });
     expect(decisions).toHaveLength(0);
   });
 
   it("never takes a language below ₹500/day", () => {
     const units = live();
     units[1].dailyBudget = 550;
-    const { decisions } = decide({ units, limits, settings: { rebalance: true }, funds: { available: null, avgDailySpend: 0 }, now });
+    const { decisions } = decide({ units, limits, settings: { rebalance: true }, now });
     expect(decisions.filter((d) => d.type === "ads.rebalance")).toHaveLength(0);
   });
 });
@@ -175,47 +174,44 @@ describe("decide: cuts and raises", () => {
   const winner = () => unit("w", 2000, { spend: 2000, paid: 16 }, { spend: 2000, paid: 16 });
 
   it("raises a winner (+15% when twice the target)", () => {
-    const { decisions } = decide({ units: [winner()], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, now });
+    const { decisions } = decide({ units: [winner()], limits, settings: {}, now });
     expect(decisions[0].payload).toMatchObject({ from: 2000, to: 2300 });
   });
 
   it("raises a normal winner by the configured 10%", () => {
     const u = unit("w", 2000, { spend: 2000, paid: 11 }, { spend: 2000, paid: 11 });
-    const { decisions } = decide({ units: [u], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, now });
+    const { decisions } = decide({ units: [u], limits, settings: {}, now });
     expect(decisions[0].payload).toMatchObject({ from: 2000, to: 2200 });
   });
 
-  it("with auto top-up on, a small balance doesn't block scaling", () => {
-    const { decisions } = decide({ units: [winner()], limits, settings: { autoTopUp: true }, funds: { available: 9000, avgDailySpend: 9000 }, now });
+  it("scales on results alone: the prepaid balance is never a reason to hold", () => {
+    // Funds passed in by an old caller are ignored.
+    const { decisions } = decide({ units: [winner()], limits, settings: {}, funds: { available: 100, avgDailySpend: 9000 }, now });
     expect(decisions).toHaveLength(1);
-  });
-
-  it("without auto top-up, never scales when funds cover under 5 days", () => {
-    const { decisions } = decide({ units: [winner()], limits, settings: { autoTopUp: false }, funds: { available: 6000, avgDailySpend: 2000 }, now });
-    expect(decisions).toHaveLength(0);
+    expect(decisions[0].payload).toMatchObject({ from: 2000, to: 2300 });
   });
 
   it("respects the weekly increase cap", () => {
-    const { decisions } = decide({ units: [winner()], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, increasedThisWeek: 400, now });
+    const { decisions } = decide({ units: [winner()], limits, settings: {}, increasedThisWeek: 400, now });
     expect(decisions).toHaveLength(0);
   });
 
   it("waits 7 days between budget steps", () => {
     const u = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 4 * DAY) };
-    const { decisions } = decide({ units: [u], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, now });
+    const { decisions } = decide({ units: [u], limits, settings: {}, now });
     expect(decisions).toHaveLength(0);
   });
 
   it("cuts a losing unit by 15% when no cheaper unit can take the money", () => {
     const loser = unit("l", 2000, { spend: 2000, paid: 3 }, { spend: 2000, paid: 3 });
-    const { decisions } = decide({ units: [loser], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, now });
+    const { decisions } = decide({ units: [loser], limits, settings: {}, now });
     expect(decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2000, to: 1700 } });
   });
 
   it("moves a loser's money to a cheap unit instead of cutting it", () => {
     const loser = unit("l", 2000, { spend: 2000, paid: 3 }, { spend: 2000, paid: 3 });
     const cheap = unit("c", 2000, { spend: 2000, paid: 9 }, { spend: 2000, paid: 9 });
-    const { decisions } = decide({ units: [loser, cheap], limits, settings: { rebalance: true }, funds: { available: 50000, avgDailySpend: 4000 }, now });
+    const { decisions } = decide({ units: [loser, cheap], limits, settings: { rebalance: true }, now });
     expect(decisions.map((d) => d.type)).toEqual(["ads.rebalance"]);
   });
 });
@@ -250,25 +246,12 @@ describe("adDecisions", () => {
 });
 
 describe("emergencies", () => {
-  it("without auto top-up, warns when funds run out within 3 days", () => {
-    const out = emergencies({ funds: { available: 4288, avgDailySpend: 8000 } });
-    expect(out[0].title).toMatch(/stop today/);
-  });
-
-  it("with auto top-up, stays quiet while the balance is just under the top-up line", () => {
-    const out = emergencies({ funds: { available: 7500, avgDailySpend: 9000 }, settings: { autoTopUp: true, topUpBelow: 8000, topUpAmount: 15000 } });
-    expect(out).toHaveLength(0);
-  });
-
-  it("with auto top-up, shouts when the balance is nearly gone (top-up failed)", () => {
-    const out = emergencies({ funds: { available: 3000, avgDailySpend: 9000 }, settings: { autoTopUp: true, topUpBelow: 8000, topUpAmount: 15000 } });
-    expect(out[0]).toMatchObject({ type: "ads.funds_low", priority: "urgent" });
-    expect(out[0].title).toMatch(/auto top-up/);
+  it("never alerts about the prepaid balance (the owner keeps it funded)", () => {
+    expect(emergencies({ funds: { available: 100, avgDailySpend: 9000 }, settings: { autoTopUp: false } })).toEqual([]);
   });
 
   it("raises disapproved ads, account problems and stalled delivery as urgent", () => {
     const out = emergencies({
-      funds: { available: null, avgDailySpend: 0 },
       accountStatus: 3,
       adIssues: [{ name: "KN-09", effective_status: "DISAPPROVED", issue: "Personal attributes" }, { name: "TE-01", effective_status: "WITH_ISSUES" }],
       budgetTotal: 8000,
@@ -321,9 +304,9 @@ describe("all four languages, always", () => {
   });
 
   it("never cuts a language below ₹500/day", () => {
-    const at550 = decide({ units: [unit("l", 550, { spend: 2000, paid: 2 }, { spend: 2000, paid: 2 })], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, now });
+    const at550 = decide({ units: [unit("l", 550, { spend: 2000, paid: 2 }, { spend: 2000, paid: 2 })], limits, settings: {}, now });
     expect(at550.decisions[0].payload).toMatchObject({ from: 550, to: 500 });
-    const at500 = decide({ units: [unit("l", 500, { spend: 2000, paid: 2 }, { spend: 2000, paid: 2 })], limits, settings: {}, funds: { available: 50000, avgDailySpend: 2000 }, now });
+    const at500 = decide({ units: [unit("l", 500, { spend: 2000, paid: 2 }, { spend: 2000, paid: 2 })], limits, settings: {}, now });
     expect(at500.decisions).toHaveLength(0);
   });
 });

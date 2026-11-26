@@ -215,6 +215,11 @@ export const captionFor = (post, platform) => {
 
 export const planWeek = async () => {
   const config = await getConfig();
+  // Meta's API can't see posts scheduled by hand in Business Suite, so the agent plans
+  // evenings only when the owner turns this on (for weeks without /weekly-posts).
+  if (!config.organic?.planEvenings) {
+    return { skipped: "The agent's evening posts are off (Settings → Organic posts); your weekly posts cover the evenings." };
+  }
   const monday = nextMonday();
   const dayKey = (d) => istDay(new Date(monday.getTime() + d * 86400000));
 
@@ -514,19 +519,20 @@ handle("organic.schedule", async (action) => {
   post.results = { ...post.results, facebookId: fb.id };
   post.status = "scheduled";
   await post.save();
-  if (!post.platforms.includes("instagram")) await deletePostImage(post);
-  if (post.platforms.includes("instagram")) {
-    await propose("organic", {
-      type: "organic.publish_ig",
-      title: `Instagram: ${post.topic}`,
-      reason: "Instagram's API can't schedule, so the agent posts it at the planned time.",
-      effect: "Publishes the photo and caption on Instagram.",
-      payload: { postId: String(post._id) },
-      ref: { kind: "post-ig", id: String(post._id) },
-      runAt: post.publishAt,
-    });
+  if (!post.platforms.includes("instagram")) {
+    await deletePostImage(post);
+    return { facebookId: fb.id };
   }
-  return { facebookId: fb.id };
+  // Same card: Instagram's API can't schedule, so the agent posts it there at the planned time.
+  const when = new Date(post.publishAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+  return {
+    facebookId: fb.id,
+    next: {
+      type: "organic.publish_ig",
+      effect: `Facebook: scheduled for ${when}. Instagram: the agent posts the same photo and caption then (Instagram's API can't schedule). Cancel removes it from both.`,
+      runAt: post.publishAt,
+    },
+  };
 });
 
 handle("organic.publish_ig", async (action) => {

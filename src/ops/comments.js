@@ -1,6 +1,6 @@
 import { OpsComment, getConfig } from "./models.js";
 import { ask } from "./claude.js";
-import { handle, hoursFromNow, notice, propose } from "./actions.js";
+import { handle, hoursFromNow, propose } from "./actions.js";
 import { deleteComment, fetchIgComments, fetchPageComments, hideComment, igConfigured, replyToComment } from "./meta.js";
 
 /*
@@ -66,24 +66,18 @@ export const runCommentsCycle = async () => {
     const ref = { kind: "comment", id: c.commentId };
     const where = c.platform === "instagram" ? "Instagram" : "Facebook";
     if ((t.category === "hate" || t.category === "spam") && !c.hidden) {
+      // A paying member complaining in public is hidden too, but the card says so, so you can follow up privately.
+      const paid = t.category === "hate" && /(paid|pay|payment|351|refund|money|₹|rs\.?\s?\d)/i.test(c.text);
       await propose("comments", {
         type: "comments.hide",
-        title: `Hide ${t.category} comment by ${c.author} (${where})`,
-        reason: `"${c.text.slice(0, 160)}"`,
-        effect: `Hidden now, deleted after ${config.limits.commentDeleteHours} h unless you restore it.`,
+        priority: paid ? "urgent" : "normal",
+        title: `Hide ${t.category} comment by ${c.author} (${where})${paid ? ": complained about paying" : ""}`,
+        reason: `"${c.text.slice(0, 200)}"${paid ? " Check Members for this name and reach out by email or WhatsApp if they are a paid member." : ""}`,
+        effect: `Hidden now, deleted after ${config.limits.commentDeleteHours} h unless you cancel.`,
         payload: { platform: c.platform, commentId: c.commentId, text: c.text },
         ref,
         runAt: new Date(),
       });
-      // A paying member complaining in public is hidden too, but flagged so you can follow up privately.
-      if (t.category === "hate" && /(paid|pay|payment|351|refund|money|₹|rs\.?\s?\d)/i.test(c.text)) {
-        await notice("comments", {
-          type: "comments.paid_complaint",
-          title: `${c.author} complained about paying (${where}); hidden`,
-          reason: `"${c.text.slice(0, 200)}" Check Members for this name and reach out by email or WhatsApp if they are a paid member.`,
-          payload: { dedupeKey: `paid:${c.commentId}` },
-        });
-      }
     } else if ((t.category === "question" || t.category === "praise") && t.reply) {
       await propose("comments", {
         type: "comments.reply",
@@ -103,17 +97,17 @@ handle("comments.hide", async (action) => {
   const { platform, commentId } = action.payload;
   await hideComment(platform, commentId);
   await OpsComment.updateOne({ commentId }, { status: "hidden" });
-  const config = await getConfig();
-  await propose("comments", {
-    type: "comments.delete",
-    title: `Delete hidden comment (${platform})`,
-    reason: `"${String(action.payload.text || "").slice(0, 160)}"`,
-    effect: "Deletes it for good. Cancel to keep it hidden instead.",
-    payload: { platform, commentId },
-    ref: { kind: "comment", id: commentId },
-    runAt: hoursFromNow(config.limits.commentDeleteHours),
-  });
-  return { hidden: true };
+  const hours = (await getConfig()).limits.commentDeleteHours;
+  // Same card: hidden now, deleted later unless cancelled.
+  return {
+    hidden: true,
+    next: {
+      type: "comments.delete",
+      title: action.title.replace(/^Hide /, "Delete hidden "),
+      effect: `Hidden now. Deletes it for good in ${hours} h. Cancel to keep it hidden instead.`,
+      runAt: hoursFromNow(hours),
+    },
+  };
 });
 
 handle("comments.delete", async (action) => {

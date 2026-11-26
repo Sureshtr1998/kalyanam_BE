@@ -33,6 +33,7 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   hideComment: vi.fn(async (_p, id) => hidden.push(id)),
   replyToComment: vi.fn(async () => ({ id: "r1" })),
   scheduleFacebookPhoto: vi.fn(async () => ({ id: "fbpost_1" })),
+  publishInstagramPhoto: vi.fn(async () => ({ id: "igpost_1" })),
   fetchCreativeSpec: vi.fn(async () => ({
     object_story_spec: { page_id: "pg1", link_data: { link: "https://www.seetharamakalyana.in/kn", message: "old", name: "old", picture: "x", call_to_action: { type: "SIGN_UP" } } },
     url_tags: "utm_source=meta",
@@ -168,6 +169,19 @@ describe("support mail", () => {
     expect(sent[0].text).not.toMatch(/Secret@123|password:/i);
   });
 
+  it("answers several mails from the same person with one reply", async () => {
+    await goLive();
+    await OpsAction.deleteMany({});
+    triage.mockReturnValue({ category: "question", language: "English", summary: "Asks about price", mobile: "", email: "", confidence: 0.9 });
+    inbox.push(mail(21, "same.person@example.test", "How much is it?"));
+    inbox.push(mail(22, "same.person@example.test", "Hello? Any update on the price?"));
+    await runSupportCycle();
+    const cards = await OpsAction.find({ type: "support.reply", "payload.to": "same.person@example.test" }).sort({ createdAt: 1 });
+    expect(cards.map((c) => c.status)).toEqual(["cancelled", "scheduled"]);
+    expect(cards[0].error).toMatch(/Replaced/);
+    expect(cards[1].reason).toMatch(/They wrote 2 times/);
+  });
+
   it("asks the admin when the mobile belongs to a different email", async () => {
     await goLive();
     const user = await createUser();
@@ -206,6 +220,22 @@ describe("support mail", () => {
 });
 
 describe("comments", () => {
+  it("puts a paying member's complaint on the hide card itself", async () => {
+    await OpsAction.deleteMany({});
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.comments": "live" } }, { upsert: true });
+    const meta = await import("../src/ops/meta.js");
+    meta.fetchPageComments.mockResolvedValueOnce([
+      { platform: "facebook", commentId: "fb_paid", author: "Ravi", text: "I paid 351 and got nothing", createdAt: new Date(), ours: false, hidden: false },
+    ]);
+    commentTriage.mockReturnValue({ items: [{ id: "fb_paid", category: "hate", language: "English", reply: "" }] });
+    await runCommentsCycle();
+    const cards = await OpsAction.find({ "ref.id": "fb_paid" });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ priority: "urgent" });
+    expect(cards[0].title).toMatch(/complained about paying/);
+    expect(await OpsAction.exists({ type: "comments.paid_complaint" })).toBeNull();
+  });
+
   it("hides negative remarks about the service, queues deletion and flags paid complaints", async () => {
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.comments": "live" } }, { upsert: true });
     commentTriage.mockReturnValue({
@@ -217,10 +247,14 @@ describe("comments", () => {
     await runCommentsCycle();
     await runDue(Date.now() + 20000);
     expect(hidden).toEqual(["fb_1"]);
-    const del = await OpsAction.findOne({ type: "comments.delete" });
+    // One card per comment: hidden, then the same card waits to delete it.
+    const cards = await OpsAction.find({ "ref.id": "fb_1" });
+    expect(cards).toHaveLength(1);
+    const del = cards[0];
+    expect(del.type).toBe("comments.delete");
     expect(del.status).toBe("scheduled");
+    expect(del.result.steps).toEqual([expect.objectContaining({ type: "comments.hide" })]);
     expect((del.runAt.getTime() - Date.now()) / 3600000).toBeGreaterThan(23.9);
-    expect(await OpsAction.exists({ type: "comments.paid_complaint" })).toBeTruthy();
     expect((await OpsAction.findOne({ type: "comments.reply" })).status).toBe("done");
   });
 });
@@ -266,6 +300,34 @@ describe("post image rendering", () => {
     expect(after.status).toBe("scheduled");
     expect(after.imageUrl).toBeUndefined();
     expect(after.imageDeletedAt).toBeInstanceOf(Date);
+  });
+
+  it("keeps Facebook and Instagram on one card", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    await OpsPost.deleteMany({});
+    await OpsAction.deleteMany({});
+    const post = await OpsPost.create({
+      publishAt: new Date(Date.now() + 3 * 86400000),
+      language: "Tamil",
+      topic: "Why 351",
+      caption: "caption",
+      design: { headline: "h" },
+      platforms: ["facebook", "instagram"],
+      imageUrl: "https://ik.example.test/ops-posts/b.jpg",
+      imageFileId: "f2",
+      status: "planned",
+    });
+    const card = await OpsAction.create({ module: "organic", type: "organic.schedule", status: "scheduled", title: "Mon · Tamil: Why 351", runAt: new Date(), payload: { postId: String(post._id) }, ref: { kind: "post", id: String(post._id) } });
+    await execute(card._id);
+    const mid = await OpsAction.findById(card._id);
+    expect(mid).toMatchObject({ type: "organic.publish_ig", status: "scheduled", title: "Mon · Tamil: Why 351" });
+    expect(mid.effect).toMatch(/Facebook: scheduled/);
+    expect(await OpsAction.countDocuments({ "payload.postId": String(post._id) })).toBe(1);
+    await execute(card._id);
+    const end = await OpsAction.findById(card._id);
+    expect(end.error ?? "").toBe("");
+    expect(end.status).toBe("done");
+    expect((await OpsPost.findById(post._id)).status).toBe("published");
   });
 });
 
@@ -398,9 +460,10 @@ describe("ad automation", () => {
     const res = await api()
       .post("/api/manage/ops/config")
       .set("x-auth-token", await admin())
-      .send({ ads: { handsOffUntil: "2026-12-10", batchEveryDays: 21, newAdsets: true, autoTopUp: true, topUpBelow: 8000, alertEmail: "owner@example.com" } });
+      .send({ ads: { handsOffUntil: "2026-12-10", batchEveryDays: 21, newAdsets: true, alertEmail: "owner@example.com" }, organic: { planEvenings: true } });
     expect(res.status).toBe(200);
-    expect(res.body.ads).toMatchObject({ batchEveryDays: 21, newAdsets: true, autoTopUp: true, alertEmail: "owner@example.com", rebalance: true });
+    expect(res.body.ads).toMatchObject({ batchEveryDays: 21, newAdsets: true, alertEmail: "owner@example.com", rebalance: true });
+    expect(res.body.organic).toMatchObject({ planEvenings: true });
     expect(new Date(res.body.ads.handsOffUntil).toISOString().slice(0, 10)).toBe("2026-12-10");
     const bad = await api().post("/api/manage/ops/config").set("x-auth-token", await admin()).send({ ads: { alertEmail: "not an email" } });
     expect(bad.status).toBe(400);
@@ -656,7 +719,7 @@ describe("organic planner", () => {
     const { planWeek } = await import("../src/ops/organic.js");
     const { ask } = await import("../src/ops/claude.js");
     await OpsPost.deleteMany({});
-    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live", "organic.planEvenings": true } }, { upsert: true });
     const monday = nextMondayKey();
     // Wednesday evening is taken by hand; Tuesday only has a 12:30 safety post, so its evening is free.
     metaRead.scheduledTimes = [istAt(monday, 2, 19.5), istAt(monday, 1, 12.5)];
@@ -833,7 +896,7 @@ describe("stuck images and re-planning", () => {
 
   it("re-plans next week: replaces posts still waiting for images, keeps scheduled ones", async () => {
     await OpsPost.deleteMany({});
-    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live", "organic.planEvenings": true } }, { upsert: true });
     metaRead.scheduledTimes = [];
     metaRead.performance = [];
     const ist = new Date(Date.now() + 5.5 * 3600000);
@@ -898,11 +961,20 @@ describe("agent-planned ideas follow the ads rules", () => {
 });
 
 describe("no double posts", () => {
+  it("doesn't plan evening posts unless the owner turns it on", async () => {
+    const { planWeek } = await import("../src/ops/organic.js");
+    await OpsPost.deleteMany({});
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live", "organic.planEvenings": false } }, { upsert: true });
+    const r = await planWeek();
+    expect(r.skipped).toMatch(/evening posts are off/);
+    expect(await OpsPost.countDocuments()).toBe(0);
+  });
+
   it("plans nothing when Facebook's schedule can't be read", async () => {
     const { planWeek } = await import("../src/ops/organic.js");
     const meta = await import("../src/ops/meta.js");
     await OpsPost.deleteMany({});
-    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live", "organic.planEvenings": true } }, { upsert: true });
     meta.fetchScheduledTimes.mockRejectedValueOnce(new Error("(#200) permission"));
     const r = await planWeek();
     expect(r.skipped).toMatch(/couldn't be read/);

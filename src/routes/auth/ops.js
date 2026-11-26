@@ -113,6 +113,7 @@ router.get(
       modes: config.modes,
       limits: config.limits,
       ads: adsSettings(config),
+      organic: { planEvenings: !!config.organic?.planEvenings },
       targets: config.targets,
       brief: config.brief,
       lastRuns: config.lastRuns,
@@ -454,7 +455,8 @@ router.post(
   "/manage/ops/config",
   wrap(async (req, res) => {
     const config = await getConfig();
-    const { modes, limits, targets, brief, ads } = req.body || {};
+    const { modes, limits, targets, brief, ads, organic } = req.body || {};
+    if (organic && typeof organic.planEvenings === "boolean") config.set("organic.planEvenings", organic.planEvenings);
     if (modes) {
       for (const [k, v] of Object.entries(modes)) {
         if (MODULES.includes(k) && MODES.includes(String(v))) config.modes[k] = v;
@@ -472,8 +474,8 @@ router.post(
     }
     if (typeof brief === "string") config.brief = brief.slice(0, 8000);
     if (ads && typeof ads === "object") {
-      for (const k of ["rebalance", "pauseLosingAds", "newAdsets", "autoTopUp"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
-      for (const k of ["batchEveryDays", "topUpBelow", "topUpAmount"]) {
+      for (const k of ["rebalance", "pauseLosingAds", "newAdsets"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
+      for (const k of ["batchEveryDays"]) {
         if (ads[k] != null && Number.isFinite(Number(ads[k])) && Number(ads[k]) >= 0) config.set(`ads.${k}`, Number(ads[k]));
       }
       if (typeof ads.alertEmail === "string") {
@@ -490,7 +492,7 @@ router.post(
     }
     config.updatedBy = by(req);
     await config.save();
-    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config) });
+    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config), organic: { planEvenings: !!config.organic?.planEvenings } });
   })
 );
 
