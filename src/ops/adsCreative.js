@@ -37,6 +37,7 @@ export const CLAIM_RULES = `Facts you may use (nothing else):
 - Email and mobile number are OTP-verified (that is what the verified badge means).
 - No agents or brokers, no sales calls.
 - Matches within your language and community (caste, sub-caste), gothra; horoscope matching is available.
+- Communities may be named, but only these (all checked against the site's sign-up list of 586 castes): Kannada: Brahmin, Vokkaliga, Lingayat, Kuruba, Bunt, Vishwakarma, Devanga. Telugu: Brahmin, Reddy, Kamma, Kapu, Velama, Arya Vysya. Tamil: Brahmin, Iyer, Iyengar, Pillai, Gounder, Chettiar, Nadar. Hindi: Brahmin, Agarwal, Rajput, Kayastha, Yadav, Jat. Never say how many members a community has.
 Never say or imply: that contact details are shared only after both families agree (paid members unlock contacts with credits); that we verify identity, age, caste, income, photos or background; guaranteed matches or marriages; "100% verified" or "safe"; any number of members, success stories or testimonials; competitor names; discounts, deadlines or "limited" offers; crossed-out or reference prices.`;
 
 const VARIANT = {
