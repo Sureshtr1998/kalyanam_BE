@@ -11,7 +11,7 @@
 import fs from "fs";
 import path from "path";
 import { chromium } from "playwright";
-import { SIZE, adHtml, postHtml } from "../src/ops/postDesign.js";
+import { SIZE, STORY_SIZE, adHtml, postHtml, storyHtml } from "../src/ops/postDesign.js";
 
 export const renderCards = async (posts) => {
   const browser = await chromium.launch();
@@ -19,8 +19,9 @@ export const renderCards = async (posts) => {
     const page = await browser.newPage({ viewport: SIZE, deviceScaleFactor: 1 });
     const out = [];
     for (const post of posts) {
-      // Ad cards use the winning ads' layout; organic posts use the post card.
-      await page.setContent(post.kind === "ad" ? adHtml(post) : postHtml(post), { waitUntil: "load" });
+      // Ad cards use the winning ads' layout; stories are 9:16; other organic posts use the post card.
+      await page.setViewportSize(post.kind === "story" ? STORY_SIZE : SIZE);
+      await page.setContent(post.kind === "ad" ? adHtml(post) : post.kind === "story" ? storyHtml(post) : postHtml(post), { waitUntil: "load" });
       await page.waitForSelector("body[data-ready='1']", { timeout: 15000 });
       out.push({ post, image: await page.screenshot({ type: "jpeg", quality: 92 }) });
     }
@@ -36,6 +37,8 @@ const SAMPLES = [
   { id: "tamil", language: "Tamil", theme: "maroon", kicker: "திருமண வாழ்த்துக்கள்", headline: "உங்கள் வாழ்க்கைத் துணையை இங்கே கண்டறியுங்கள்", subline: "குடும்பத்தின் ஆசியுடன் ஒரு புதிய பயணம்" },
   { id: "hindi", language: "Hindi", theme: "green", kicker: "क्यों जुड़ें", headline: "सही रिश्ता, परिवार की सहमति से", subline: "सत्यापित प्रोफ़ाइल, सरल प्रक्रिया" },
   { id: "english", language: "English", theme: "saffron", kicker: "How matching works", headline: "Matches that respect your family's values", subline: "Language, community and horoscope, all in one place" },
+  { id: "story-telugu", kind: "story", language: "Telugu", theme: "saffron", url: "seetharamakalyana.in/te", kicker: "₹351 ఎందుకు?", headline: "పెళ్లి టైమ్‌పాస్ కాదు. సీరియస్ కుటుంబాలు మాత్రమే.", subline: "OTP తో ధృవీకరించిన ప్రొఫైల్స్" },
+  { id: "safety-tamil", language: "Tamil", theme: "maroon", url: "seetharamakalyana.in/ta", kicker: "மகள்களுக்குப் பாதுகாப்பு", headline: "தவறாக நடப்பவர்கள் நிரந்தரமாக நீக்கப்படுவார்கள்", subline: "எந்த நேரமும் புகார் அளிக்கலாம்: contactus@seetharamakalyana.in" },
   { id: "ad-kannada", kind: "ad", language: "Kannada", kicker: "₹351 ಯಾಕೆ, ಉಚಿತ ಯಾಕಿಲ್ಲ?", headline: "ಯಾಕೆಂದರೆ ಮದುವೆ", highlight: "ಟೈಮ್‌ಪಾಸ್ ಅಲ್ಲ.", bullets: ["ಪಾವತಿಸಿ ನೋಂದಣಿ, ಸುಮ್ಮನೆ ನೋಡುವವರು ದೂರ", "OTP ಮೂಲಕ ಪರಿಶೀಲಿಸಿದ ಪ್ರೊಫೈಲ್‌ಗಳು", "ಏಜೆಂಟ್‌ಗಳಿಲ್ಲ, ಸೇಲ್ಸ್ ಕರೆಗಳಿಲ್ಲ"], price: "ವರ್ಷಕ್ಕೆ ₹351", cta: "ಇಂದೇ ನೋಂದಾಯಿಸಿ" },
 ];
 

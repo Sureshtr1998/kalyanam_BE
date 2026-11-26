@@ -113,7 +113,7 @@ router.get(
       modes: config.modes,
       limits: config.limits,
       ads: adsSettings(config),
-      organic: { planEvenings: !!config.organic?.planEvenings },
+      organic: { planEvenings: !!config.organic?.planEvenings, ownerUntil: config.organic?.ownerUntil ?? null },
       targets: config.targets,
       brief: config.brief,
       lastRuns: config.lastRuns,
@@ -495,6 +495,11 @@ router.post(
     const config = await getConfig();
     const { modes, limits, targets, brief, ads, organic } = req.body || {};
     if (organic && typeof organic.planEvenings === "boolean") config.set("organic.planEvenings", organic.planEvenings);
+    if (organic && "ownerUntil" in organic) {
+      const d = organic.ownerUntil ? new Date(organic.ownerUntil) : null;
+      if (d && Number.isNaN(d.getTime())) return res.status(400).json({ msg: "ownerUntil must be a date" });
+      config.set("organic.ownerUntil", d);
+    }
     if (modes) {
       for (const [k, v] of Object.entries(modes)) {
         if (MODULES.includes(k) && MODES.includes(String(v))) config.modes[k] = v;
@@ -530,7 +535,7 @@ router.post(
     }
     config.updatedBy = by(req);
     await config.save();
-    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config), organic: { planEvenings: !!config.organic?.planEvenings } });
+    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config), organic: { planEvenings: !!config.organic?.planEvenings, ownerUntil: config.organic?.ownerUntil ?? null } });
   })
 );
 

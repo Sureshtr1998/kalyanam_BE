@@ -374,6 +374,20 @@ export const publishInstagramPhoto = async ({ imageUrl, caption }) => {
   return graphPost(`${IG()}/media_publish`, { creation_id: container.id }, token);
 };
 
+/** Publishes an Instagram story now (the API can't schedule stories). */
+export const publishInstagramStory = async ({ imageUrl }) => {
+  const token = await pageToken();
+  const container = await graphPost(`${IG()}/media`, { image_url: imageUrl, media_type: "STORIES" }, token);
+  return graphPost(`${IG()}/media_publish`, { creation_id: container.id }, token);
+};
+
+/** Publishes a Facebook Page photo story now: upload the photo unpublished, then post it as a story. */
+export const publishFacebookStory = async ({ imageUrl }) => {
+  const token = await pageToken();
+  const photo = await graphPost(`${PAGE()}/photos`, { url: imageUrl, published: "false" }, token);
+  return graphPost(`${PAGE()}/photo_stories`, { photo_id: photo.id }, token);
+};
+
 /** Turns a Meta error into one line an admin can act on. */
 export const metaErrorText = (err) => {
   const code = err.meta?.code;

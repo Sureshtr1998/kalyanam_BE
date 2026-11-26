@@ -12,6 +12,8 @@ import fs from "fs";
  */
 
 export const SIZE = { width: 1080, height: 1350 };
+/** Stories are 9:16. Instagram covers the top and bottom ~250 px with its own bars, so text stays between. */
+export const STORY_SIZE = { width: 1080, height: 1920 };
 
 const FONTS = [
   ["Fraunces", 700, "normal", "Fraunces_700Bold.ttf"],
@@ -140,6 +142,56 @@ document.fonts.ready.then(() => {
     size -= 4;
   }
   if (s) { let ss = 38; while (box.scrollHeight > box.clientHeight + 1 && ss > 26) { ss -= 2; s.style.fontSize = ss + "px"; } }
+  document.body.dataset.ready = "1";
+});
+</script>
+</body></html>`;
+};
+
+/** A 9:16 story: one idea, big headline, the language address and "link in bio" on the footer. */
+export const storyHtml = (post, assets = designAssets()) => {
+  const t = THEMES[post.theme] ?? THEMES.saffron;
+  const script = fontFor(post.language);
+  const head = script ? `"${script}", "Noto Sans"` : `"Fraunces", "Noto Sans"`;
+  const body = script ? `"${script}", "Noto Sans"` : `"Noto Sans"`;
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+${assets.fontCss}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:${STORY_SIZE.width}px;height:${STORY_SIZE.height}px;overflow:hidden}
+body{background:linear-gradient(165deg,${t.bg1},${t.bg2});color:${t.ink};position:relative;-webkit-font-smoothing:antialiased}
+.glow{position:absolute;inset:0;background:radial-gradient(circle at 50% 46%,${t.accent}40,transparent 62%)}
+.mandala{position:absolute;left:40px;top:460px;opacity:${t.motifOpacity}}
+.frame{position:absolute;left:40px;right:40px;top:250px;bottom:230px;border:4px solid ${t.accent};border-radius:28px}
+.content{position:absolute;left:100px;right:100px;top:320px;height:980px;display:flex;flex-direction:column;align-items:center;text-align:center}
+.kicker{background:${t.pill};color:${t.pillInk};font-family:${body};font-weight:700;font-size:34px;padding:14px 38px;border-radius:999px}
+.middle{flex:1;display:flex;flex-direction:column;justify-content:center;gap:40px;width:100%}
+h1{font-family:${head};font-weight:700;line-height:${script ? 1.4 : 1.12};text-wrap:balance;overflow-wrap:break-word}
+p.sub{font-family:${body};color:${t.soft};font-size:42px;line-height:1.5;text-wrap:balance}
+.brand{position:absolute;left:0;right:0;top:1330px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center}
+.brand img{width:130px;height:130px;border-radius:50%;background:#fff8f1;padding:4px}
+.brand b{font-family:"Fraunces";font-weight:700;font-size:48px;line-height:1.1}
+.brand span{font-family:"Noto Sans";font-weight:700;font-size:36px;color:${t.ink};background:${t.accent}40;border-radius:999px;padding:10px 30px}
+</style></head><body>
+<div class="glow"></div>
+<div class="mandala">${mandala(t.motif)}</div>
+<div class="frame"></div>
+<div class="content">
+  ${post.kicker ? `<div class="kicker">${esc(post.kicker)}</div>` : ""}
+  <div class="middle"><h1 id="h">${esc(post.headline)}</h1>${post.subline ? `<p class="sub" id="s">${esc(post.subline)}</p>` : ""}</div>
+</div>
+<div class="brand"><img src="${assets.logo}" alt=""><b>Seetha Rama Kalyana</b><span>${esc(post.url || "seetharamakalyana.in")} · Link in bio</span></div>
+<script>
+document.fonts.ready.then(() => {
+  const h = document.getElementById("h"), s = document.getElementById("s"), box = document.querySelector(".middle");
+  let size = ${script ? 104 : 116};
+  const lines = () => Math.round(h.getBoundingClientRect().height / (parseFloat(getComputedStyle(h).lineHeight)));
+  for (;;) {
+    h.style.fontSize = size + "px";
+    const fits = h.scrollWidth <= h.clientWidth + 1 && lines() <= 5 && box.scrollHeight <= box.clientHeight + 1;
+    if (fits || size <= 48) break;
+    size -= 4;
+  }
+  if (s) { let ss = 42; while (box.scrollHeight > box.clientHeight + 1 && ss > 28) { ss -= 2; s.style.fontSize = ss + "px"; } }
   document.body.dataset.ready = "1";
 });
 </script>

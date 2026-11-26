@@ -55,6 +55,8 @@ const ConfigSchema = new Schema(
       // The agent plans the evening posts itself. Off while the owner's /weekly-posts fill the
       // evenings: Meta's API can't see posts scheduled by hand in Business Suite.
       planEvenings: { type: Boolean, default: false },
+      // Days up to and including this date were scheduled by hand (/weekly-posts); the agent leaves them alone.
+      ownerUntil: { type: Date, default: null },
     },
     // How the ads agent paces itself (rules in adsEngine.js and the meta-ads-playbook skill).
     ads: {
@@ -209,6 +211,8 @@ export const OpsComment = model("OpsComment", CommentSchema);
 const PostSchema = new Schema(
   {
     publishAt: { type: Date, required: true, index: true },
+    // post = 7:30 pm feed post, safety = 12:30 pm "safe for daughters" card, story = 8:30 am story (9:16).
+    kind: { type: String, enum: ["post", "safety", "story"], default: "post" },
     language: String,
     topic: String,
     caption: String,

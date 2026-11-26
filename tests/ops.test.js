@@ -17,6 +17,7 @@ const ideaPlan = vi.fn();
 const organicPlan = vi.fn();
 const adsWrite = vi.fn();
 const organicReview = vi.fn(() => ({ reviews: [] }));
+const organicDaily = vi.fn(() => ({ items: [] }));
 const adsReview = vi.fn();
 const metaRead = vi.hoisted(() => ({ scheduledDays: [], scheduledTimes: [], performance: [], structure: { campaigns: [], adsets: [] }, ads: null }));
 const commentTriage = vi.fn();
@@ -34,6 +35,8 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   replyToComment: vi.fn(async () => ({ id: "r1" })),
   scheduleFacebookPhoto: vi.fn(async () => ({ id: "fbpost_1" })),
   publishInstagramPhoto: vi.fn(async () => ({ id: "igpost_1" })),
+  publishInstagramStory: vi.fn(async () => ({ id: "igstory_1" })),
+  publishFacebookStory: vi.fn(async () => ({ post_id: "fbstory_1" })),
   fetchLiveStories: vi.fn(async () => metaRead.stories ?? []),
   lastInsightErrors: vi.fn(() => ({})),
   fetchCreativeSpec: vi.fn(async () => ({
@@ -61,7 +64,7 @@ vi.mock("../src/ops/claude.js", () => ({
   spendSummary: async () => ({ totalUsd: 1.5, totalCalls: 10, monthUsd: 0.5, byTask: [] }),
   inrRate: async () => 88,
   ClaudeUnavailable: class extends Error {},
-  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : task === "ads.creatives" ? adsWrite() : task === "ads.review" ? adsReview() : task === "organic.review" ? organicReview() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
+  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : task === "organic.plan_daily" ? organicDaily() : task === "ads.creatives" ? adsWrite() : task === "ads.review" ? adsReview() : task === "organic.review" ? organicReview() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
 }));
 
 const { api, createUser, tokenFor } = await import("./helpers.js");
@@ -968,7 +971,7 @@ describe("no double posts", () => {
     await OpsPost.deleteMany({});
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live", "organic.planEvenings": false } }, { upsert: true });
     const r = await planWeek();
-    expect(r.skipped).toMatch(/evening posts are off/);
+    expect(r.skipped).toMatch(/organic posts are off/);
     expect(await OpsPost.countDocuments()).toBe(0);
   });
 
@@ -1083,5 +1086,67 @@ describe("missed runs", () => {
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "lastRuns.tick": { at: ago(90), ok: true }, tickLockUntil: null } });
     await tick({ source: "test", budgetMs: 1 });
     expect(await OpsAction.countDocuments({ type: "ops.missed_runs" })).toBe(2);
+  });
+});
+
+describe("fully automatic organic", () => {
+  it("plans daily safety posts and stories, and leaves the owner's days alone", async () => {
+    const { planWeek, safetyLanguageFor, storyLanguageFor } = await import("../src/ops/organic.js");
+    const { OpsStory } = await import("../src/ops/models.js");
+    await OpsPost.deleteMany({});
+    await OpsStory.deleteMany({});
+    metaRead.scheduledTimes = [];
+    metaRead.performance = [];
+    const ist = new Date(Date.now() + 5.5 * 3600000);
+    const add = ((8 - ist.getUTCDay()) % 7) || 7;
+    const mondayKey = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + add)).toISOString().slice(0, 10);
+    // The owner scheduled Monday by hand.
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live", "organic.planEvenings": true, "organic.ownerUntil": new Date(`${mondayKey}T12:00:00Z`) } }, { upsert: true });
+    organicPlan.mockReturnValue({ posts: [] });
+    organicDaily.mockImplementation(() => ({
+      items: [1, 2, 3, 4, 5, 6].flatMap((day) => [
+        { day, kind: "safety", idea: "daughters", topic: `Safety ${day}`, kicker: "k", headline: "h", subline: "s", cta: "c", caption: "cap", hashtags: ["a"], theme: "cream" },
+        { day, kind: "story", idea: "why351", topic: `Story ${day}`, kicker: "k", headline: "h", subline: "", cta: "", caption: "", hashtags: [], theme: "saffron" },
+      ]),
+    }));
+    const r = await planWeek();
+    expect(r).toMatchObject({ safety: 6, stories: 6 });
+    const posts = await OpsPost.find().lean();
+    const days = posts.map((p) => new Date(p.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(0, 10));
+    expect(days).not.toContain(mondayKey);
+    const story = posts.find((p) => p.kind === "story");
+    expect(new Date(story.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(11, 16)).toBe("08:30");
+    expect(story.code).toBeUndefined();
+    const safety = posts.find((p) => p.kind === "safety");
+    expect(new Date(safety.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(11, 16)).toBe("12:30");
+    expect(safety.code).toMatch(/s$/);
+    expect(safety.design.theme).toBe("maroon");
+    expect(await OpsStory.countDocuments()).toBe(6);
+    // Languages: safety Mon–Fri fixed, stories cover all five each week.
+    const monday = new Date(Date.parse(mondayKey) - 5.5 * 3600000);
+    expect([0, 1, 2, 3, 4].map((d) => safetyLanguageFor(monday, d))).toEqual(["Kannada", "Telugu", "Tamil", "Hindi", "English"]);
+    expect(new Set([0, 1, 2, 3, 4, 5, 6].map((d) => storyLanguageFor(monday, d))).size).toBe(5);
+    organicDaily.mockImplementation(() => ({ items: [] }));
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "organic.ownerUntil": null } });
+  });
+
+  it("posts a story on Instagram and Facebook at its time", async () => {
+    await OpsPost.deleteMany({});
+    const post = await OpsPost.create({ publishAt: new Date(), kind: "story", language: "Tamil", topic: "t", caption: "", design: { headline: "h" }, platforms: ["facebook", "instagram"], imageUrl: "https://ik.example.test/s.jpg", imageFileId: "fs", status: "planned" });
+    const a = await OpsAction.create({ module: "organic", type: "organic.story", status: "scheduled", title: "Story", runAt: new Date(), payload: { postId: String(post._id) }, ref: { kind: "post", id: String(post._id) } });
+    await execute(a._id);
+    expect((await OpsAction.findById(a._id)).status).toBe("done");
+    const after = await OpsPost.findById(post._id);
+    expect(after.status).toBe("published");
+    expect(after.results).toMatchObject({ instagramId: "igstory_1", facebookId: "fbstory_1" });
+    expect(imagekit.deleteFile).toHaveBeenCalledWith("fs");
+  });
+
+  it("hands stories to the renderer as 9:16", async () => {
+    const { renderQueue } = await import("../src/ops/organic.js");
+    await OpsPost.deleteMany({});
+    await OpsPost.create({ publishAt: new Date(Date.now() + 86400000), kind: "story", language: "Hindi", topic: "t", caption: "", design: { headline: "h", theme: "cream" }, status: "design" });
+    const q = await renderQueue();
+    expect(q[0]).toMatchObject({ kind: "story", url: "seetharamakalyana.in/hi" });
   });
 });

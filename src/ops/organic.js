@@ -3,7 +3,7 @@ import User from "../models/User.js";
 import { OpsCreative, OpsPost, OpsReport, getConfig, OpsStory } from "./models.js";
 import { ask } from "./claude.js";
 import { handle, notice, propose } from "./actions.js";
-import { deleteFacebookPost, fetchLiveStories, lastInsightErrors, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
+import { deleteFacebookPost, fetchLiveStories, lastInsightErrors, publishFacebookStory, publishInstagramStory, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
 
 /** Reads the Page's scheduled posts; null when Meta can't be read (then nothing is planned). */
 const scheduledOrNull = () => fetchScheduledTimes().catch((err) => {
@@ -39,6 +39,15 @@ export const languageForDay = (monday, day) => ROTATION[(Math.floor(monday.getTi
 
 /** Posts at 7:30 pm IST; an evening counts as taken if anything is scheduled 5:30–10:30 pm. */
 const POST_HOUR = 19.5;
+/** The daily "safe for daughters" card and the daily story (owner's times from /weekly-posts). */
+const SAFETY_HOUR = 12.5;
+const STORY_HOUR = 8.5;
+
+const weekIndex = (monday) => Math.floor(monday.getTime() / (7 * 86400000));
+/** Safety posts: Mon Kannada, Tue Telugu, Wed Tamil, Thu Hindi, Fri English; Sat and Sun rotate (owner's rule, 17 Nov). */
+export const safetyLanguageFor = (monday, day) => (day < 5 ? ROTATION[day] : ROTATION[(weekIndex(monday) * 2 + day - 5) % ROTATION.length]);
+/** Stories: all 5 languages each week, offset from the evening posts so a day's pieces differ. */
+export const storyLanguageFor = (monday, day) => ROTATION[(weekIndex(monday) * 7 + day + 2) % ROTATION.length];
 const EVENING = [17.5, 22.5];
 
 /** The facts and promises posts may use (safety promises from the Terms, 17 Nov 2026). */
@@ -213,12 +222,125 @@ export const captionFor = (post, platform) => {
   return [String(post.caption).trim(), "", `${post.cta}: ${link}`, "", (facebook ? tags.slice(0, 3) : tags.slice(0, 8)).join(" ")].join("\n").trim();
 };
 
+const DAILY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["day", "kind", "idea", "topic", "kicker", "headline", "subline", "cta", "caption", "hashtags", "theme"],
+        properties: {
+          day: { type: "integer", description: "0 = Monday … 6 = Sunday" },
+          kind: { type: "string", enum: ["safety", "story"] },
+          idea: { type: "string", enum: IDEA_KEYS },
+          topic: { type: "string", description: "Short English label for the calendar" },
+          kicker: { type: "string", description: "Label on the image, max 5 words, in the piece's language and script" },
+          headline: { type: "string", description: "Main line on the image, max 10 words (story: max 12 words)" },
+          subline: { type: "string", description: "One supporting line, max 12 words, or empty" },
+          cta: { type: "string", description: "safety: short invite in the language, max 6 words, no link. story: empty" },
+          caption: { type: "string", description: "safety: caption under 70 words, hook first, no link or hashtags. story: empty (stories have no caption)" },
+          hashtags: { type: "array", items: { type: "string" }, description: "safety: 4–6 hashtags without #. story: empty" },
+          theme: { type: "string", enum: THEME_NAMES },
+        },
+      },
+    },
+  },
+};
+
+/**
+ * The daily pieces /weekly-posts used to make by hand: a 12:30 pm "safe for
+ * daughters" card and an 8:30 am story, every day, in rotating languages.
+ * Days in `skip` (IST dates) are left alone.
+ */
+const planDaily = async ({ config, monday, skip, library, doubts }) => {
+  const dayKey = (d) => istDay(new Date(monday.getTime() + d * 86400000));
+  const existing = await OpsPost.find({
+    publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) },
+    kind: { $in: ["safety", "story"] },
+    status: { $nin: ["cancelled", "failed"] },
+  }).lean();
+  const has = new Set(existing.map((p) => `${p.kind}:${istDay(p.publishAt)}`));
+  const want = [];
+  for (const d of [0, 1, 2, 3, 4, 5, 6]) {
+    if (skip.has(dayKey(d))) continue;
+    if (!has.has(`safety:${dayKey(d)}`)) want.push({ day: d, kind: "safety", language: safetyLanguageFor(monday, d) });
+    if (!has.has(`story:${dayKey(d)}`)) want.push({ day: d, kind: "story", language: storyLanguageFor(monday, d) });
+  }
+  if (!want.length) return { safety: 0, stories: 0 };
+
+  const { items } = await ask({
+    task: "organic.plan_daily",
+    tier: "write",
+    system: `You write the daily organic pieces for Seetha Rama Kalyana's Facebook Page and Instagram. Never ads, never boosted.
+${config.brief}
+${CLAIM_RULES}
+${SAFETY_PROMISES}
+Two kinds:
+- "safety" (12:30 pm, a text card): "safe for daughters". It builds trust with brides' families (brides are the scarce side). Use only the safety promises above, one per card, warmly and plainly. Never say a phone number is shared only with consent (paid members can unlock contacts). Never promise the person reporting a refund. Idea is usually "daughters".
+- "story" (8:30 am, a 9:16 image for people who already follow the Page): one idea, one short line that nudges them to visit the profile and register; no caption. Rotate ideas across the week; at least one for brides' families; one may answer a real family question listed below.
+Writing: entirely in the piece's language and native script (English pieces in English), natural and warm, never a literal translation.`,
+    prompt: `Write exactly these ${want.length} pieces for the week starting ${monday.toDateString()} (day 0 = Monday):
+${want.map((w) => `- day ${w.day}, ${w.kind}, ${w.language}`).join("\n")}
+Which ideas bring members cheapest in paid ads (learn the message, never copy an ad):
+${adIdeaLines(library, [...new Set(want.map((w) => w.language))]).join("\n") || "- not enough ad data yet"}
+What families asked or doubted in the last 14 days:
+${doubts.slice(0, 10).join("\n") || "- nothing recorded"}`,
+    schema: DAILY_SCHEMA,
+    maxTokens: 9000,
+  });
+  // Our day/kind/language list is the source of truth; the writer only fills the words.
+  const written = want
+    .map((w) => {
+      const it = (items ?? []).find((x) => x.day === w.day && x.kind === w.kind);
+      return it ? { ...it, ...w, highlight: "", bullets: [], price: "" } : null;
+    })
+    .filter(Boolean);
+  if (!written.length) return { safety: 0, stories: 0 };
+  const checked = await reviewPosts(written, config);
+  let safety = 0;
+  let stories = 0;
+  for (const p of checked.kept) {
+    const story = p.kind === "story";
+    const publishAt = new Date(monday.getTime() + p.day * 86400000 + (story ? STORY_HOUR : SAFETY_HOUR) * 3600000);
+    const idea = IDEA_KEYS.includes(p.idea) ? p.idea : undefined;
+    await OpsPost.create({
+      publishAt,
+      kind: p.kind,
+      language: p.language,
+      topic: p.topic,
+      idea,
+      review: p.review,
+      format: "card",
+      caption: story ? "" : p.caption,
+      cta: story ? undefined : p.cta,
+      hashtags: story ? undefined : p.hashtags.slice(0, 6),
+      // Safety posts carry their own tracked link (…s); stories can't carry a link.
+      code: story ? undefined : `${postCode(p.language, publishAt)}s`,
+      design: { kicker: p.kicker, headline: p.headline, subline: p.subline, theme: story ? p.theme : "maroon" },
+      platforms: igConfigured() ? ["facebook", "instagram"] : ["facebook"],
+      status: "design",
+    });
+    if (story) {
+      // Registered for story tracking (results per concept on the Organic tab).
+      await OpsStory.updateOne({ plannedAt: publishAt }, { $set: { plannedAt: publishAt, language: p.language, concept: idea ?? p.topic } }, { upsert: true });
+      stories += 1;
+    } else {
+      safety += 1;
+    }
+  }
+  return { safety, stories, dailyDropped: checked.dropped };
+};
+
 export const planWeek = async () => {
   const config = await getConfig();
   // Meta's API can't see posts scheduled by hand in Business Suite, so the agent plans
   // evenings only when the owner turns this on (for weeks without /weekly-posts).
   if (!config.organic?.planEvenings) {
-    return { skipped: "The agent's evening posts are off (Settings → Organic posts); your weekly posts cover the evenings." };
+    return { skipped: "The agent's organic posts are off (Settings → Organic posts)." };
   }
   const monday = nextMonday();
   const dayKey = (d) => istDay(new Date(monday.getTime() + d * 86400000));
@@ -249,12 +371,20 @@ export const planWeek = async () => {
     });
     return { skipped: "Facebook's scheduled posts couldn't be read" };
   }
+  // Days the owner scheduled by hand (up to organic.ownerUntil) are left alone entirely.
+  const ownerUntil = config.organic?.ownerUntil ? istDay(config.organic.ownerUntil) : null;
+  const skip = new Set([0, 1, 2, 3, 4, 5, 6].map(dayKey).filter((k) => ownerUntil && k <= ownerUntil));
+  const daily = await planDaily({ config, monday, skip, library, doubts });
   const taken = new Set([
-    ...ours.map((p) => istDay(p.publishAt)),
+    ...skip,
+    ...ours.filter((p) => (p.kind ?? "post") === "post").map((p) => istDay(p.publishAt)),
     ...manual.filter((t) => istHour(t) >= EVENING[0] && istHour(t) <= EVENING[1]).map(istDay),
   ]);
   const freeDays = [0, 1, 2, 3, 4, 5, 6].filter((d) => !taken.has(dayKey(d)));
-  if (!freeDays.length) return { skipped: "Every evening next week already has a post" };
+  if (!freeDays.length) {
+    if (daily.safety + daily.stories) await requestRenders();
+    return { skipped: "Every evening next week already has a post", ...daily };
+  }
   const maxJoin = Math.max(1, Math.floor(freeDays.length / 3));
 
   const last = await OpsPost.find({ status: { $in: ["published", "scheduled"] } }).sort({ publishAt: -1 }).limit(14).lean();
@@ -330,11 +460,11 @@ ${brides ? `Brides are ${Math.round(brides.share * 100)}% of new members (${brid
   await requestRenders();
   await notice("organic", {
     type: "organic.week_planned",
-    title: `Next week's ${made} post(s) are written; images are being designed`,
+    title: `Next week is written: ${made} evening post(s), ${daily.safety} safety post(s), ${daily.stories} stor${daily.stories === 1 ? "y" : "ies"}; images are being designed`,
     reason: `${7 - freeDays.length ? `${7 - freeDays.length} evening(s) already had a post, so they were left alone. ` : ""}${checked.dropped ? `The quality check dropped ${checked.dropped} post(s). ` : ""}${joins} "join" post(s), the rest trust and value posts. Planned from how your last ${perf.count} posts did (${perf.signups} sign-ups traced to post links). Open Organic or Calendar to see or cancel any of them.`,
     payload: { dedupeKey: `week:${monday.toISOString().slice(0, 10)}` },
   });
-  return { planned: made, joins, dropped: checked.dropped, skippedDays: 7 - freeDays.length, learnedFrom: perf.count };
+  return { planned: made, joins, dropped: checked.dropped, skippedDays: 7 - freeDays.length, learnedFrom: perf.count, ...daily };
 };
 
 /**
@@ -482,7 +612,7 @@ export const renderQueue = async () => {
   const card = (kind) => (p) => ({
     _id: String(p._id),
     // Organic "join" posts are drawn in the ad layout too.
-    kind: kind === "post" && p.format === "join" ? "ad" : kind,
+    kind: kind === "post" && p.kind === "story" ? "story" : kind === "post" && p.format === "join" ? "ad" : kind,
     language: p.language,
     // The short address printed on the card, in the post's language (people type it from Instagram).
     url: kind === "post" ? shortUrl(p.language) : undefined,
@@ -497,7 +627,7 @@ export const renderQueue = async () => {
     cta: p.design?.cta,
   });
   const [posts, creatives] = await Promise.all([
-    OpsPost.find({ status: "design" }).sort({ publishAt: 1 }).limit(14).lean(),
+    OpsPost.find({ status: "design" }).sort({ publishAt: 1 }).limit(30).lean(),
     OpsCreative.find({ status: "design" }).sort({ createdAt: 1 }).limit(10).lean(),
   ]);
   return [...posts.map(card("post")), ...creatives.map(card("ad"))];
@@ -538,9 +668,24 @@ export const renderDone = async (postId, jpegBase64) => {
   post.imageFileId = up.fileId;
   post.status = "planned";
   await post.save();
+  const label = { story: "Story", safety: "Safety post" }[post.kind] ?? "Post";
+  const when = post.publishAt.toLocaleString("en-IN", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", timeZone: "Asia/Kolkata" });
+  if (post.kind === "story") {
+    // The API can't schedule stories: the agent posts it at its time (the image waits on ImageKit until then).
+    await propose("organic", {
+      type: "organic.story",
+      title: `${when} · Story · ${post.language}: ${post.topic}`,
+      reason: "Weekly organic plan; story designed by the agent.",
+      effect: "Posts the story on Instagram and Facebook at this time.",
+      payload: { postId: String(post._id) },
+      ref: { kind: "post", id: String(post._id) },
+      runAt: post.publishAt,
+    });
+    return { imageUrl: up.url };
+  }
   await propose("organic", {
     type: "organic.schedule",
-    title: `${post.publishAt.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "Asia/Kolkata" })} · ${post.language}: ${post.topic}`,
+    title: `${when} · ${label} · ${post.language}: ${post.topic}`,
     reason: "Weekly organic plan; image designed by the agent.",
     effect: "Schedules the Facebook post now; Instagram publishes at the same time.",
     payload: { postId: String(post._id) },
@@ -590,6 +735,33 @@ handle("organic.schedule", async (action) => {
       runAt: post.publishAt,
     },
   };
+});
+
+handle("organic.story", async (action) => {
+  const post = await OpsPost.findById(action.payload.postId);
+  if (!post || post.status === "cancelled") return { skipped: true };
+  if (!post.imageUrl) throw new Error("The story has no image yet");
+  const out = {};
+  const errors = [];
+  if (post.platforms.includes("instagram")) {
+    try {
+      out.instagramId = (await publishInstagramStory({ imageUrl: post.imageUrl })).id;
+    } catch (err) {
+      errors.push(`Instagram: ${err.message}`);
+    }
+  }
+  try {
+    out.facebookId = (await publishFacebookStory({ imageUrl: post.imageUrl })).post_id ?? "posted";
+  } catch (err) {
+    errors.push(`Facebook: ${err.message}`);
+  }
+  if (!out.instagramId && !out.facebookId) throw new Error(errors.join(" · "));
+  post.results = { ...post.results, ...out, ...(errors.length ? { errors } : {}) };
+  post.status = "published";
+  post.markModified("results");
+  await post.save();
+  await deletePostImage(post);
+  return { ...out, ...(errors.length ? { errors } : {}) };
 });
 
 handle("organic.publish_ig", async (action) => {
