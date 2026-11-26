@@ -1,9 +1,9 @@
 import imagekit from "../config/imageKit.js";
 import User from "../models/User.js";
-import { OpsCreative, OpsPost, OpsReport, getConfig } from "./models.js";
+import { OpsCreative, OpsPost, OpsReport, getConfig, OpsStory } from "./models.js";
 import { ask } from "./claude.js";
 import { handle, notice, propose } from "./actions.js";
-import { deleteFacebookPost, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
+import { deleteFacebookPost, fetchLiveStories, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
 
 /** Reads the Page's scheduled posts; null when Meta can't be read (then nothing is planned). */
 const scheduledOrNull = () => fetchScheduledTimes().catch((err) => {
@@ -372,6 +372,62 @@ export const recordOrganicStats = async () => {
     { upsert: true }
   );
   return { posts: posts.length, signups: totals.total };
+};
+
+/**
+ * Every 3 hours: the latest numbers of the Instagram stories that are live,
+ * matched to the story /weekly-posts planned for that time (±2 h), so story
+ * concepts can be compared on reach, replies, profile visits and exits.
+ */
+export const recordStoryStats = async () => {
+  const live = await fetchLiveStories();
+  let matched = 0;
+  for (const s of live) {
+    const fields = { ...s, readAt: new Date() };
+    let doc = await OpsStory.findOne({ igId: s.igId });
+    if (!doc) {
+      doc = await OpsStory.findOne({
+        igId: null,
+        plannedAt: { $gte: new Date(s.at.getTime() - 2 * 3600000), $lte: new Date(s.at.getTime() + 2 * 3600000) },
+      }).sort({ plannedAt: 1 });
+    }
+    if (doc) {
+      if (doc.language) matched += 1;
+      doc.set(fields);
+      await doc.save();
+    } else {
+      await OpsStory.create(fields);
+    }
+  }
+  return { stories: live.length, matched };
+};
+
+/** Results per story concept (stories measured in the last `days` days). */
+export const storyConcepts = (stories) => {
+  const groups = new Map();
+  for (const s of stories) {
+    if (s.reach == null) continue;
+    const key = s.concept || "not tagged";
+    const g = groups.get(key) ?? { concept: key, stories: 0, reach: 0, profileVisits: 0, replies: 0, follows: 0, exited: 0 };
+    g.stories += 1;
+    g.reach += s.reach ?? 0;
+    g.profileVisits += s.profileVisits ?? 0;
+    g.replies += s.replies ?? 0;
+    g.follows += s.follows ?? 0;
+    g.exited += s.navigation?.exited ?? 0;
+    groups.set(key, g);
+  }
+  return [...groups.values()]
+    .map((g) => ({
+      concept: g.concept,
+      stories: g.stories,
+      avgReach: Math.round(g.reach / g.stories),
+      profileVisitsPer100: g.reach ? Math.round((g.profileVisits / g.reach) * 1000) / 10 : 0,
+      repliesPer100: g.reach ? Math.round((g.replies / g.reach) * 1000) / 10 : 0,
+      follows: g.follows,
+      exitRate: g.reach ? Math.round((g.exited / g.reach) * 100) : null,
+    }))
+    .sort((a, b) => b.profileVisitsPer100 - a.profileVisitsPer100 || b.avgReach - a.avgReach);
 };
 
 /**

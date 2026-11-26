@@ -2,14 +2,14 @@ import crypto from "crypto";
 import { Router } from "express";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
-import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig } from "../../ops/models.js";
+import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory } from "../../ops/models.js";
 import { cancel, execute, undo } from "../../ops/actions.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
 import { adsSettings, unitStates } from "../../ops/ads.js";
 import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
 import { toolsOverview, updateTool } from "../../ops/tools.js";
 import { growth } from "../../ops/review.js";
-import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek, unscheduleFacebook } from "../../ops/organic.js";
+import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek, storyConcepts, unscheduleFacebook } from "../../ops/organic.js";
 import { planIdea } from "../../ops/ideas.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
@@ -376,15 +376,51 @@ router.get(
 router.get(
   "/manage/ops/organic",
   wrap(async (_req, res) => {
-    const [posts, stats, signups] = await Promise.all([
+    const [posts, stats, signups, stories] = await Promise.all([
       OpsPost.find({ publishAt: { $gte: new Date(Date.now() - 21 * 86400000) } }).sort({ publishAt: 1 }).lean(),
       OpsReport.findOne({ kind: "organic" }).sort({ createdAt: -1 }).lean(),
       organicSignups(28),
+      OpsStory.find({ $or: [{ at: { $gte: new Date(Date.now() - 35 * 86400000) } }, { plannedAt: { $gte: new Date(Date.now() - 35 * 86400000) } }] })
+        .sort({ plannedAt: -1, at: -1 })
+        .lean(),
     ]);
     // What's scheduled on the Page (by hand or by the agent), so doubles are visible.
     const scheduled = await fetchScheduledPosts().catch((err) => ({ error: err.message }));
     // Live sign-up counts per tracking code (the stored report is refreshed daily).
-    return res.json({ posts, scheduled, stats: stats ? { ...stats.data, period: stats.period } : null, signups: Object.fromEntries(signups) });
+    return res.json({
+      posts,
+      scheduled,
+      stats: stats ? { ...stats.data, period: stats.period } : null,
+      signups: Object.fromEntries(signups),
+      stories,
+      storyConcepts: storyConcepts(stories),
+    });
+  })
+);
+
+/**
+ * /weekly-posts registers the stories it scheduled (time, language, concept),
+ * so their results can be compared per concept. Same time again = updated.
+ */
+router.post(
+  "/manage/ops/organic/stories",
+  wrap(async (req, res) => {
+    const list = Array.isArray(req.body?.stories) ? req.body.stories.slice(0, 50) : [];
+    let saved = 0;
+    for (const s of list) {
+      const at = new Date(s?.at);
+      if (Number.isNaN(at.getTime())) continue;
+      const fields = {
+        plannedAt: at,
+        language: String(s.language ?? "").slice(0, 20),
+        concept: String(s.concept ?? "").slice(0, 60),
+        note: String(s.note ?? "").slice(0, 200),
+      };
+      await OpsStory.updateOne({ plannedAt: at }, { $set: fields }, { upsert: true });
+      saved += 1;
+    }
+    if (!saved) return res.status(400).json({ msg: "Send { stories: [{ at, language, concept }] }" });
+    return res.json({ saved, msg: `Saved ${saved} planned stor${saved === 1 ? "y" : "ies"}` });
   })
 );
 

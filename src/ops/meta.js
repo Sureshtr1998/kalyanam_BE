@@ -461,7 +461,6 @@ export const fetchPostPerformance = async (days = 28) => {
   return out;
 };
 
-/** Times of the Facebook posts already scheduled in Meta (e.g. by hand in Business Suite). */
 /**
  * Posts scheduled on the Facebook Page (by hand in Business Suite or by the
  * agent). Throws when Meta can't be read, so the planner never mistakes a
@@ -478,6 +477,50 @@ export const fetchScheduledPosts = async () => {
 };
 
 export const fetchScheduledTimes = async () => (await fetchScheduledPosts()).map((p) => p.at);
+
+/**
+ * Instagram stories that are live now, with their insights. The API lists a
+ * story only for its 24 hours, so this is read every few hours and the last
+ * reading stands. Facebook Page stories aren't read: they get ~0 views.
+ */
+export const fetchLiveStories = async () => {
+  await resolvePage();
+  if (!IG()) return [];
+  const token = await pageToken();
+  const list = await graphGet(`${IG()}/stories`, { fields: "id,media_type,timestamp,permalink" }, token);
+  const out = [];
+  for (const s of list?.data ?? []) {
+    const one = (metric) => settle(graphGet(`${s.id}/insights`, { metric }, token)).then((r) => metricValue(r, metric));
+    const [reach, replies, shares, profileVisits, follows, nav] = await Promise.all([
+      one("reach"),
+      one("replies"),
+      one("shares"),
+      one("profile_visits"),
+      one("follows"),
+      settle(graphGet(`${s.id}/insights`, { metric: "navigation", breakdown: "story_navigation_action_type", metric_type: "total_value" }, token)),
+    ]);
+    const byAction = {};
+    for (const r of nav?.data?.[0]?.total_value?.breakdowns?.[0]?.results ?? []) byAction[r.dimension_values?.[0]] = r.value;
+    out.push({
+      igId: s.id,
+      at: new Date(s.timestamp),
+      format: s.media_type,
+      permalink: s.permalink,
+      reach,
+      replies,
+      shares,
+      profileVisits,
+      follows,
+      navigation: {
+        forward: byAction.tap_forward ?? null,
+        back: byAction.tap_back ?? null,
+        exited: byAction.tap_exit ?? null,
+        nextStory: byAction.swipe_forward ?? null,
+      },
+    });
+  }
+  return out;
+};
 
 /** Removes a scheduled (or published) Facebook post or photo the agent made. */
 export const deleteFacebookPost = async (id) => graphDelete(id, await pageToken());

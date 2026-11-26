@@ -1,12 +1,12 @@
 import { OpsConfig, getConfig } from "./models.js";
 import { notice, runDue } from "./actions.js";
-import { metaConfigured, pageConfigured, resolvePage } from "./meta.js";
+import { metaConfigured, pageConfigured, resolvePage, igConfigured } from "./meta.js";
 import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
 import { runSupportCycle } from "./support.js";
 import { runCommentsCycle } from "./comments.js";
-import { planWeek, recordOrganicStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
+import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
 import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
@@ -69,6 +69,13 @@ const JOBS = [
     ready: () => pageConfigured(),
     due: (last, t) => last?.date !== t.date && t.hour >= 7,
     run: () => recordOrganicStats(),
+  },
+  {
+    // Instagram stories' numbers while they're live (the API shows a story for 24 h only).
+    name: "storyStats",
+    ready: () => igConfigured(),
+    due: (last) => !last || Date.now() - new Date(last.at).getTime() > 3 * HOUR,
+    run: () => recordStoryStats(),
   },
   {
     name: "seoWeekly",

@@ -34,6 +34,7 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   replyToComment: vi.fn(async () => ({ id: "r1" })),
   scheduleFacebookPhoto: vi.fn(async () => ({ id: "fbpost_1" })),
   publishInstagramPhoto: vi.fn(async () => ({ id: "igpost_1" })),
+  fetchLiveStories: vi.fn(async () => metaRead.stories ?? []),
   fetchCreativeSpec: vi.fn(async () => ({
     object_story_spec: { page_id: "pg1", link_data: { link: "https://www.seetharamakalyana.in/kn", message: "old", name: "old", picture: "x", call_to_action: { type: "SIGN_UP" } } },
     url_tags: "utm_source=meta",
@@ -1023,5 +1024,39 @@ describe("no double posts", () => {
     metaCalls.deleteFacebookPost.mockImplementation(async () => ({ success: true }));
     expect((await OpsPost.findById(stuck._id)).results.facebookRemoveTries).toBe(3);
     expect(await OpsAction.countDocuments({ type: "organic.unschedule_failed", priority: "urgent" })).toBe(1);
+  });
+});
+
+describe("stories", () => {
+  it("matches live stories to the planned ones and ranks concepts", async () => {
+    const { recordStoryStats } = await import("../src/ops/organic.js");
+    const { OpsStory } = await import("../src/ops/models.js");
+    await OpsStory.deleteMany({});
+    const token = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const day1 = new Date("2026-12-01T03:00:00Z"); // 8:30 am IST
+    const day2 = new Date("2026-12-02T03:00:00Z");
+    const saved = await api()
+      .post("/api/manage/ops/organic/stories")
+      .set("x-auth-token", token)
+      .send({ stories: [{ at: day1, language: "Tamil", concept: "why351" }, { at: day2, language: "Hindi", concept: "daughters" }, { at: "nonsense" }] });
+    expect(saved.body.saved).toBe(2);
+
+    metaRead.stories = [
+      { igId: "st1", at: new Date(day1.getTime() + 60000), reach: 200, replies: 2, shares: 0, profileVisits: 8, follows: 1, navigation: { forward: 120, back: 4, exited: 40, nextStory: 10 } },
+      { igId: "st2", at: new Date(day2.getTime() + 120000), reach: 100, replies: 0, shares: 0, profileVisits: 1, follows: 0, navigation: { forward: 70, back: 1, exited: 20, nextStory: 5 } },
+      { igId: "st3", at: new Date("2026-12-03T12:30:00Z"), reach: 50, replies: 0, shares: 0, profileVisits: 0, follows: 0, navigation: {} },
+    ];
+    expect(await recordStoryStats()).toEqual({ stories: 3, matched: 2 });
+    // Read again later: same rows, newer numbers.
+    metaRead.stories[0].reach = 260;
+    await recordStoryStats();
+    expect(await OpsStory.countDocuments()).toBe(3);
+    expect((await OpsStory.findOne({ igId: "st1" })).toObject()).toMatchObject({ language: "Tamil", concept: "why351", reach: 260 });
+
+    const r = await api().get("/api/manage/ops/organic").set("x-auth-token", token);
+    expect(r.body.stories).toHaveLength(3);
+    expect(r.body.storyConcepts.map((c) => c.concept)).toEqual(["why351", "daughters", "not tagged"]);
+    expect(r.body.storyConcepts[0]).toMatchObject({ stories: 1, avgReach: 260, profileVisitsPer100: 3.1 });
+    metaRead.stories = [];
   });
 });

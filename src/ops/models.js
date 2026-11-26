@@ -319,6 +319,34 @@ const UsageSchema = new Schema(
 export const OpsUsage = model("OpsUsage", UsageSchema);
 
 /** The weekly business review and other long reports. */
+/**
+ * A story on Instagram. /weekly-posts registers each planned story (time,
+ * language, concept); the agent adds its results while it's live (the API
+ * shows a story for 24 hours only). Concepts are then compared on results.
+ */
+const StorySchema = new Schema(
+  {
+    plannedAt: Date,
+    language: String,
+    concept: String,
+    note: String,
+    igId: { type: String, index: true, sparse: true },
+    at: Date,
+    format: String,
+    permalink: String,
+    reach: Number,
+    replies: Number,
+    shares: Number,
+    profileVisits: Number,
+    follows: Number,
+    navigation: { forward: Number, back: Number, exited: Number, nextStory: Number },
+    readAt: Date,
+  },
+  { timestamps: true }
+);
+StorySchema.index({ plannedAt: 1 });
+export const OpsStory = model("OpsStory", StorySchema);
+
 const ReportSchema = new Schema(
   {
     kind: { type: String, enum: ["weekly", "seo", "monthly", "organic"], required: true },
