@@ -1,0 +1,62 @@
+# The Developer tab of the admin Ops panel opens issues labelled ops-read or
+# ops-write. This runs Claude Code on them:
+#  - ops-read:  answers in a comment; file edits are disabled
+#  - ops-write: makes the change on its own claude/issue-N-… branch
+#               (Vercel builds a preview of it). Merging to master only
+#               happens when the admin presses Deploy in the panel.
+# Follow-up "@claude …" comments (sent from the panel) continue the work.
+# Needs the repository secret ANTHROPIC_API_KEY.
+name: Ops agent
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  read:
+    if: github.event_name == 'issues' && github.event.label.name == 'ops-read'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: "ops-read"
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 20
+            --disallowedTools Edit,Write,MultiEdit,NotebookEdit
+
+  write:
+    if: github.event_name == 'issues' && github.event.label.name == 'ops-write'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: "ops-write"
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 40
+            --allowedTools "Bash(npm install),Bash(npm ci),Bash(npm run build),Bash(npm run lint),Bash(npm test),Bash(npx vitest run)"
+
+  follow-up:
+    if: github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 30

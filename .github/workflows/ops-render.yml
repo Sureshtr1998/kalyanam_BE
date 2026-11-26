@@ -1,0 +1,34 @@
+# Draws the organic post images the Ops agent planned. Chromium is used because
+# only a real browser engine shapes Kannada, Telugu, Tamil and Hindi correctly.
+# Started by the backend (repository_dispatch "ops-render"), or by hand.
+# The backend sends its address and a 3-hour pass with each request, so no
+# repository secrets are needed. (BASE_URL / INTERNAL_ROUTE_SECRET secrets
+# still work for running it by hand.)
+name: Ops render
+
+on:
+  repository_dispatch:
+    types: [ops-render]
+  workflow_dispatch:
+
+concurrency:
+  group: ops-render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/ops-render.mjs
+        env:
+          BASE_URL: ${{ github.event.client_payload.base_url || secrets.BASE_URL }}
+          RENDER_TOKEN: ${{ github.event.client_payload.token }}
+          INTERNAL_ROUTE_SECRET: ${{ secrets.INTERNAL_ROUTE_SECRET }}

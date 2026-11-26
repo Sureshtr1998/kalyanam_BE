@@ -37,6 +37,9 @@ app.use(cors(corsOptions));
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 app.use(express.urlencoded({ extended: true }));
 
+// Rendered post images (base64 JPEG) from the Ops render Action are larger than the default 100 kB.
+app.use("/api/ops/render-done", express.json({ limit: "4mb" }));
+
 // Keep the raw body: Razorpay webhook signatures are computed over it.
 app.use(
   express.json({

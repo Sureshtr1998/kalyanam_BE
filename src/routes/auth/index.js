@@ -14,6 +14,7 @@ import abandonedRoutes from "./abandoned.js";
 import adSpendRoutes from "./adSpend.js";
 import referralRoutes from "./referrals.js";
 import backupRoutes from "./backups.js";
+import opsRoutes from "./ops.js";
 
 const router = Router();
 
@@ -43,6 +44,8 @@ router.use(referralRoutes);
 router.use(abandonedRoutes);
 router.use(adSpendRoutes);
 router.use(backupRoutes);
+// Ops agent: admin Ops tab + the 15-minute tick.
+router.use(opsRoutes);
 router.use(manageRoutes);
 
 export default router;

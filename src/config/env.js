@@ -32,6 +32,7 @@ const RECOMMENDED = {
   TIMEZONEDB_KEY: "astrology time zones fail",
   BACKUP_SECRET: "database backups can't be saved to the cloud (Admin → Backups)",
   CRON_SECRET: "the daily database backup doesn't run",
+  ANTHROPIC_API_KEY: "the Ops agent can't sort mail, reply or plan (admin → Ops)",
 };
 
 export const isProduction =

@@ -1,0 +1,345 @@
+/*
+ * Meta Graph / Marketing API calls for the ops agent. Uses the system-user
+ * token in META_ADS_TOKEN. Reading needs ads_read; changing budgets needs
+ * ads_management; comments and posts need the Page and Instagram
+ * permissions (see .env.example). The token never leaves the server.
+ */
+
+const GRAPH = "https://graph.facebook.com/v22.0";
+
+export const LEAD_ACTIONS = ["offsite_conversion.fb_pixel_lead", "lead"];
+export const PAID_ACTIONS = ["offsite_conversion.fb_pixel_complete_registration", "complete_registration"];
+
+export const metaConfigured = () => !!process.env.META_ADS_TOKEN && !!accountId();
+/*
+ * The Facebook Page and Instagram account are found from the token itself
+ * (the Page assigned to the system user, and its linked Instagram account),
+ * so META_PAGE_ID / META_IG_USER_ID are only needed to override that.
+ */
+let pageCache = { pageId: null, igId: null, at: 0, error: null };
+const PAGE = () => process.env.META_PAGE_ID || pageCache.pageId;
+const IG = () => process.env.META_IG_USER_ID || pageCache.igId;
+
+/** Finds the Page and its Instagram account (cached for an hour). */
+export const resolvePage = async () => {
+  if (!process.env.META_ADS_TOKEN) return null;
+  if (process.env.META_PAGE_ID && process.env.META_IG_USER_ID) return { pageId: PAGE(), igId: IG() };
+  if (pageCache.at && Date.now() - pageCache.at < 3600_000) return pageCache.pageId ? pageCache : null;
+  try {
+    const r = await graphGet("me/accounts", { fields: "id,name,instagram_business_account", limit: 25 });
+    const page = (r.data ?? []).find((p) => !process.env.META_PAGE_ID || p.id === process.env.META_PAGE_ID) ?? null;
+    pageCache = { pageId: page?.id ?? null, igId: page?.instagram_business_account?.id ?? null, name: page?.name, at: Date.now(), error: page ? null : "No Facebook Page is assigned to the system user" };
+  } catch (err) {
+    pageCache = { pageId: null, igId: null, at: Date.now(), error: err.message };
+  }
+  return pageCache.pageId ? pageCache : null;
+};
+
+export const pageConfigured = () => !!process.env.META_ADS_TOKEN && !!PAGE();
+export const igConfigured = () => pageConfigured() && !!IG();
+export const pageLookupError = () => pageCache.error;
+
+export const accountId = () => {
+  const raw = String(process.env.META_AD_ACCOUNT_ID || "").trim();
+  return raw ? (raw.startsWith("act_") ? raw : `act_${raw}`) : "";
+};
+
+const encode = (params) =>
+  Object.fromEntries(Object.entries(params).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]));
+
+const call = async (method, pathOrUrl, params = {}, token = process.env.META_ADS_TOKEN) => {
+  const url = new URL(pathOrUrl.startsWith("http") ? pathOrUrl : `${GRAPH}/${pathOrUrl}`);
+  /** @type {RequestInit} */
+  const init = { method, headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) };
+  if (method === "GET" || method === "DELETE") {
+    for (const [k, v] of Object.entries(encode(params))) url.searchParams.set(k, v);
+  } else {
+    init.body = new URLSearchParams(encode(params));
+  }
+  const res = await fetch(url, init);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.error) {
+    throw Object.assign(new Error(body.error?.message || `Meta API ${res.status}`), { meta: body.error });
+  }
+  return body;
+};
+
+export const graphGet = (path, params, token) => call("GET", path, params, token);
+export const graphPost = (path, params, token) => call("POST", path, params, token);
+export const graphDelete = (path, token) => call("DELETE", path, {}, token);
+
+/** Follows `paging.next` until done (or `max` rows). */
+export const graphAll = async (path, params, token, max = 2000) => {
+  const rows = [];
+  let page = await graphGet(path, params, token);
+  for (;;) {
+    rows.push(...(page.data ?? []));
+    if (!page.paging?.next || rows.length >= max) return rows;
+    page = await graphGet(page.paging.next, {}, token);
+  }
+};
+
+/** First matching action count (Meta reports the same event under several names). */
+export const actionCount = (actions, types) => {
+  for (const type of types) {
+    const hit = actions?.find((a) => a.action_type === type);
+    if (hit) return Number(hit.value) || 0;
+  }
+  return 0;
+};
+
+/** "YYYY-MM-DD" in the given IANA zone, `back` days ago. */
+export const dayIn = (tz, back = 0) =>
+  new Date(Date.now() - back * 86400000).toLocaleDateString("en-CA", { timeZone: tz });
+
+/**
+ * The ad account and its money. For a prepaid account the spendable balance
+ * only appears inside funding_source_details.display_string, e.g.
+ * "Available balance (₹4,288.12 INR)", so it is read from there.
+ */
+export const fetchAccount = async () => {
+  const a = await graphGet(accountId(), {
+    fields: "name,currency,timezone_name,account_status,balance,amount_spent,spend_cap,is_prepay_account,funding_source_details",
+  });
+  const display = String(a.funding_source_details?.display_string || "");
+  const m = display.replace(/,/g, "").match(/(\d+(?:\.\d+)?)/);
+  const available = a.is_prepay_account && m ? Number(m[1]) : null;
+  const cap = Number(a.spend_cap) || 0;
+  return {
+    id: accountId(),
+    name: a.name,
+    currency: a.currency,
+    timezone: a.timezone_name || "Asia/Kolkata",
+    status: a.account_status,
+    prepaid: !!a.is_prepay_account,
+    // Amounts from Meta are in paise.
+    available,
+    spendCapLeft: cap ? (cap - Number(a.amount_spent || 0)) / 100 : null,
+    fundingLabel: display || null,
+  };
+};
+
+/** Campaigns and ad sets with budgets (₹) and status. */
+export const fetchStructure = async () => {
+  const act = accountId();
+  const [campaigns, adsets] = await Promise.all([
+    graphAll(`${act}/campaigns`, { fields: "id,name,daily_budget,effective_status", limit: 200 }),
+    graphAll(`${act}/adsets`, { fields: "id,name,campaign_id,daily_budget,effective_status,updated_time", limit: 200 }),
+  ]);
+  const rupees = (v) => (v ? Number(v) / 100 : null);
+  return {
+    campaigns: campaigns.map((c) => ({ id: c.id, name: c.name, dailyBudget: rupees(c.daily_budget), status: c.effective_status })),
+    adsets: adsets.map((s) => ({
+      id: s.id,
+      name: s.name,
+      campaignId: s.campaign_id,
+      dailyBudget: rupees(s.daily_budget),
+      status: s.effective_status,
+      updatedAt: s.updated_time,
+    })),
+  };
+};
+
+/** Daily insights for every entity at `level` between two dates. */
+export const fetchInsights = async (level, since, until, breakdowns) => {
+  const idField = { campaign: "campaign_id", adset: "adset_id", ad: "ad_id", account: "account_id" }[level];
+  const nameField = { campaign: "campaign_name", adset: "adset_name", ad: "ad_name", account: "account_name" }[level];
+  const rows = await graphAll(`${accountId()}/insights`, {
+    level,
+    fields: [idField, nameField, "campaign_id", "campaign_name", "adset_id", "spend", "impressions", "reach", "frequency", "inline_link_clicks", "ctr", "actions"]
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .join(","),
+    time_range: { since, until },
+    time_increment: 1,
+    limit: 500,
+    ...(breakdowns ? { breakdowns } : {}),
+  });
+  return rows.map((r) => ({
+    date: r.date_start,
+    entityId: breakdowns ? `${r.publisher_platform}` : r[idField],
+    name: breakdowns ? r.publisher_platform : r[nameField],
+    campaignId: r.campaign_id,
+    campaignName: r.campaign_name,
+    adsetId: r.adset_id,
+    spend: Number(r.spend) || 0,
+    impressions: Number(r.impressions) || 0,
+    reach: Number(r.reach) || 0,
+    frequency: Number(r.frequency) || 0,
+    clicks: Number(r.inline_link_clicks) || 0,
+    ctr: Number(r.ctr) || 0,
+    leads: actionCount(r.actions, LEAD_ACTIONS),
+    paid: actionCount(r.actions, PAID_ACTIONS),
+  }));
+};
+
+/** Sets a campaign's or ad set's daily budget (₹). Needs ads_management. */
+export const setDailyBudget = (entityId, rupees) =>
+  graphPost(entityId, { daily_budget: String(Math.round(rupees * 100)) });
+
+export const setStatus = (entityId, status) => graphPost(entityId, { status });
+
+/* ------------------------- creating ads and ad sets ------------------------ */
+
+/** Every ad with its ad set, status and creative id. */
+export const fetchAds = () =>
+  graphAll(`${accountId()}/ads`, { fields: "id,name,adset_id,campaign_id,effective_status,creative{id}", limit: 300 });
+
+/** Uploads a JPEG (base64) to the ad account's image library; returns its hash. */
+export const uploadAdImage = async (base64, name) => {
+  const r = await graphPost(`${accountId()}/adimages`, { bytes: base64, name });
+  const first = Object.values(r.images ?? {})[0];
+  if (!first?.hash) throw new Error("Meta didn't return an image hash");
+  return first.hash;
+};
+
+/** The creative spec of an ad (link, CTA, page, tracking), to base a new creative on. */
+export const fetchCreativeSpec = async (adId) => {
+  const ad = await graphGet(adId, { fields: "creative{object_story_spec,asset_feed_spec,url_tags,degrees_of_freedom_spec}" });
+  return ad.creative;
+};
+
+export const createCreative = (fields) => graphPost(`${accountId()}/adcreatives`, fields);
+
+/** Copies an ad into an ad set (keeps its tracking and settings), paused. */
+export const copyAd = async (adId, adsetId) => {
+  const r = await graphPost(`${adId}/copies`, { adset_id: adsetId, status_option: "PAUSED" });
+  return r.copied_ad_id ?? r.ad_object_ids?.[0]?.copied_id;
+};
+
+/** Copies an ad set with its ads, paused. */
+export const copyAdset = async (adsetId) => {
+  const r = await graphPost(`${adsetId}/copies`, { deep_copy: "true", status_option: "PAUSED" });
+  return r.copied_adset_id ?? r.ad_object_ids?.[0]?.copied_id;
+};
+
+export const fetchAdset = (adsetId) => graphGet(adsetId, { fields: "id,name,campaign_id,daily_budget,targeting,effective_status" });
+
+/** Finds Meta's location key for a city, region or country name. */
+export const searchLocation = async (q) => {
+  const r = await graphGet("search", { type: "adgeolocation", q, location_types: ["city", "region", "country"], limit: 1 });
+  return r.data?.[0] ?? null;
+};
+
+/* ---------------------------- Page & Instagram ---------------------------- */
+
+let pageTokenCache = { token: null, at: 0 };
+/** The Page access token, derived from the system-user token (cached 1 h). */
+export const pageToken = async () => {
+  if (pageTokenCache.token && Date.now() - pageTokenCache.at < 3600_000) return pageTokenCache.token;
+  const { access_token } = await graphGet(PAGE(), { fields: "access_token" });
+  pageTokenCache = { token: access_token, at: Date.now() };
+  return access_token;
+};
+
+/** The Facebook post and Instagram media behind each active ad (ads aren't in the Page feed). */
+const adPosts = async () => {
+  if (!metaConfigured()) return { facebook: [], instagram: [] };
+  const ads = await graphAll(`${accountId()}/ads`, {
+    fields: "effective_status,creative{effective_object_story_id,effective_instagram_media_id}",
+    effective_status: ["ACTIVE"],
+    limit: 200,
+  }).catch(() => []);
+  const fb = new Set();
+  const ig = new Set();
+  for (const a of ads) {
+    if (a.creative?.effective_object_story_id) fb.add(a.creative.effective_object_story_id);
+    if (a.creative?.effective_instagram_media_id) ig.add(a.creative.effective_instagram_media_id);
+  }
+  return { facebook: [...fb], instagram: [...ig] };
+};
+
+/** Recent comments on Page posts and on the Facebook posts behind active ads. */
+export const fetchPageComments = async () => {
+  const token = await pageToken();
+  const posts = await graphGet(`${PAGE()}/feed`, {
+    fields: "id,created_time,comments.limit(50).order(reverse_chronological){id,message,from,created_time,is_hidden}",
+    limit: 15,
+  }, token);
+  const { facebook } = await adPosts();
+  const seen = new Set((posts.data ?? []).map((p) => p.id));
+  for (const id of facebook.filter((x) => !seen.has(x)).slice(0, 60)) {
+    const c = await graphGet(`${id}/comments`, { fields: "id,message,from,created_time,is_hidden", order: "reverse_chronological", limit: 50 }, token).catch(() => null);
+    if (c?.data?.length) posts.data.push({ id, comments: c });
+  }
+  return (posts.data ?? []).flatMap((p) =>
+    (p.comments?.data ?? []).map((c) => ({
+      platform: "facebook",
+      commentId: c.id,
+      postId: p.id,
+      author: c.from?.name || "Someone",
+      text: c.message || "",
+      createdAt: new Date(c.created_time),
+      hidden: !!c.is_hidden,
+      // Our own Page's comments (e.g. our replies) are skipped.
+      ours: c.from?.id === PAGE(),
+    }))
+  );
+};
+
+/** Recent Instagram comments, on posts and on the Instagram side of active ads. */
+export const fetchIgComments = async () => {
+  const token = await pageToken();
+  const media = await graphGet(`${IG()}/media`, {
+    fields: "id,timestamp,comments.limit(50){id,text,username,timestamp,hidden}",
+    limit: 15,
+  }, token);
+  const { instagram } = await adPosts();
+  const seen = new Set((media.data ?? []).map((m) => m.id));
+  for (const id of instagram.filter((x) => !seen.has(x)).slice(0, 60)) {
+    const c = await graphGet(`${id}/comments`, { fields: "id,text,username,timestamp,hidden", limit: 50 }, token).catch(() => null);
+    if (c?.data?.length) media.data.push({ id, comments: c });
+  }
+  const me = await igUsername(token);
+  return (media.data ?? []).flatMap((m) =>
+    (m.comments?.data ?? []).map((c) => ({
+      platform: "instagram",
+      commentId: c.id,
+      postId: m.id,
+      author: c.username || "someone",
+      text: c.text || "",
+      createdAt: new Date(c.timestamp),
+      hidden: !!c.hidden,
+      ours: c.username === me,
+    }))
+  );
+};
+
+let igName = null;
+const igUsername = async (token) => {
+  igName ??= (await graphGet(IG(), { fields: "username" }, token)).username;
+  return igName;
+};
+
+export const hideComment = async (platform, id) =>
+  graphPost(id, platform === "instagram" ? { hide: "true" } : { is_hidden: "true" }, await pageToken());
+
+export const deleteComment = async (id) => graphDelete(id, await pageToken());
+
+export const replyToComment = async (platform, id, message) =>
+  graphPost(platform === "instagram" ? `${id}/replies` : `${id}/comments`, { message }, await pageToken());
+
+/** Schedules a Facebook photo post (Meta publishes it at `publishAt`). */
+export const scheduleFacebookPhoto = async ({ imageUrl, caption, publishAt }) =>
+  graphPost(`${PAGE()}/photos`, {
+    url: imageUrl,
+    caption,
+    published: "false",
+    scheduled_publish_time: String(Math.floor(new Date(publishAt).getTime() / 1000)),
+  }, await pageToken());
+
+/** Publishes an Instagram photo now (Instagram's API has no scheduling, so the tick calls this when due). */
+export const publishInstagramPhoto = async ({ imageUrl, caption }) => {
+  const token = await pageToken();
+  const container = await graphPost(`${IG()}/media`, { image_url: imageUrl, caption }, token);
+  return graphPost(`${IG()}/media_publish`, { creation_id: container.id }, token);
+};
+
+/** Turns a Meta error into one line an admin can act on. */
+export const metaErrorText = (err) => {
+  const code = err.meta?.code;
+  const msg = String(err.meta?.message || err.message || "");
+  if (code === 190) return "The Meta token has expired or is invalid. Generate a new one.";
+  if (code === 10 || code === 200 || /permission/i.test(msg)) return `The Meta token is missing a permission: ${msg}`;
+  if ([4, 17, 32, 613, 80000, 80004].includes(code)) return "Meta's rate limit was hit. It will retry on the next run.";
+  return `Meta said: ${msg || "unknown error"}`;
+};
