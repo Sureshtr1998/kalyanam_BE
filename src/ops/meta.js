@@ -452,12 +452,13 @@ export const fetchPostPerformance = async (days = 28) => {
     });
   }
   if (IG()) {
-    const ig = await settle(graphGet(`${IG()}/media`, { fields: "id,caption,timestamp,like_count,comments_count,media_type", limit: 40 }, token));
+    const ig = await settle(graphGet(`${IG()}/media`, { fields: "id,caption,timestamp,like_count,comments_count,media_type,media_product_type", limit: 40 }, token));
     for (const m of (ig?.data ?? []).filter((x) => Date.parse(x.timestamp) / 1000 >= since)) {
       const [reach, extra, visits] = await Promise.all([
         settle(graphGet(`${m.id}/insights`, { metric: "reach" }, token), "instagram reach"),
         settle(graphGet(`${m.id}/insights`, { metric: "saved,shares" }, token), "instagram saves and shares"),
-        settle(graphGet(`${m.id}/insights`, { metric: "profile_visits" }, token), "instagram profile visits"),
+        // Instagram has no profile_visits metric for reels.
+        m.media_product_type === "REELS" ? null : settle(graphGet(`${m.id}/insights`, { metric: "profile_visits" }, token), "instagram profile visits"),
       ]);
       out.push({
         id: m.id,
