@@ -6,13 +6,17 @@ import { OpsUsage, getConfig } from "./models.js";
  * the tier decides the model and effort, so costs stay predictable:
  *  - sort:   Haiku 5.5 — triage, language detection, short replies
  *  - write:  Sonnet 5.5 — sensitive replies, posts, daily ads notes
- *  - think:  Opus 5.5 — weekly review, change-day plans
+ *  - think:  Opus 5.5 (high effort) — weekly review
+ *  - ads:    Opus 5.5 (medium effort) — ad creatives, new ad sets, "Plan an idea":
+ *            the owner's top priority, so the best model, at an effort that
+ *            keeps answers fast enough for a button click
  */
 
 const TIERS = {
   sort: { model: "claude-haiku-5-5", effort: "low", inUsd: 0.1, outUsd: 0.5 },
   write: { model: "claude-sonnet-5-5", effort: "medium", inUsd: 2, outUsd: 10 },
-  think: { model: "claude-opus-5-5", effort: "high", inUsd: 4, outUsd: 20 },
+  think: { model: "claude-opus-5-5", effort: "high", inUsd: 4, outUsd: 20, timeoutMs: 120000 },
+  ads: { model: "claude-opus-5-5", effort: "medium", inUsd: 4, outUsd: 20, timeoutMs: 90000 },
 };
 
 let client;
@@ -66,7 +70,8 @@ export const ask = async ({ task, tier = "sort", system, prompt, schema, maxToke
     messages: [{ role: "user", content: prompt }],
     output_config: { effort: t.effort, ...(schema ? { format: { type: "json_schema", schema } } : {}) },
   };
-  const res = await api.messages.create(request);
+  // Opus thinks before answering, so it gets more time than the 45 s default.
+  const res = await api.messages.create(request, t.timeoutMs ? { timeout: t.timeoutMs } : undefined);
 
   await OpsUsage.create({
     task,

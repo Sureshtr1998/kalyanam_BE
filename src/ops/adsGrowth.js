@@ -71,7 +71,7 @@ export const planNewAdset = async () => {
 
   const { proposal } = await ask({
     task: "ads.growth",
-    tier: "write",
+    tier: "ads",
     system: `You grow Meta ads for Seetha Rama Kalyana, a matrimony site.
 ${config.brief}
 Account rules: one campaign per language; places and audiences are ad sets inside it, named "Language | Place | Audience". Only propose a new ad set when the language is profitable enough to expand (cost per paid member well under ₹${config.limits.losingCostPerMember}), to reach families the current ad sets don't (another city or state with that language's diaspora, NRIs, parents vs young professionals). Set expand=false when no expansion is justified. Budget ₹300–${maxBudget}/day.`,
@@ -90,7 +90,7 @@ ${activeCampaigns
 States: ${states.map((s) => `${s.name}: ${s.state}`).join("; ")}
 Room under the daily cap: ₹${headroom}.`,
     schema: SCHEMA,
-    maxTokens: 1500,
+    maxTokens: 8000,
   });
   if (!proposal?.expand) return { skipped: "No expansion justified this week" };
 

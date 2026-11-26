@@ -133,7 +133,7 @@ export const planIdea = async ({ text, by = "admin", source = "owner" }) => {
 
   const plan = await ask({
     task: "ideas.plan",
-    tier: "write",
+    tier: "ads",
     system: `You turn the owner's ideas into concrete, schedulable steps for Seetha Rama Kalyana's marketing agent.
 ${config.brief}
 Rules:
@@ -149,7 +149,7 @@ Campaigns: ${shape.campaigns.map((c) => `${c.name} [${c.id}]${c.dailyBudget ? ` 
 Ad sets: ${shape.adsets.map((a) => `${a.name} [${a.id}] in ${a.campaignId}${a.dailyBudget ? ` ₹${a.dailyBudget}/day` : ""}`).join("; ") || "none yet"}
 Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publishAt).toISOString().slice(0, 10)))].join(", ") || "none"}`,
     schema: SCHEMA,
-    maxTokens: 6000,
+    maxTokens: 16000,
   });
 
   const ideaDoc = await OpsAction.create({

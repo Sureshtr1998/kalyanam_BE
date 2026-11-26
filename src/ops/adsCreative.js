@@ -92,7 +92,7 @@ export const planCreativeRefresh = async (unit) => {
 
   const { variants } = await ask({
     task: "ads.creatives",
-    tier: "write",
+    tier: "ads",
     system: `You write Meta ad creatives for Seetha Rama Kalyana, a matrimony site for families.
 ${config.brief}
 Write in the given language and its native script (English only if the language is English), natural and warm, never a literal translation.
@@ -104,7 +104,7 @@ text: ${link?.message ?? "(unknown)"}
 headline: ${link?.name ?? "(unknown)"}
 Write 2 new variants.`,
     schema: SCHEMA,
-    maxTokens: 2500,
+    maxTokens: 12000,
   });
 
   const created = [];
