@@ -1222,3 +1222,22 @@ describe("old two-card pairs", () => {
     expect(cards[0].result.steps[0]).toMatchObject({ type: "comments.hide" });
   });
 });
+
+describe("stale alerts", () => {
+  it("resolves funds and empty-week notes, and moves paid complaints onto the comment card", async () => {
+    const { tidyStaleAlerts } = await import("../src/ops/actions.js");
+    await OpsAction.deleteMany({});
+    await OpsPost.deleteMany({});
+    const funds = await OpsAction.create({ module: "ads", type: "ads.funds_low", status: "info", priority: "urgent", title: "Meta funds last ~1.8 days" });
+    const week = await OpsAction.create({ module: "organic", type: "organic.week_planned", status: "info", title: "7 posts", payload: { dedupeKey: "week:2026-11-29" } });
+    await OpsPost.create({ publishAt: new Date("2026-11-30T14:00:00Z"), language: "Tamil", topic: "t", caption: "c", design: { headline: "h" }, status: "cancelled" });
+    const card = await OpsAction.create({ module: "comments", type: "comments.delete", status: "scheduled", title: "Delete hidden hate comment by R (Instagram)", reason: '"paid 351"', ref: { kind: "comment", id: "ig_7" } });
+    await OpsAction.create({ module: "comments", type: "comments.paid_complaint", status: "info", title: "R complained about paying", payload: { dedupeKey: "paid:ig_7" } });
+    expect(await tidyStaleAlerts()).toBe(3);
+    expect((await OpsAction.findById(funds._id)).payload.resolvedAt).toBeTruthy();
+    expect((await OpsAction.findById(week._id)).payload.resolvedAt).toBeTruthy();
+    const after = await OpsAction.findById(card._id);
+    expect(after).toMatchObject({ priority: "urgent", title: "Delete hidden hate comment by R (Instagram): complained about paying" });
+    expect(await OpsAction.countDocuments({ type: "comments.paid_complaint" })).toBe(0);
+  });
+});

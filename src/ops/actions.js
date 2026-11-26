@@ -180,6 +180,41 @@ export const mergeLegacyPairs = async () => {
   return merged;
 };
 
+/**
+ * One-time tidy-up of alerts that no longer apply: funds alerts (funds are
+ * never used now), "week planned" notes for weeks whose agent posts were all
+ * cancelled, and the old separate "complained about paying" notices, which
+ * move onto the comment's own card (marked urgent).
+ */
+export const tidyStaleAlerts = async () => {
+  const now = new Date();
+  const { OpsPost } = await import("./models.js");
+  let tidied = (await OpsAction.updateMany({ type: "ads.funds_low", status: "info", "payload.resolvedAt": null }, { $set: { "payload.resolvedAt": now } })).modifiedCount;
+  for (const n of await OpsAction.find({ type: "organic.week_planned", status: "info", "payload.resolvedAt": null })) {
+    const monday = String(n.payload?.dedupeKey || "").replace(/^week:/, "");
+    const from = new Date(`${monday}T00:00:00+05:30`);
+    if (Number.isNaN(from.getTime())) continue;
+    const live = await OpsPost.countDocuments({ publishAt: { $gte: from, $lt: new Date(from.getTime() + 7 * 86400000) }, status: { $nin: ["cancelled", "failed"] } });
+    if (live) continue;
+    n.payload = { ...n.payload, resolvedAt: now };
+    n.markModified("payload");
+    await n.save();
+    tidied += 1;
+  }
+  for (const n of await OpsAction.find({ type: "comments.paid_complaint", status: "info" })) {
+    const commentId = String(n.payload?.dedupeKey || "").replace(/^paid:/, "");
+    const card = commentId && (await OpsAction.findOne({ module: "comments", "ref.id": commentId, type: { $in: ["comments.hide", "comments.delete"] } }));
+    if (!card) continue;
+    if (!/complained about paying/.test(card.title)) card.title = `${card.title}: complained about paying`.slice(0, 200);
+    card.priority = "urgent";
+    if (!/Check Members/.test(card.reason || "")) card.reason = `${card.reason || ""} Check Members for this name and reach out by email or WhatsApp if they are a paid member.`.trim();
+    await card.save();
+    await OpsAction.deleteOne({ _id: n._id });
+    tidied += 1;
+  }
+  return tidied;
+};
+
 /** Reverses a done action (pauses what it created, restores what it changed). */
 export const undo = async (id, by = "admin") => {
   const action = await OpsAction.findOne({ _id: id, status: "done" });
