@@ -20,7 +20,7 @@ const organicReview = vi.fn(() => ({ reviews: [] }));
 const adsReview = vi.fn();
 const metaRead = vi.hoisted(() => ({ scheduledDays: [], scheduledTimes: [], performance: [], structure: { campaigns: [], adsets: [] }, ads: null }));
 const commentTriage = vi.fn();
-const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})) }));
+const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})), deleteFacebookPost: vi.fn(async () => ({ success: true })) }));
 const hidden = [];
 vi.mock("../src/ops/meta.js", async (orig) => ({
   ...(await orig()),
@@ -41,6 +41,8 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   fetchAdImage: vi.fn(async (id) => ({ mediaType: "image/jpeg", data: Buffer.from(`img-${id}`).toString("base64") })),
   fetchScheduledDays: vi.fn(async () => metaRead.scheduledDays),
   fetchScheduledTimes: vi.fn(async () => metaRead.scheduledTimes),
+  fetchScheduledPosts: vi.fn(async () => metaRead.scheduledTimes.map((at, i) => ({ id: `sp${i}`, at, message: "" }))),
+  deleteFacebookPost: metaCalls.deleteFacebookPost,
   fetchPostPerformance: vi.fn(async () => metaRead.performance),
   fetchAds: vi.fn(async () => metaRead.ads ?? [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
   fetchStructure: vi.fn(async () => metaRead.structure),
@@ -892,5 +894,62 @@ describe("agent-planned ideas follow the ads rules", () => {
     const alert = await OpsAction.findOne({ type: "ads.action_failed" });
     expect(alert).toMatchObject({ priority: "urgent" });
     expect(sent.at(-1).subject).toMatch(/\[SRK Ops\] Failed: Raise SRK \| Kannada/);
+  });
+});
+
+describe("no double posts", () => {
+  it("plans nothing when Facebook's schedule can't be read", async () => {
+    const { planWeek } = await import("../src/ops/organic.js");
+    const meta = await import("../src/ops/meta.js");
+    await OpsPost.deleteMany({});
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    meta.fetchScheduledTimes.mockRejectedValueOnce(new Error("(#200) permission"));
+    const r = await planWeek();
+    expect(r.skipped).toMatch(/couldn't be read/);
+    expect(await OpsPost.countDocuments()).toBe(0);
+    expect(await OpsAction.countDocuments({ type: "organic.schedule_unreadable", priority: "urgent" })).toBe(1);
+  });
+
+  it("cancelling a scheduled post also removes it from Facebook", async () => {
+    await OpsPost.deleteMany({});
+    metaCalls.deleteFacebookPost.mockClear();
+    const post = await OpsPost.create({ publishAt: new Date(Date.now() + 5 * 86400000), language: "Tamil", topic: "t", caption: "c", design: { headline: "h" }, status: "scheduled", results: { facebookId: "fb_123" } });
+    const ig = await OpsAction.create({ module: "organic", type: "organic.publish_ig", status: "scheduled", title: "IG", runAt: post.publishAt, ref: { kind: "post-ig", id: String(post._id) } });
+    const token = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const r = await api().post(`/api/manage/ops/actions/${ig._id}/cancel`).set("x-auth-token", token);
+    expect(r.body.msg).toBe("Cancelled and removed from Facebook");
+    expect(metaCalls.deleteFacebookPost).toHaveBeenCalledWith("fb_123");
+    expect((await OpsPost.findById(post._id)).status).toBe("cancelled");
+    expect((await OpsPost.findById(post._id)).results.facebookRemovedAt).toBeTruthy();
+  });
+
+  it("the sweep removes posts cancelled earlier, and gives up with an alert after 3 tries", async () => {
+    const { sweepCancelled } = await import("../src/ops/organic.js");
+    await OpsPost.deleteMany({});
+    metaCalls.deleteFacebookPost.mockClear();
+    const later = new Date(Date.now() + 3 * 86400000);
+    const base = { publishAt: later, language: "Tamil", topic: "t", caption: "c", design: { headline: "h" }, status: "cancelled" };
+    const a = await OpsPost.create({ ...base, results: { facebookId: "fb_a" } });
+    await OpsPost.create({ ...base, results: { facebookId: "fb_done", facebookRemovedAt: new Date() } });
+    await OpsPost.create({ ...base, publishAt: new Date(Date.now() - 3600000), results: { facebookId: "fb_past" } });
+    expect(await sweepCancelled()).toBe(1);
+    expect(metaCalls.deleteFacebookPost).toHaveBeenCalledTimes(1);
+    expect(metaCalls.deleteFacebookPost).toHaveBeenCalledWith("fb_a");
+    expect((await OpsPost.findById(a._id)).results.facebookRemovedAt).toBeTruthy();
+
+    // Already deleted by hand: counts as removed.
+    const gone = await OpsPost.create({ ...base, results: { facebookId: "fb_gone" } });
+    metaCalls.deleteFacebookPost.mockRejectedValueOnce(new Error("Unsupported delete request. Object with ID 'fb_gone' does not exist"));
+    expect(await sweepCancelled()).toBe(1);
+    expect((await OpsPost.findById(gone._id)).results.facebookRemovedAt).toBeTruthy();
+
+    // Keeps failing: three tries, then one urgent alert and no more tries.
+    const stuck = await OpsPost.create({ ...base, results: { facebookId: "fb_stuck" } });
+    metaCalls.deleteFacebookPost.mockRejectedValue(new Error("(#200) permission"));
+    for (let i = 0; i < 4; i++) await sweepCancelled();
+    metaCalls.deleteFacebookPost.mockReset();
+    metaCalls.deleteFacebookPost.mockImplementation(async () => ({ success: true }));
+    expect((await OpsPost.findById(stuck._id)).results.facebookRemoveTries).toBe(3);
+    expect(await OpsAction.countDocuments({ type: "organic.unschedule_failed", priority: "urgent" })).toBe(1);
   });
 });

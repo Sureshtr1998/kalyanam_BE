@@ -462,13 +462,25 @@ export const fetchPostPerformance = async (days = 28) => {
 };
 
 /** Times of the Facebook posts already scheduled in Meta (e.g. by hand in Business Suite). */
-export const fetchScheduledTimes = async () => {
+/**
+ * Posts scheduled on the Facebook Page (by hand in Business Suite or by the
+ * agent). Throws when Meta can't be read, so the planner never mistakes a
+ * failed read for "every evening is free" and double-posts.
+ */
+export const fetchScheduledPosts = async () => {
   await resolvePage();
-  if (!PAGE()) return [];
+  if (!PAGE()) throw new Error("No Facebook Page connected");
   const token = await pageToken();
-  const r = await settle(graphGet(`${PAGE()}/scheduled_posts`, { fields: "id,scheduled_publish_time", limit: 100 }, token));
-  return (r?.data ?? []).map((p) => Number(p.scheduled_publish_time)).filter(Boolean).map((s) => new Date(s * 1000));
+  const rows = await graphAll(`${PAGE()}/scheduled_posts`, { fields: "id,message,scheduled_publish_time", limit: 100 }, token);
+  return rows
+    .map((p) => ({ id: p.id, at: new Date(Number(p.scheduled_publish_time) * 1000), message: String(p.message || "").slice(0, 120) }))
+    .filter((p) => !Number.isNaN(p.at.getTime()));
 };
+
+export const fetchScheduledTimes = async () => (await fetchScheduledPosts()).map((p) => p.at);
+
+/** Removes a scheduled (or published) Facebook post or photo the agent made. */
+export const deleteFacebookPost = async (id) => graphDelete(id, await pageToken());
 
 /** IST dates (YYYY-MM-DD) that already have a Facebook post scheduled in Meta (e.g. posted by hand). */
 export const fetchScheduledDays = async () => {

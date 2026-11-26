@@ -6,7 +6,7 @@ import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
 import { runSupportCycle } from "./support.js";
 import { runCommentsCycle } from "./comments.js";
-import { planWeek, recordOrganicStats, requestRenders, settlePublished } from "./organic.js";
+import { planWeek, recordOrganicStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
 import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
@@ -177,6 +177,8 @@ const runTick = async ({ config, t, done, deadline, source }) => {
   }
   if (config.modes.organic !== "off") {
     await settlePublished().catch(() => {});
+    // Cancelled posts that are still scheduled on Facebook come off there too.
+    await sweepCancelled().catch((err) => console.error("[ops] unschedule", err.message));
     // Posts still waiting for their image get the render Action re-run (every 2 h, at most 3 times).
     await requestRenders().catch((err) => console.error("[ops] render retry", err.message));
   }

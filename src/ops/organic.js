@@ -3,7 +3,13 @@ import User from "../models/User.js";
 import { OpsCreative, OpsPost, OpsReport, getConfig } from "./models.js";
 import { ask } from "./claude.js";
 import { handle, notice, propose } from "./actions.js";
-import { fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
+import { deleteFacebookPost, fetchPostPerformance, fetchScheduledTimes, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
+
+/** Reads the Page's scheduled posts; null when Meta can't be read (then nothing is planned). */
+const scheduledOrNull = () => fetchScheduledTimes().catch((err) => {
+  console.error("[ops] scheduled posts", err.message);
+  return null;
+});
 import { THEME_NAMES } from "./postDesign.js";
 import { devConfigured, dispatchRender } from "./dev.js";
 import { CLAIM_RULES } from "./adsCreative.js";
@@ -215,7 +221,7 @@ export const planWeek = async () => {
   // Only plan evenings that are still free: nothing from the agent and nothing scheduled in Meta by hand that evening.
   const [ours, manual, performance, signups, doubts, brides, library, tagged] = await Promise.all([
     OpsPost.find({ publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) }, status: { $nin: ["cancelled", "failed"] } }).lean(),
-    fetchScheduledTimes().catch(() => []),
+    scheduledOrNull(),
     fetchPostPerformance(28).catch(() => []),
     organicSignups(28).catch(() => new Map()),
     familyDoubts().catch(() => []),
@@ -226,6 +232,18 @@ export const planWeek = async () => {
   // The agent's own posts carry their idea, so results build up per idea.
   const ideaByCode = new Map(tagged.map((p) => [p.code, p.idea]));
   for (const r of performance) if (r.code) r.idea = ideaByCode.get(r.code.slice(1));
+  // Never guess: if the Page's schedule can't be read, plan nothing rather than risk two posts in an evening.
+  if (manual === null) {
+    await notice("organic", {
+      type: "organic.schedule_unreadable",
+      priority: "urgent",
+      title: "Next week's posts weren't planned: Facebook's schedule couldn't be read",
+      reason: "The agent only fills evenings you haven't scheduled yourself, and it couldn't check them. Nothing was planned, so nothing doubles.",
+      effect: "It tries again on the next run of the planner (Thursday) or when you press Plan next week now.",
+      payload: { dedupeKey: `schedule_unreadable:${monday.toISOString().slice(0, 10)}` },
+    });
+    return { skipped: "Facebook's scheduled posts couldn't be read" };
+  }
   const taken = new Set([
     ...ours.map((p) => istDay(p.publishAt)),
     ...manual.filter((t) => istHour(t) >= EVENING[0] && istHour(t) <= EVENING[1]).map(istDay),
@@ -521,6 +539,61 @@ handle("organic.publish_ig", async (action) => {
   await deletePostImage(post);
   return { instagramId: r.id };
 });
+
+/**
+ * Takes a cancelled post off Facebook when the agent had already scheduled it
+ * there and it hasn't gone out yet. Returns true when it was removed.
+ */
+export const unscheduleFacebook = async (post) => {
+  const id = post.results?.facebookId;
+  if (!id || post.results?.facebookRemovedAt || new Date(post.publishAt) <= new Date()) return false;
+  try {
+    await deleteFacebookPost(id);
+  } catch (err) {
+    // Already gone (deleted by hand in Business Suite): nothing left to remove.
+    if (!/does not exist|Unsupported delete/i.test(err.message)) throw err;
+  }
+  post.results = { ...post.results, facebookRemovedAt: new Date() };
+  post.markModified("results");
+  await post.save();
+  return true;
+};
+
+/**
+ * Every tick: cancelled posts still waiting on Facebook are removed there too,
+ * so a cancelled post never goes out. Gives up after 3 tries and alerts.
+ */
+export const sweepCancelled = async () => {
+  const posts = await OpsPost.find({
+    status: "cancelled",
+    "results.facebookId": { $exists: true },
+    "results.facebookRemovedAt": { $exists: false },
+    "results.facebookRemoveTries": { $not: { $gte: 3 } },
+    publishAt: { $gt: new Date() },
+  }).limit(10);
+  let removed = 0;
+  for (const post of posts) {
+    try {
+      if (await unscheduleFacebook(post)) removed += 1;
+    } catch (err) {
+      const tries = (post.results?.facebookRemoveTries ?? 0) + 1;
+      post.results = { ...post.results, facebookRemoveTries: tries, facebookRemoveError: err.message };
+      post.markModified("results");
+      await post.save();
+      if (tries >= 3) {
+        await notice("organic", {
+          type: "organic.unschedule_failed",
+          priority: "urgent",
+          title: `A cancelled post is still scheduled on Facebook: ${post.topic}`.slice(0, 160),
+          reason: `Facebook wouldn't remove it: ${err.message}`,
+          effect: `It will go out on ${new Date(post.publishAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} unless you delete it in Business Suite (Planner) first.`,
+          payload: { dedupeKey: `unschedule_failed:${post._id}` },
+        });
+      }
+    }
+  }
+  return removed;
+};
 
 /** Marks Facebook-only posts published once their time has passed. */
 export const settlePublished = () =>

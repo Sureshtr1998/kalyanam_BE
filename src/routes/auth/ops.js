@@ -9,11 +9,11 @@ import { adsSettings, unitStates } from "../../ops/ads.js";
 import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
 import { toolsOverview, updateTool } from "../../ops/tools.js";
 import { growth } from "../../ops/review.js";
-import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek } from "../../ops/organic.js";
+import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek, unscheduleFacebook } from "../../ops/organic.js";
 import { planIdea } from "../../ops/ideas.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
-import { resolvePage } from "../../ops/meta.js";
+import { fetchScheduledPosts, resolvePage } from "../../ops/meta.js";
 import { createRequest, deploy, devConfigured, followUp, listRequests } from "../../ops/dev.js";
 import { claudeConfigured, inrRate, spendSummary } from "../../ops/claude.js";
 import { igConfigured, metaConfigured, metaErrorText, pageConfigured, fetchAccount } from "../../ops/meta.js";
@@ -164,11 +164,20 @@ router.post(
     const a = await cancel(req.params.id, by(req));
     if (!a) return res.status(409).json({ msg: "This action can no longer be cancelled" });
     // Cancelling a post's schedule also cancels the post.
+    let note = "";
     if (a.ref?.kind === "post" || a.ref?.kind === "post-ig") {
       const post = await OpsPost.findByIdAndUpdate(a.ref.id, { status: "cancelled" }, { new: true });
-      if (post) await deletePostImage(post);
+      if (post) {
+        await deletePostImage(post);
+        // Also take it off Facebook if the agent had already scheduled it there.
+        try {
+          if (await unscheduleFacebook(post)) note = " and removed from Facebook";
+        } catch (err) {
+          note = `. Facebook didn't remove it yet (${err.message}); the agent retries every 15 minutes.`;
+        }
+      }
     }
-    return res.json({ action: a, msg: "Cancelled" });
+    return res.json({ action: a, msg: `Cancelled${note}` });
   })
 );
 
@@ -371,8 +380,10 @@ router.get(
       OpsReport.findOne({ kind: "organic" }).sort({ createdAt: -1 }).lean(),
       organicSignups(28),
     ]);
+    // What's scheduled on the Page (by hand or by the agent), so doubles are visible.
+    const scheduled = await fetchScheduledPosts().catch((err) => ({ error: err.message }));
     // Live sign-up counts per tracking code (the stored report is refreshed daily).
-    return res.json({ posts, stats: stats ? { ...stats.data, period: stats.period } : null, signups: Object.fromEntries(signups) });
+    return res.json({ posts, scheduled, stats: stats ? { ...stats.data, period: stats.period } : null, signups: Object.fromEntries(signups) });
   })
 );
 
