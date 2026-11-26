@@ -13,7 +13,7 @@ const scheduledOrNull = () => fetchScheduledTimes().catch((err) => {
 import { THEME_NAMES } from "./postDesign.js";
 import { devConfigured, dispatchRender } from "./dev.js";
 import { CLAIM_RULES } from "./adsCreative.js";
-import { IDEAS, IDEA_KEYS, bridesShare, familyDoubts, loadIdeaLibrary } from "./adsIdeas.js";
+import { IDEAS, IDEA_KEYS, bridesShare, familyDoubts, ideaFacts, ideaTarget, loadIdeaLibrary, loadOwnerIdeas } from "./adsIdeas.js";
 import { codeSource, postCode, shortUrl, trackedLink } from "./links.js";
 
 /*
@@ -131,12 +131,14 @@ const REVIEW_SCHEMA = {
 
 /** Second pass on the week's posts (Sonnet): every claim must be allowed and the language natural; fixes or drops. */
 export const reviewPosts = async (posts, config) => {
+  if (!ideaFacts()) await loadOwnerIdeas().catch(() => {});
   const { reviews } = await ask({
     task: "organic.review",
     tier: "write",
     system: `You check organic Facebook and Instagram posts for Seetha Rama Kalyana before they are scheduled. Be strict.
 ${config.brief}
 ${CLAIM_RULES}
+${ideaFacts()}
 ${SAFETY_PROMISES}
 claimsOk is false if any line states or implies something outside the allowed facts and promises. languageOk is false if the text is unnatural, wrong or a literal translation for its language.
 When something is wrong and can be fixed without changing the idea, return a fixed version (same language); otherwise fixed is null.`,
@@ -218,7 +220,8 @@ export const captionFor = (post, platform) => {
   if (!post.cta) return post.caption;
   const tags = (post.hashtags ?? []).map((t) => `#${String(t).replace(/^#/, "").replace(/\s+/g, "")}`);
   const facebook = platform === "facebook";
-  const link = facebook ? trackedLink(post.language, `f${post.code}`) : `${shortUrl(post.language)} (link in bio)`;
+  const path = IDEAS[post.idea]?.path ?? "";
+  const link = facebook ? trackedLink(post.language, `f${post.code}`, path) : `${shortUrl(post.language)}${path} (link in bio)`;
   return [String(post.caption).trim(), "", `${post.cta}: ${link}`, "", (facebook ? tags.slice(0, 3) : tags.slice(0, 8)).join(" ")].join("\n").trim();
 };
 
@@ -278,10 +281,12 @@ const planDaily = async ({ config, monday, skip, library, doubts }) => {
     system: `You write the daily organic pieces for Seetha Rama Kalyana's Facebook Page and Instagram. Never ads, never boosted.
 ${config.brief}
 ${CLAIM_RULES}
+${ideaFacts()}
 ${SAFETY_PROMISES}
 Two kinds:
 - "safety" (12:30 pm, a text card): "safe for daughters". It builds trust with brides' families (brides are the scarce side). Use only the safety promises above, one per card, warmly and plainly. Never say a phone number is shared only with consent (paid members can unlock contacts). Never promise the person reporting a refund. Idea is usually "daughters".
-- "story" (8:30 am, a 9:16 image for people who already follow the Page): one idea, one short line that nudges them to visit the profile and register; no caption. Rotate ideas across the week; at least one for brides' families; one may answer a real family question listed below.
+- "story" (8:30 am, a 9:16 image for people who already follow the Page): one idea, one short line that nudges them to visit the profile and register; no caption. Rotate ideas across the week (only ideas listed below); at least one for brides' families; one shows a price from the pricing idea; one may answer a real family question listed below.
+Ideas: ${IDEA_KEYS.filter((k) => ideaTarget(k) !== "ads").map((k) => `${k} (${IDEAS[k].label})`).join(", ")}.
 Writing: entirely in the piece's language and native script (English pieces in English), natural and warm, never a literal translation.`,
     prompt: `Write exactly these ${want.length} pieces for the week starting ${monday.toDateString()} (day 0 = Monday):
 ${want.map((w) => `- day ${w.day}, ${w.kind}, ${w.language}`).join("\n")}
@@ -342,6 +347,8 @@ export const planWeek = async () => {
   if (!config.organic?.planEvenings) {
     return { skipped: "The agent's organic posts are off (Settings → Organic posts)." };
   }
+  // The owner's standing ideas and the live prices join the idea list.
+  const ownerIdeas = (await loadOwnerIdeas()).filter((i) => i.target !== "ads");
   const monday = nextMonday();
   const dayKey = (d) => istDay(new Date(monday.getTime() + d * 86400000));
 
@@ -395,14 +402,17 @@ export const planWeek = async () => {
     system: `You plan organic Facebook and Instagram posts for Seetha Rama Kalyana. They are never ads and never boosted.
 ${config.brief}
 ${CLAIM_RULES}
+${ideaFacts()}
 ${SAFETY_PROMISES}
 The goal is registrations: every post must stop a family's scroll, answer a doubt they have, and invite them to sign up.
 Formats:
 - "join": the layout of the cheapest ads (pill, two-line headline, three ticks, price line, button). Direct reasons to register. At most ${maxJoin} this week.
 - "card": a headline card (kicker, headline, supporting line). Trust and value posts.
 Ideas (each post carries one; rotate them and lean towards what brought sign-ups, below):
-${IDEA_KEYS.map((k) => `- ${k} (${IDEAS[k].label}): ${IDEAS[k].hint}`).join("\n")}
+${IDEA_KEYS.filter((k) => ideaTarget(k) !== "ads").map((k) => `- ${k} (${IDEAS[k].label}${IDEAS[k].owner ? ", the owner's idea" : ""}): ${IDEAS[k].hint}`).join("\n")}
 Rules for the mix:
+- At least one post this week uses the "pricing" idea: show the real price list (only the prices given above); the link goes to the pricing page.
+${ownerIdeas.length ? `- Each of the owner's ideas gets at least one post this week: ${ownerIdeas.map((i) => i.key).join(", ")}.\n` : ""}
 - At least one post speaks to brides' families (daughters' parents).
 - When families' questions are listed below, at least one post uses the "answer" idea to answer one of them plainly, in the families' own words.
 - A festival or auspicious day only if you are sure it falls in that week for that region; no hard call to register on Amavasya or mourning days.

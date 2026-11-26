@@ -4,7 +4,7 @@ import { ask } from "./claude.js";
 import { Defer, handle, handleUndo, propose } from "./actions.js";
 import { languageOf } from "./adsEngine.js";
 import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphPost, setStatus, uploadAdImage } from "./meta.js";
-import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaOf, loadIdeaLibrary, organicWinners, pickIdeas } from "./adsIdeas.js";
+import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaFacts, ideaOf, ideaTarget, loadIdeaLibrary, loadOwnerIdeas, organicWinners, pickIdeas } from "./adsIdeas.js";
 
 export { languageOf, audienceOf };
 
@@ -88,12 +88,14 @@ const REVIEW_SCHEMA = {
 
 /** Second pass: checks claims and language, fixes what it can, drops what it can't. */
 export const reviewVariants = async ({ variants, language, audience, config }) => {
+  if (!ideaFacts()) await loadOwnerIdeas().catch(() => {});
   const { reviews } = await ask({
     task: "ads.review",
     tier: "write",
     system: `You check Meta ads for Seetha Rama Kalyana before they go live. Be strict.
 ${config.brief}
 ${CLAIM_RULES}
+${ideaFacts()}
 For each variant: claimsOk is false if any line states or implies something outside the allowed facts or on the never-say list. languageOk is false if the ${language} text is unnatural, wrong, awkward or a literal translation, or doesn't suit "${audience}".
 When something is wrong and can be fixed without changing the idea, return a fixed version (all fields, same language, with an updated English translation); otherwise fixed is null.`,
     prompt: variants.map((v, i) => `Variant ${i}:\n${JSON.stringify(v)}`).join("\n\n"),
@@ -167,6 +169,7 @@ const copyOf = async (adId) => {
  */
 export const planCreativeRefresh = async ({ campaignId, campaignName, adsetId, adsetName = "", notes = [], runAt }) => {
   const config = await getConfig();
+  await loadOwnerIdeas();
   const recent = await OpsAction.findOne({
     type: "ads.creative_launch",
     "payload.adsetId": adsetId,
@@ -221,10 +224,11 @@ export const planCreativeRefresh = async ({ campaignId, campaignName, adsetId, a
     system: `You write Meta ads for Seetha Rama Kalyana, a matrimony site for families.
 ${config.brief}
 ${CLAIM_RULES}
+${ideaFacts()}
 Owner's standing rules:
 ${config.ads?.preferences ?? ""}
 The ideas you may use:
-${IDEA_KEYS.map((k) => `- ${ideaLine(k)}`).join("\n")}
+${IDEA_KEYS.filter((k) => ideaTarget(k) !== "organic").map((k) => `- ${ideaLine(k)}`).join("\n")}
 How to write:
 - Write in ${language} in its native script (English only if the language is English). Natural and warm, the way a family in that region speaks; never a literal translation.
 - The image has: a pill (short question or label), a two-line headline (line 2 is the punchline), three ticks, a price line and a button. Keep every line short; people scroll fast on phones.

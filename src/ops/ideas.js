@@ -7,6 +7,7 @@ import { requestRenders } from "./organic.js";
 import { CLAIM_RULES, proposeIdeaCreatives } from "./adsCreative.js";
 import { proposeIdeaAdset } from "./adsGrowth.js";
 import { RULES, batchGate } from "./adsEngine.js";
+import { IDEAS, ideaFacts, loadOwnerIdeas } from "./adsIdeas.js";
 import { adsSettings, lastBatchAt } from "./ads.js";
 
 /*
@@ -133,6 +134,7 @@ export const planIdea = async ({ text, by = "admin", source = "owner" }) => {
   const idea = String(text || "").trim();
   if (idea.length < 8) throw Object.assign(new Error("Describe the idea in a sentence or two"), { status: 400 });
   const config = await getConfig();
+  await loadOwnerIdeas();
   const shape = await accountShape();
   const upcoming = await OpsPost.find({ publishAt: { $gte: new Date() }, status: { $ne: "cancelled" } }).select("publishAt language topic").lean();
 
@@ -148,6 +150,7 @@ Rules:
 - Owner's standing rules for ads:
 ${config.ads?.preferences ?? ""}
 ${CLAIM_RULES}
+${ideaFacts()}
 - Write post and ad text in the target language's native script (English only for English), warm and natural, never a literal translation. No competitor names, no promises beyond the brief, no fake urgency.
 - Budgets in ₹/day. The whole account must stay under ₹${config.limits.maxDailySpend}/day.
 - Dates: today is ${todayIst()} (IST). Use the dates the idea implies; otherwise the next sensible days. Fill fields of other step kinds with empty values.`,
@@ -286,4 +289,61 @@ export const autoPlanIdeas = async () => {
   old.result = { plannedAs: r.ideaId, steps: r.steps.length };
   await old.save();
   return { planned: r.steps.length, ideaId: r.ideaId };
+};
+
+/* ------------------------- standing ideas ------------------------- */
+
+const STANDING = {
+  type: "object",
+  additionalProperties: false,
+  required: ["label", "hint", "facts", "path"],
+  properties: {
+    label: { type: "string", description: "Short English name, max 5 words" },
+    hint: { type: "string", description: "One or two English lines: the message and why it should make families register" },
+    facts: { type: "string", description: "Only facts the owner's text itself states (prices, features, promises), in English; empty if none" },
+    path: { type: "string", description: "A page of seetharamakalyana.in the idea points to, e.g. /pricing; empty if none" },
+  },
+};
+
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 24) || "idea";
+
+/**
+ * Adds a standing idea to the regular mix: "organic" (weekly posts and
+ * stories), "ads" (tested in the next fresh-ads batch) or "both". It is then
+ * planned, checked and scored like the built-in ideas.
+ */
+export const addStandingIdea = async ({ text, target, by = "admin" }) => {
+  const idea = String(text || "").trim();
+  if (idea.length < 8) throw Object.assign(new Error("Describe the idea in a sentence or two"), { status: 400 });
+  if (!["organic", "ads", "both"].includes(target)) throw Object.assign(new Error("Choose organic, ads or both"), { status: 400 });
+  const config = await getConfig();
+  const out = await ask({
+    task: "ideas.standing",
+    tier: "sort",
+    system: `You turn the owner's marketing idea for Seetha Rama Kalyana (a Hindu matrimony site, seetharamakalyana.in) into a short idea card the content planner can follow. Never add facts the owner didn't state.`,
+    prompt: idea,
+    schema: STANDING,
+    maxTokens: 600,
+  });
+  const base = `owner_${slug(out.label)}`;
+  const taken = new Set([...Object.keys(IDEAS), ...(config.ownerIdeas ?? []).map((i) => i.key)]);
+  let key = base;
+  for (let n = 2; taken.has(key); n++) key = `${base}_${n}`;
+  const path = /^\/[a-z0-9/-]*$/i.test(out.path || "") ? out.path : "";
+  const entry = { key, label: out.label.slice(0, 60), hint: out.hint.slice(0, 400), facts: out.facts.slice(0, 600), path, target, text: idea.slice(0, 1000), active: true, by, createdAt: new Date() };
+  config.ownerIdeas = [...(config.ownerIdeas ?? []), entry];
+  config.markModified("ownerIdeas");
+  await config.save();
+  await loadOwnerIdeas();
+  return entry;
+};
+
+export const removeStandingIdea = async (key) => {
+  const config = await getConfig();
+  const before = (config.ownerIdeas ?? []).length;
+  config.ownerIdeas = (config.ownerIdeas ?? []).filter((i) => i.key !== key);
+  config.markModified("ownerIdeas");
+  await config.save();
+  await loadOwnerIdeas();
+  return before !== config.ownerIdeas.length;
 };

@@ -31,7 +31,7 @@ export const postCode = (language, publishAt) => {
 };
 
 /** The clickable tracked link, e.g. https://www.seetharamakalyana.in/kn?p=fkn1127 */
-export const trackedLink = (language, p) => `${SITE()}${langPath(language)}${p ? `?p=${encodeURIComponent(p)}` : ""}`;
+export const trackedLink = (language, p, path = "") => `${SITE()}${langPath(language)}${path}${p ? `?p=${encodeURIComponent(p)}` : ""}`;
 
 /** Which platform an organic code came from. */
 export const codeSource = (p = "") => (p === "bio" || p.startsWith("i") ? "instagram" : "facebook");

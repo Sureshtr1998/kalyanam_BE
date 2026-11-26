@@ -10,7 +10,7 @@ import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
 import { toolsOverview, updateTool } from "../../ops/tools.js";
 import { growth } from "../../ops/review.js";
 import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek, storyConcepts, unscheduleFacebook } from "../../ops/organic.js";
-import { planIdea } from "../../ops/ideas.js";
+import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
 import { fetchScheduledPosts, resolvePage } from "../../ops/meta.js";
@@ -220,6 +220,34 @@ router.post(
     const r = await planIdea({ text: req.body?.text, by: by(req) });
     const ok = r.steps.filter((s) => s.status !== "needs_you").length;
     return res.json({ ...r, msg: `${ok} of ${r.steps.length} step(s) scheduled${ok < r.steps.length ? "; the rest need you (see Today)" : ""}` });
+  })
+);
+
+/** Standing ideas: kept in the regular organic and/or ads mix (plus the built-in ones, for reference). */
+router.get(
+  "/manage/ops/ideas/standing",
+  wrap(async (_req, res) => {
+    const { IDEAS, loadOwnerIdeas } = await import("../../ops/adsIdeas.js");
+    const owner = await loadOwnerIdeas();
+    const builtIn = Object.entries(IDEAS).filter(([, v]) => !v.owner).map(([key, v]) => ({ key, label: v.label }));
+    return res.json({ ideas: owner, builtIn });
+  })
+);
+
+router.post(
+  "/manage/ops/ideas/standing",
+  wrap(async (req, res) => {
+    const idea = await addStandingIdea({ text: req.body?.text, target: req.body?.target, by: by(req) });
+    const where = { organic: "organic posts", ads: "Meta ads", both: "organic posts and Meta ads" }[idea.target];
+    return res.json({ idea, msg: `Added "${idea.label}" to the regular ${where}` });
+  })
+);
+
+router.delete(
+  "/manage/ops/ideas/standing/:key",
+  wrap(async (req, res) => {
+    const ok = await removeStandingIdea(String(req.params.key));
+    return res.status(ok ? 200 : 404).json({ msg: ok ? "Removed" : "Not found" });
   })
 );
 

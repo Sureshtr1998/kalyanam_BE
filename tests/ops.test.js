@@ -18,6 +18,7 @@ const organicPlan = vi.fn();
 const adsWrite = vi.fn();
 const organicReview = vi.fn(() => ({ reviews: [] }));
 const organicDaily = vi.fn(() => ({ items: [] }));
+const standingIdea = vi.fn(() => ({ label: "Second marriages", hint: "Families looking again after a divorce or loss.", facts: "", path: "" }));
 const adsReview = vi.fn();
 const metaRead = vi.hoisted(() => ({ scheduledDays: [], scheduledTimes: [], performance: [], structure: { campaigns: [], adsets: [] }, ads: null }));
 const commentTriage = vi.fn();
@@ -64,7 +65,7 @@ vi.mock("../src/ops/claude.js", () => ({
   spendSummary: async () => ({ totalUsd: 1.5, totalCalls: 10, monthUsd: 0.5, byTask: [] }),
   inrRate: async () => 88,
   ClaudeUnavailable: class extends Error {},
-  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : task === "organic.plan_daily" ? organicDaily() : task === "ads.creatives" ? adsWrite() : task === "ads.review" ? adsReview() : task === "organic.review" ? organicReview() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
+  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : task === "organic.plan_daily" ? organicDaily() : task === "ideas.standing" ? standingIdea() : task === "ads.creatives" ? adsWrite() : task === "ads.review" ? adsReview() : task === "organic.review" ? organicReview() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
 }));
 
 const { api, createUser, tokenFor } = await import("./helpers.js");
@@ -1148,5 +1149,46 @@ describe("fully automatic organic", () => {
     await OpsPost.create({ publishAt: new Date(Date.now() + 86400000), kind: "story", language: "Hindi", topic: "t", caption: "", design: { headline: "h", theme: "cream" }, status: "design" });
     const q = await renderQueue();
     expect(q[0]).toMatchObject({ kind: "story", url: "seetharamakalyana.in/hi" });
+  });
+});
+
+describe("ideas: pricing and the owner's standing ideas", () => {
+  it("states the live prices, without the struck-through price or referral discount", async () => {
+    const { pricingFacts } = await import("../src/ops/adsIdeas.js");
+    const { PRICING_LEVELS } = await import("../src/utils/pricing.js");
+    const f = pricingFacts(PRICING_LEVELS[3]);
+    expect(f).toMatch(/₹351 with 36 interest credits/);
+    expect(f).toMatch(/₹101 for 21/);
+    expect(f).not.toMatch(/999|301/);
+  });
+
+  it("links pricing posts to the pricing page in their language", async () => {
+    const { captionFor } = await import("../src/ops/organic.js");
+    const post = { language: "Kannada", code: "kn1208", idea: "pricing", caption: "c", cta: "ನೋಂದಾಯಿಸಿ", hashtags: [] };
+    expect(captionFor(post, "facebook")).toMatch(/seetharamakalyana\.in\/kn\/pricing\?p=fkn1208/);
+    expect(captionFor(post, "instagram")).toMatch(/seetharamakalyana\.in\/kn\/pricing \(link in bio\)/);
+  });
+
+  it("adds an owner idea to the mix, tests it first in ads, and removes it", async () => {
+    const { IDEA_KEYS, pickIdeas, ideaTarget } = await import("../src/ops/adsIdeas.js");
+    const token = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const r = await api().post("/api/manage/ops/ideas/standing").set("x-auth-token", token).send({ text: "Ads for second marriages, ages 35 to 50", target: "ads" });
+    expect(r.status).toBe(200);
+    const key = r.body.idea.key;
+    expect(key).toMatch(/^owner_second_marriages/);
+    expect(IDEA_KEYS).toContain(key);
+    expect(ideaTarget(key)).toBe("ads");
+    expect(pickIdeas({ library: [], language: "Telugu", audience: "parents" }).tests[0]).toMatchObject({ idea: key, why: "your idea (Plan an idea)" });
+
+    const organicOnly = await api().post("/api/manage/ops/ideas/standing").set("x-auth-token", token).send({ text: "Posts about our wedding hall tie-ups", target: "organic" });
+    expect(pickIdeas({ library: [], language: "Telugu", audience: "parents" }).tests.map((t) => t.idea)).not.toContain(organicOnly.body.idea.key);
+
+    const list = await api().get("/api/manage/ops/ideas/standing").set("x-auth-token", token);
+    expect(list.body.ideas.map((i) => i.key)).toEqual([key, organicOnly.body.idea.key]);
+    expect(list.body.builtIn.map((i) => i.key)).toContain("pricing");
+    await api().delete(`/api/manage/ops/ideas/standing/${key}`).set("x-auth-token", token);
+    await api().delete(`/api/manage/ops/ideas/standing/${organicOnly.body.idea.key}`).set("x-auth-token", token);
+    expect(IDEA_KEYS).not.toContain(key);
+    expect((await api().post("/api/manage/ops/ideas/standing").set("x-auth-token", token).send({ text: "something long enough", target: "tv" })).status).toBe(400);
   });
 });

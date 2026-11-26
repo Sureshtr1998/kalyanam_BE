@@ -78,6 +78,8 @@ const ConfigSchema = new Schema(
     targets: [{ month: String, members: Number, revenue: Number, spend: Number, _id: false }],
     // Facts the agent may state in replies and posts. Edited in the Ops tab.
     brief: { type: String, default: "" },
+    // The owner's standing ideas: { key, label, hint, facts, path, target: organic|ads|both, text, active, createdAt }.
+    ownerIdeas: { type: [Schema.Types.Mixed], default: [] },
     // Manually entered plan details for third-party tools, keyed by tool id.
     tools: { type: Schema.Types.Mixed, default: {} },
     // When each periodic job last ran, keyed by job name.

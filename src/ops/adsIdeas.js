@@ -1,5 +1,6 @@
 import User from "../models/User.js";
-import { AdSnapshot, OpsComment, OpsCreative, OpsMail, OpsReport } from "./models.js";
+import { AdSnapshot, OpsComment, OpsCreative, OpsMail, OpsReport, getConfig } from "./models.js";
+import { getPricing } from "../utils/pricing.js";
 import { languageOf } from "./adsEngine.js";
 
 /*
@@ -35,9 +36,51 @@ export const IDEAS = {
   no_agents: { label: "No agents, no sales calls", hint: "Families talk directly; no brokers or agents, no sales calls.", match: /agent|broker|sales\s*call|no\s*spam/i },
   answer: { label: "Answer a family's doubt", hint: "Take one real question families ask and answer it plainly.", match: /faq|doubt|question|answer|is\s*it\s*real/i },
   festival: { label: "Festival / wedding season", hint: "The festival or wedding season coming up in the region, with a warm invite. Never print dates.", match: /festival|muhurt|season|sankranti|ugadi|diwali|deepavali|navrat|pongal|onam|dussehra/i },
+  pricing: {
+    label: "Every price, in the open",
+    hint: "Show the real price list from the pricing page (membership and credits, extra credit packs, astrology reports). Few matrimony sites publish all their prices; ours are on one public page before you register, with no hidden charges and no sales calls.",
+    match: /pricing|price\s*list|every\s*price|hidden\s*(charge|cost|fee)/i,
+    // Posts with this idea link to the pricing page in their language (/kn/pricing).
+    path: "/pricing",
+  },
   brand: { label: "Who we are (brand)", hint: "A matrimony site for families, by language; the basics of what it is.", match: /brand|hero|about|trust/i },
 };
 export const IDEA_KEYS = Object.keys(IDEAS);
+const BASE_KEYS = [...IDEA_KEYS];
+
+/** Where an idea may be used: "organic", "ads" or "both" (built-in ideas: both). */
+export const ideaTarget = (k) => IDEAS[k]?.target ?? "both";
+
+/** The prices the pricing idea may state, from the live price level (never the struck-through price or referral discount). */
+export const pricingFacts = (p) =>
+  `Prices you may state (from the pricing page, seetharamakalyana.in/pricing): ${
+    p.registrationFee ? `yearly membership ₹${p.registrationFee}` : "registration is free"
+  } with ${p.registrationInterests} interest credits (1 credit = 1 interest); extra credits ₹${p.interestPacks.basic.amount} for ${p.interestPacks.basic.interests} or ₹${p.interestPacks.premium.amount} for ${p.interestPacks.premium.interests}; contact details are shared when the other family accepts your interest, or can be unlocked with credits; astrology reports ₹${p.astroFees.Overview} (overview), ₹${p.astroFees["Kundli Matching"]} (kundli matching), ₹${p.astroFees.Personalized} (personalised). Every price is on one public page before you register; no hidden charges.`;
+
+let FACTS = "";
+/** Extra allowed facts for writers and checkers: the live prices and the owner's own ideas. Call loadOwnerIdeas() first. */
+export const ideaFacts = () => FACTS;
+
+/**
+ * Merges the owner's standing ideas (Ops → Plan an idea → "Keep in …") into
+ * IDEAS / IDEA_KEYS in place, so every planner, schema and the idea library
+ * treat them like the built-in ones, and refreshes the allowed facts.
+ */
+export const loadOwnerIdeas = async () => {
+  const config = await getConfig();
+  for (const k of Object.keys(IDEAS)) if (!BASE_KEYS.includes(k)) delete IDEAS[k];
+  const owner = (config.ownerIdeas ?? []).filter((i) => i && i.key && i.active !== false);
+  for (const i of owner) IDEAS[i.key] = { label: i.label, hint: i.hint, match: /(?!)/, target: i.target, owner: true, path: i.path || "" };
+  IDEA_KEYS.splice(0, IDEA_KEYS.length, ...Object.keys(IDEAS));
+  const prices = await getPricing().catch(() => null);
+  FACTS = [
+    prices ? pricingFacts(prices) : "",
+    ...owner.filter((i) => i.facts).map((i) => `The owner's idea "${i.label}" — facts from the owner you may state: ${i.facts}`),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return owner;
+};
 
 /** "Parents 45-65" / "Young 24-34" / "Women ..." from an ad set name. */
 export const audienceOf = (adsetName = "") => {
@@ -90,7 +133,8 @@ export const pickIdeas = ({ library, language, audience }) => {
     return paid ? { cpp: spend / paid, paid } : null;
   };
 
-  const candidates = IDEA_KEYS.filter((k) => k !== "brand");
+  // Organic-only ideas never go into ads.
+  const candidates = IDEA_KEYS.filter((k) => k !== "brand" && ideaTarget(k) !== "organic");
   const provenHere = candidates.filter((k) => (here(k)?.paid ?? 0) >= PROVEN_PAID).sort((a, b) => cpp(here(a)) - cpp(here(b)));
   let proven = provenHere[0] ? { idea: provenHere[0], cpp: cpp(here(provenHere[0])), where: "here" } : null;
   if (!proven) {
@@ -109,7 +153,9 @@ export const pickIdeas = ({ library, language, audience }) => {
         why: e ? `₹${Math.round(e.cpp)} per member for this audience in other languages` : "not tried anywhere yet",
       };
     })
-    .sort((a, b) => (a.prior ?? Infinity) - (b.prior ?? Infinity));
+    // The owner's own ideas are tested first, then the ones that did best elsewhere.
+    .sort((a, b) => (IDEAS[b.idea]?.owner ? 1 : 0) - (IDEAS[a.idea]?.owner ? 1 : 0) || (a.prior ?? Infinity) - (b.prior ?? Infinity))
+    .map((t) => (IDEAS[t.idea]?.owner ? { ...t, why: "your idea (Plan an idea)" } : t));
   // Nothing left untested: retry the second-best proven idea with a fresh take.
   if (!tests.length && provenHere[1]) tests.push({ idea: provenHere[1], prior: cpp(here(provenHere[1])), why: "second-best idea here; a fresh take" });
   return { proven, tests: tests.slice(0, 3) };
