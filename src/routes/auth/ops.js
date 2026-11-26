@@ -9,7 +9,7 @@ import { adsSettings, unitStates } from "../../ops/ads.js";
 import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
 import { toolsOverview, updateTool } from "../../ops/tools.js";
 import { growth } from "../../ops/review.js";
-import { deletePostImage, organicSignups, renderDone, renderQueue } from "../../ops/organic.js";
+import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek } from "../../ops/organic.js";
 import { planIdea } from "../../ops/ideas.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
@@ -373,6 +373,15 @@ router.get(
     ]);
     // Live sign-up counts per tracking code (the stored report is refreshed daily).
     return res.json({ posts, stats: stats ? { ...stats.data, period: stats.period } : null, signups: Object.fromEntries(signups) });
+  })
+);
+
+/** Re-plans next week's organic posts that are still waiting for their image (e.g. after a planner upgrade or failed images). */
+router.post(
+  "/manage/ops/organic/replan",
+  wrap(async (_req, res) => {
+    const r = await replanWeek();
+    return res.json({ ...r, msg: r.skipped ? r.skipped : `Re-planned: ${r.planned} post(s) (${r.cancelled} older one(s) replaced)` });
   })
 );
 

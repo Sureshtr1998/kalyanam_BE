@@ -214,7 +214,7 @@ export const planWeek = async () => {
 
   // Only plan evenings that are still free: nothing from the agent and nothing scheduled in Meta by hand that evening.
   const [ours, manual, performance, signups, doubts, brides, library, tagged] = await Promise.all([
-    OpsPost.find({ publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) }, status: { $ne: "cancelled" } }).lean(),
+    OpsPost.find({ publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) }, status: { $nin: ["cancelled", "failed"] } }).lean(),
     fetchScheduledTimes().catch(() => []),
     fetchPostPerformance(28).catch(() => []),
     organicSignups(28).catch(() => new Map()),
@@ -315,6 +315,22 @@ ${brides ? `Brides are ${Math.round(brides.share * 100)}% of new members (${brid
 };
 
 /**
+ * Re-plans next week: cancels the agent's posts that are still waiting for
+ * their image (nothing has been scheduled in Meta for them yet) and plans
+ * the week again with the current planner. Posts already scheduled, and
+ * anything posted by hand, are left alone.
+ */
+export const replanWeek = async () => {
+  const monday = nextMonday();
+  const { modifiedCount } = await OpsPost.updateMany(
+    { publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) }, status: { $in: ["design", "failed"] } },
+    { $set: { status: "cancelled", error: "Re-planned" } }
+  );
+  const result = await planWeek();
+  return { cancelled: modifiedCount, ...result };
+};
+
+/**
  * Daily: stores how organic posts did and the sign-ups traced to them, for
  * the Organic screen and for Claude Code's /weekly-posts (read via the Ops API).
  */
@@ -340,6 +356,22 @@ export const recordOrganicStats = async () => {
  * Retries at most 3 times per post, 2 hours apart.
  */
 export const requestRenders = async () => {
+  // Images that failed 3 times: the post or ad is marked failed (freeing its day for the planner) and the owner is told.
+  const giveUp = { status: "design", renderRequests: { $gte: 3 }, renderRequestedAt: { $lte: new Date(Date.now() - 2 * 3600000) } };
+  const [deadPosts, deadAds] = await Promise.all([OpsPost.countDocuments(giveUp), OpsCreative.countDocuments(giveUp)]);
+  if (deadPosts + deadAds) {
+    const error = "The image couldn't be designed after 3 tries (Ops render GitHub Action).";
+    await OpsPost.updateMany(giveUp, { $set: { status: "failed", error } });
+    await OpsCreative.updateMany(giveUp, { $set: { status: "failed" } });
+    await notice("organic", {
+      type: "organic.render_failed",
+      priority: "urgent",
+      title: `${deadPosts + deadAds} image(s) couldn't be designed`,
+      reason: "The Ops render GitHub Action failed 3 times for them. Check github.com → kalyanam_BE → Actions → Ops render. Failed posts free their day; next week's plan fills it again.",
+      effect: "Alert only.",
+      payload: { dedupeKey: `render_failed:${new Date().toISOString().slice(0, 10)}` },
+    });
+  }
   const due = {
     status: "design",
     renderRequests: { $lt: 3 },

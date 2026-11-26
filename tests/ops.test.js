@@ -817,3 +817,39 @@ describe("stored brief fix", () => {
     expect((await getConfig()).brief).toBe("Joining costs ₹351 (one time).");
   });
 });
+
+describe("stuck images and re-planning", () => {
+  it("marks posts whose image failed 3 times as failed and alerts once", async () => {
+    const { requestRenders } = await import("../src/ops/organic.js");
+    await OpsPost.deleteMany({});
+    await OpsCreative.deleteMany({});
+    await OpsPost.create({ publishAt: new Date(Date.now() + 3 * 86400000), language: "Tamil", topic: "t", caption: "c", design: { headline: "h" }, status: "design", renderRequests: 3, renderRequestedAt: new Date(Date.now() - 3 * 3600000) });
+    await requestRenders();
+    expect((await OpsPost.findOne()).status).toBe("failed");
+    expect(await OpsAction.countDocuments({ type: "organic.render_failed", priority: "urgent" })).toBe(1);
+  });
+
+  it("re-plans next week: replaces posts still waiting for images, keeps scheduled ones", async () => {
+    await OpsPost.deleteMany({});
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    metaRead.scheduledTimes = [];
+    metaRead.performance = [];
+    const ist = new Date(Date.now() + 5.5 * 3600000);
+    const add = ((8 - ist.getUTCDay()) % 7) || 7;
+    const monday = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + add) - 5.5 * 3600000);
+    const at = (d) => new Date(monday.getTime() + d * 86400000 + 19.5 * 3600000);
+    await OpsPost.create([
+      { publishAt: at(0), language: "Kannada", topic: "old", caption: "c", design: { headline: "h" }, status: "design" },
+      { publishAt: at(1), language: "Telugu", topic: "kept", caption: "c", design: { headline: "h" }, status: "scheduled" },
+    ]);
+    organicPlan.mockReturnValue({
+      posts: [0, 1, 2, 3, 4, 5, 6].map((day) => ({ day, language: "Kannada", idea: "how_it_works", format: "card", angle: "a", topic: `new ${day}`, kicker: "k", headline: "h", subline: "s", highlight: "", bullets: [], price: "", cta: "c", caption: "c", hashtags: ["x"], theme: "saffron" })),
+    });
+    const token = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const r = await api().post("/api/manage/ops/organic/replan").set("x-auth-token", token);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ cancelled: 1, planned: 6 });
+    expect(await OpsPost.countDocuments({ topic: "kept", status: "scheduled" })).toBe(1);
+    expect(await OpsPost.countDocuments({ topic: "old", status: "cancelled" })).toBe(1);
+  });
+});
