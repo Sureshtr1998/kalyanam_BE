@@ -1061,3 +1061,27 @@ describe("stories", () => {
     metaRead.stories = [];
   });
 });
+
+describe("missed runs", () => {
+  it("alerts once per gap and marks the alert resolved when runs are back", async () => {
+    const { tick } = await import("../src/ops/tick.js");
+    await OpsAction.deleteMany({ type: "ops.missed_runs" });
+    const ago = (min) => new Date(Date.now() - min * 60000);
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "lastRuns.tick": { at: ago(225), ok: true }, tickLockUntil: null } }, { upsert: true });
+    await tick({ source: "test", budgetMs: 1 });
+    const alert = await OpsAction.findOne({ type: "ops.missed_runs" });
+    expect(alert.title).toMatch(/3 h 45 min ago/);
+    expect(alert.payload.resolvedAt ?? null).toBeNull();
+
+    // The next run is on time: the alert is resolved, and no new one is added.
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "lastRuns.tick": { at: ago(15), ok: true }, tickLockUntil: null } });
+    await tick({ source: "test", budgetMs: 1 });
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+    expect(await OpsAction.countDocuments({ type: "ops.missed_runs" })).toBe(1);
+
+    // A second gap the same day gets its own alert.
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "lastRuns.tick": { at: ago(90), ok: true }, tickLockUntil: null } });
+    await tick({ source: "test", budgetMs: 1 });
+    expect(await OpsAction.countDocuments({ type: "ops.missed_runs" })).toBe(2);
+  });
+});

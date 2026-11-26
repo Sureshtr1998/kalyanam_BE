@@ -1,4 +1,4 @@
-import { OpsConfig, getConfig } from "./models.js";
+import { OpsAction, OpsConfig, getConfig } from "./models.js";
 import { notice, runDue } from "./actions.js";
 import { metaConfigured, pageConfigured, resolvePage, igConfigured } from "./meta.js";
 import { mailConfigured } from "./mail.js";
@@ -158,8 +158,15 @@ const runTick = async ({ config, t, done, deadline, source }) => {
       title: `The Ops agent missed runs: the last one was ${Math.floor(gapMinutes / 60)} h ${Math.round(gapMinutes % 60)} min ago`,
       reason: "It should run every 15 minutes (Vercel Cron). Anything due in the gap (replies, verifications, ad changes) runs now.",
       effect: "If this repeats, check Vercel → the kalyanam-be project → Settings → Cron Jobs.",
-      payload: { dedupeKey: `missed_runs:${t.date}` },
+      // One alert per gap (not per day), so a second gap on the same day is reported too.
+      payload: { dedupeKey: `missed_runs:${new Date(previous).toISOString()}` },
     }).catch(() => {});
+  } else {
+    // Runs are back on time: earlier missed-runs alerts are marked resolved and leave Today.
+    await OpsAction.updateMany(
+      { type: "ops.missed_runs", status: "info", "payload.resolvedAt": null },
+      { $set: { "payload.resolvedAt": new Date() } }
+    ).catch(() => {});
   }
 
   // Find the Facebook Page / Instagram account from the token (cached for an hour).
