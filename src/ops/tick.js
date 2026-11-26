@@ -1,5 +1,5 @@
 import { OpsAction, OpsConfig, getConfig } from "./models.js";
-import { notice, runDue } from "./actions.js";
+import { mergeLegacyPairs, notice, runDue } from "./actions.js";
 import { metaConfigured, pageConfigured, resolvePage, igConfigured } from "./meta.js";
 import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
@@ -171,6 +171,13 @@ const runTick = async ({ config, t, done, deadline, source }) => {
 
   // Find the Facebook Page / Instagram account from the token (cached for an hour).
   await resolvePage().catch(() => {});
+
+  // Once: fold the old two-card pairs (hide + delete, Facebook + Instagram) into one card each.
+  if (!config.migrations?.mergePairs20261127) {
+    await mergeLegacyPairs()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergePairs20261127": new Date() } }))
+      .catch((err) => console.error("[ops] merge pairs", err.message));
+  }
 
   // Vercel Cron is the timer now; the first tick from it removes the old QStash schedule.
   await ensureAutomation({ source }).catch(() => {});

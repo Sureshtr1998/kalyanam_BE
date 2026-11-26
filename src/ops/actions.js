@@ -137,6 +137,45 @@ const continueWith = async (action, { next, ...result }) => {
   return action.save();
 };
 
+/**
+ * One-time tidy-up: before steps were kept on one card, a hidden comment
+ * (or a post scheduled on Facebook) got a second card for its next step.
+ * Each open follow-up card is folded into its first card, which carries on
+ * with the next step; the extra card is removed. Returns how many merged.
+ */
+export const mergeLegacyPairs = async () => {
+  const PAIRS = [
+    ["comments.hide", "comments.delete"],
+    ["organic.schedule", "organic.publish_ig"],
+  ];
+  let merged = 0;
+  for (const [first, next] of PAIRS) {
+    const followUps = await OpsAction.find({ type: next, status: { $in: ["scheduled", "shadow", "needs_you"] } });
+    for (const f of followUps) {
+      const refIds = [f.ref?.id, f.payload?.postId].filter(Boolean).map(String);
+      const head = await OpsAction.findOne({
+        type: first,
+        status: "done",
+        $or: [{ "ref.id": { $in: refIds } }, { "payload.postId": { $in: refIds } }],
+      });
+      if (!head) continue;
+      head.result = { steps: [...(head.result?.steps ?? []), { type: head.type, title: head.title, at: head.ranAt ?? head.updatedAt, result: head.result ?? {} }] };
+      head.markModified("result");
+      head.type = f.type;
+      if (first === "comments.hide") head.title = head.title.replace(/^Hide /, "Delete hidden ");
+      head.effect = f.effect;
+      head.runAt = f.runAt;
+      head.status = f.status;
+      head.payload = { ...head.payload, ...f.payload, dedupeKey: head.payload?.dedupeKey };
+      head.markModified("payload");
+      await head.save();
+      await OpsAction.deleteOne({ _id: f._id });
+      merged += 1;
+    }
+  }
+  return merged;
+};
+
 /** Reverses a done action (pauses what it created, restores what it changed). */
 export const undo = async (id, by = "admin") => {
   const action = await OpsAction.findOne({ _id: id, status: "done" });

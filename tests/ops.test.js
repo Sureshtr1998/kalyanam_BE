@@ -1192,3 +1192,21 @@ describe("ideas: pricing and the owner's standing ideas", () => {
     expect((await api().post("/api/manage/ops/ideas/standing").set("x-auth-token", token).send({ text: "something long enough", target: "tv" })).status).toBe(400);
   });
 });
+
+describe("old two-card pairs", () => {
+  it("folds a scheduled delete into its hide card", async () => {
+    const { mergeLegacyPairs } = await import("../src/ops/actions.js");
+    await OpsAction.deleteMany({});
+    const ran = new Date(Date.now() - 3600000);
+    const hide = await OpsAction.create({ module: "comments", type: "comments.hide", status: "done", title: "Hide hate comment by X (Facebook)", ranAt: ran, ref: { kind: "comment", id: "c9" }, payload: { platform: "facebook", commentId: "c9", dedupeKey: "comments.hide:c9" } });
+    const runAt = new Date(Date.now() + 3600000);
+    await OpsAction.create({ module: "comments", type: "comments.delete", status: "scheduled", title: "Delete hidden comment (facebook)", effect: "Deletes it for good.", runAt, ref: { kind: "comment", id: "c9" }, payload: { platform: "facebook", commentId: "c9" } });
+    expect(await mergeLegacyPairs()).toBe(1);
+    const cards = await OpsAction.find({ "ref.id": "c9" });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ type: "comments.delete", status: "scheduled", title: "Delete hidden hate comment by X (Facebook)" });
+    expect(cards[0].runAt.getTime()).toBe(runAt.getTime());
+    expect(cards[0].result.steps[0]).toMatchObject({ type: "comments.hide" });
+    expect(String(cards[0]._id)).toBe(String(hide._id));
+  });
+});
