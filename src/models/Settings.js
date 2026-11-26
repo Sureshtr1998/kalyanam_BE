@@ -12,6 +12,11 @@ const SettingsSchema = new Schema(
     pricingLevel: { type: Number, min: 1, max: 4 },
     pricingUpdatedBy: { type: String },
     pricingUpdatedAt: { type: Date },
+    // When on, members who asked for help with their OTP codes (OtpVerifyDialog → "Copy message")
+    // and are still unverified 4 hours later are verified automatically (see utils/autoVerify.js).
+    autoVerifyHelp: { type: Boolean, default: false },
+    autoVerifyUpdatedBy: { type: String },
+    autoVerifyUpdatedAt: { type: Date },
   },
   { versionKey: false }
 );

@@ -13,6 +13,7 @@ import { runWeeklyReview } from "./review.js";
 import { runAdsPlanning } from "./adsGrowth.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
+import { autoVerifyDue, getAutoVerifySettings } from "../utils/autoVerify.js";
 
 // Handlers register themselves on import.
 import "./dev.js";
@@ -120,6 +121,11 @@ export const tick = async ({ only, budgetMs = 50000 } = {}) => {
 
   // Make sure the 15-minute schedule exists (a no-op most of the time; recovers it if deleted).
   await ensureAutomation().catch(() => {});
+
+  // In-app "OTP not received" help requests: verify the ones past their wait (only when the admin switch is on).
+  await getAutoVerifySettings()
+    .then((s) => (s.enabled ? autoVerifyDue() : 0))
+    .catch((err) => console.error("[ops] auto-verify sweep", err.message));
 
   // Every tick: due actions first (replies and verifications waiting on their notice period).
   done.push(await attempt("actions", () => runDue(deadline - 15000)));

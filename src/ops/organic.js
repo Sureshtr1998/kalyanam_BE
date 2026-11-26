@@ -2,7 +2,7 @@ import imagekit from "../config/imageKit.js";
 import { OpsCreative, OpsPost, getConfig } from "./models.js";
 import { ask } from "./claude.js";
 import { handle, notice, propose } from "./actions.js";
-import { igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
+import { fetchPostPerformance, fetchScheduledDays, igConfigured, publishInstagramPhoto, scheduleFacebookPhoto } from "./meta.js";
 import { THEME_NAMES } from "./postDesign.js";
 import { devConfigured, dispatchRender } from "./dev.js";
 
@@ -52,29 +52,55 @@ const nextMonday = () => {
   return new Date(d.getTime() - 5.5 * 3600000);
 };
 
+/** Recent posts ranked by engagement per reach, as short lines for the planner. */
+const performanceSummary = (rows) => {
+  const scored = rows
+    .map((r) => ({ ...r, rate: r.reach ? r.engagement / r.reach : null }))
+    .sort((a, b) => (b.rate ?? -1) - (a.rate ?? -1) || b.engagement - a.engagement);
+  const line = (r) =>
+    `[${r.platform} ${String(r.at).slice(0, 10)}] reach ${r.reach ?? "?"}, engagement ${r.engagement}${r.rate != null ? ` (${(r.rate * 100).toFixed(1)}%)` : ""}: "${r.text.replace(/\s+/g, " ").slice(0, 110)}"`;
+  return { best: scored.slice(0, 6).map(line), worst: scored.slice(-4).reverse().map(line), count: rows.length };
+};
+
 export const planWeek = async () => {
   const config = await getConfig();
   const monday = nextMonday();
-  const exists = await OpsPost.exists({ publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) }, status: { $ne: "cancelled" } });
-  if (exists) return { skipped: "Next week is already planned" };
+  const dayKey = (d) => new Date(monday.getTime() + d * 86400000 + 5.5 * 3600000).toISOString().slice(0, 10);
+
+  // Only plan days that are still free: nothing from the agent and nothing scheduled in Meta by hand.
+  const [ours, manual, performance] = await Promise.all([
+    OpsPost.find({ publishAt: { $gte: monday, $lt: new Date(monday.getTime() + 7 * 86400000) }, status: { $ne: "cancelled" } }).lean(),
+    fetchScheduledDays().catch(() => []),
+    fetchPostPerformance(28).catch(() => []),
+  ]);
+  const taken = new Set([...ours.map((p) => new Date(p.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(0, 10)), ...manual]);
+  const freeDays = [0, 1, 2, 3, 4, 5, 6].filter((d) => !taken.has(dayKey(d)));
+  if (!freeDays.length) return { skipped: "Every day next week already has a post" };
 
   const last = await OpsPost.find({ status: { $in: ["published", "scheduled"] } }).sort({ publishAt: -1 }).limit(14).lean();
+  const perf = performanceSummary(performance);
   const { posts } = await ask({
     task: "organic.plan",
     tier: "write",
     system: `You plan organic Facebook and Instagram posts for Seetha Rama Kalyana (never ads).
 ${config.brief}
 Each post is a designed text card: a short kicker label, a strong headline and one supporting line, all in the post's language and native script (English posts in English), plus a caption.
-Mix through the week: family values, how matching works, safety tips for women meeting a match (general advice only, no promises), success-story style (no real names), festivals that week, and one "why join" post. Vary the themes (${THEME_NAMES.join(", ")}). Headlines must be natural, warm and correct in that language — never a literal translation.`,
-    prompt: `Plan 7 posts, day 0 (Monday) to 6, languages in this order: ${LANGS.join(", ")}.
-Week starting ${monday.toDateString()}.
-Recent posts (don't repeat these ideas): ${last.map((p) => `${p.topic} (${p.language})`).join("; ") || "none yet"}.`,
+Mix through the week: family values, how matching works, safety tips for women meeting a match (general advice only, no promises), success-story style (no real names), festivals that week, and one "why join" post. Vary the themes (${THEME_NAMES.join(", ")}). Headlines must be natural, warm and correct in that language — never a literal translation.
+Learn from the performance data: lean towards the topics, languages and angles of the best posts, avoid what the weakest posts did, but keep some variety so new ideas get tested.`,
+    prompt: `Plan exactly ${freeDays.length} post(s), only for these days (0 = Monday): ${freeDays.join(", ")}. Day d uses language ${freeDays.map((d) => `${d}=${LANGS[d]}`).join(", ")}.
+Week starting ${monday.toDateString()}. The other days already have posts; don't plan them.
+Recent agent posts (don't repeat these ideas): ${last.map((p) => `${p.topic} (${p.language})`).join("; ") || "none yet"}.
+How the last 4 weeks of posts did (${perf.count} posts; engagement = reactions + comments + shares, or likes + comments on Instagram):
+Best: ${perf.best.join("\n") || "no data yet"}
+Weakest: ${perf.worst.join("\n") || "no data yet"}`,
     schema: SCHEMA,
     maxTokens: 6000,
   });
 
   let made = 0;
-  for (const p of posts.slice(0, 7)) {
+  for (const p of posts.filter((x) => freeDays.includes(x.day)).slice(0, freeDays.length)) {
+    if (taken.has(dayKey(p.day))) continue;
+    taken.add(dayKey(p.day));
     const publishAt = new Date(monday.getTime() + p.day * 86400000 + 19.5 * 3600000); // 7:30 pm IST
     await OpsPost.create({
       publishAt,
@@ -90,11 +116,11 @@ Recent posts (don't repeat these ideas): ${last.map((p) => `${p.topic} (${p.lang
   await requestRenders();
   await notice("organic", {
     type: "organic.week_planned",
-    title: `Next week's ${made} posts are written; images are being designed`,
-    reason: "They schedule themselves as soon as their images are ready. Open Organic or Calendar to see or cancel any of them.",
+    title: `Next week's ${made} post(s) are written; images are being designed`,
+    reason: `${7 - freeDays.length ? `${7 - freeDays.length} day(s) already had a post, so they were left alone. ` : ""}Planned using how your last ${perf.count} posts performed. Open Organic or Calendar to see or cancel any of them.`,
     payload: { dedupeKey: `week:${monday.toISOString().slice(0, 10)}` },
   });
-  return { planned: made };
+  return { planned: made, skippedDays: 7 - freeDays.length, learnedFrom: perf.count };
 };
 
 /**

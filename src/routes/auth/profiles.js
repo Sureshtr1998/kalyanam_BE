@@ -10,6 +10,7 @@ import dbConnect from "../../utils/dbConnect.js";
 import { deleteRemovedImages } from "../../utils/images.js";
 import upStash from "../../config/upStash.js";
 import { normalizeEmail } from "../../utils/constants.js";
+import { autoVerifyIfDue } from "../../utils/autoVerify.js";
 import {
   acceptsViewerQuery,
   escapeRegex,
@@ -434,6 +435,9 @@ router.post("/my-profile", auth, async (req, res) => {
         .map((i) => ({ url: i.url, fileId: i.fileId }));
       if (images.length) basic.images = images;
     }
+
+    // A member who asked for help 4+ hours ago is verified here if the admin's auto-verify mode is on.
+    if (!user.isVerified) await autoVerifyIfDue(user);
 
     // Email / WhatsApp number become editable only through OTP verification.
     // Admins can verify themselves (and others) without the OTP step.

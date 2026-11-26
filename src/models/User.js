@@ -167,6 +167,15 @@ const userSchema = new Schema(
     ],
     hasCompleteProfile: { type: Boolean, default: false },
     isVerified: { type: Boolean, default: false },
+    // The member couldn't complete the OTP step and asked for help ("Copy message").
+    // `at` is the first request; email/mobile are the details they want verified.
+    verifyHelp: {
+      at: { type: Date },
+      email: { type: String },
+      mobile: { type: String },
+    },
+    // Set when the admin's auto-verify mode verified this member without OTPs.
+    autoVerifiedAt: { type: Date },
     isHidden: { type: Boolean, default: false },
     // Policy violation: hidden from matches and unable to log in until an
     // admin clears it (see /manage/users/:id/corrupt).

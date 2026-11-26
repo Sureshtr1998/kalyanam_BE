@@ -14,6 +14,8 @@ vi.mock("../src/ops/mail.js", () => ({
 }));
 const triage = vi.fn();
 const ideaPlan = vi.fn();
+const organicPlan = vi.fn();
+const metaRead = vi.hoisted(() => ({ scheduledDays: [], performance: [] }));
 const commentTriage = vi.fn();
 const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})) }));
 const hidden = [];
@@ -33,6 +35,8 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
     url_tags: "utm_source=meta",
   })),
   uploadAdImage: vi.fn(async () => "hash_1"),
+  fetchScheduledDays: vi.fn(async () => metaRead.scheduledDays),
+  fetchPostPerformance: vi.fn(async () => metaRead.performance),
   fetchAds: vi.fn(async () => [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
   createCreative: vi.fn(async () => ({ id: "cr_1" })),
   copyAd: vi.fn(async () => "ad_new"),
@@ -46,7 +50,7 @@ vi.mock("../src/ops/claude.js", () => ({
   spendSummary: async () => ({ totalUsd: 1.5, totalCalls: 10, monthUsd: 0.5, byTask: [] }),
   inrRate: async () => 88,
   ClaudeUnavailable: class extends Error {},
-  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
+  ask: vi.fn(async ({ task }) => (task === "support.triage" ? triage() : task === "comments.triage" ? commentTriage() : task === "ideas.plan" ? ideaPlan() : task === "organic.plan" ? organicPlan() : "ನಮಸ್ಕಾರ, ನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ. — Team Seetha Rama Kalyana")),
 }));
 
 const { api, createUser, tokenFor } = await import("./helpers.js");
@@ -515,5 +519,34 @@ describe("render pass", () => {
     expect(verifyRenderToken(`${Date.now() + 1000}.deadbeef`)).toBe(false);
     expect((await api().get("/api/ops/render-queue").set("x-render-token", good)).status).toBe(200);
     expect((await api().get("/api/ops/render-queue").set("x-render-token", "nope")).status).toBe(401);
+  });
+});
+
+describe("organic planner", () => {
+  it("leaves days already scheduled in Meta alone and plans from post performance", async () => {
+    const { planWeek } = await import("../src/ops/organic.js");
+    const { ask } = await import("../src/ops/claude.js");
+    await OpsPost.deleteMany({});
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.organic": "live" } }, { upsert: true });
+    // Next Monday (IST) and the Wednesday after it, which the owner already filled by hand.
+    const ist = new Date(Date.now() + 5.5 * 3600000);
+    const add = ((8 - ist.getUTCDay()) % 7) || 7;
+    const mondayKey = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + add)).toISOString().slice(0, 10);
+    const wednesdayKey = new Date(Date.parse(mondayKey) + 2 * 86400000).toISOString().slice(0, 10);
+    metaRead.scheduledDays = [wednesdayKey];
+    metaRead.performance = [
+      { platform: "facebook", at: "2026-11-20", text: "ಕುಟುಂಬದ ಆಶೀರ್ವಾದ", reach: 900, engagement: 81 },
+      { platform: "instagram", at: "2026-11-21", text: "Why join", reach: 400, engagement: 4 },
+    ];
+    const post = (day) => ({ day, language: "Kannada", topic: `Topic ${day}`, kicker: "k", headline: `h${day}`, subline: "s", theme: "saffron", caption: "c" });
+    organicPlan.mockReturnValue({ posts: [0, 1, 2, 3, 4, 5, 6].map(post) });
+
+    const r = await planWeek();
+    expect(r).toMatchObject({ planned: 6, skippedDays: 1, learnedFrom: 2 });
+    const days = (await OpsPost.find().lean()).map((p) => new Date(p.publishAt.getTime() + 5.5 * 3600000).toISOString().slice(0, 10));
+    expect(days).not.toContain(wednesdayKey);
+    const call = ask.mock.calls.findLast(([o]) => o.task === "organic.plan")[0];
+    expect(call.prompt).toContain("ಕುಟುಂಬದ ಆಶೀರ್ವಾದ");
+    expect(call.prompt).toMatch(/Plan exactly 6 post/);
   });
 });

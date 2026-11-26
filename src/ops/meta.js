@@ -343,3 +343,69 @@ export const metaErrorText = (err) => {
   if ([4, 17, 32, 613, 80000, 80004].includes(code)) return "Meta's rate limit was hit. It will retry on the next run.";
   return `Meta said: ${msg || "unknown error"}`;
 };
+
+/* ------------------------- organic post performance ------------------------ */
+
+const settle = async (p) => {
+  try {
+    return await p;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * How recent organic posts did (last `days` days): reach where Meta gives it,
+ * plus reactions, comments and shares (Facebook) or likes and comments
+ * (Instagram). Missing insight metrics are left out rather than failing.
+ */
+export const fetchPostPerformance = async (days = 28) => {
+  await resolvePage();
+  if (!PAGE()) return [];
+  const token = await pageToken();
+  const since = Math.floor((Date.now() - days * 86400000) / 1000);
+  const out = [];
+  const fb = await settle(
+    graphGet(`${PAGE()}/published_posts`, {
+      fields: "id,message,created_time,shares,reactions.summary(total_count).limit(0),comments.summary(total_count).limit(0)",
+      since: String(since),
+      limit: 40,
+    }, token)
+  );
+  for (const p of fb?.data ?? []) {
+    const reach = await settle(graphGet(`${p.id}/insights`, { metric: "post_impressions_unique" }, token));
+    out.push({
+      platform: "facebook",
+      at: p.created_time,
+      text: String(p.message || "").slice(0, 160),
+      reach: reach?.data?.[0]?.values?.[0]?.value ?? null,
+      engagement: (p.reactions?.summary?.total_count ?? 0) + (p.comments?.summary?.total_count ?? 0) + (p.shares?.count ?? 0),
+    });
+  }
+  if (IG()) {
+    const ig = await settle(graphGet(`${IG()}/media`, { fields: "id,caption,timestamp,like_count,comments_count,media_type", limit: 40 }, token));
+    for (const m of (ig?.data ?? []).filter((x) => Date.parse(x.timestamp) / 1000 >= since)) {
+      const reach = await settle(graphGet(`${m.id}/insights`, { metric: "reach" }, token));
+      out.push({
+        platform: "instagram",
+        at: m.timestamp,
+        text: String(m.caption || "").slice(0, 160),
+        reach: reach?.data?.[0]?.values?.[0]?.value ?? null,
+        engagement: (m.like_count ?? 0) + (m.comments_count ?? 0),
+      });
+    }
+  }
+  return out;
+};
+
+/** IST dates (YYYY-MM-DD) that already have a Facebook post scheduled in Meta (e.g. posted by hand). */
+export const fetchScheduledDays = async () => {
+  await resolvePage();
+  if (!PAGE()) return [];
+  const token = await pageToken();
+  const r = await settle(graphGet(`${PAGE()}/scheduled_posts`, { fields: "id,scheduled_publish_time", limit: 100 }, token));
+  return (r?.data ?? [])
+    .map((p) => Number(p.scheduled_publish_time))
+    .filter(Boolean)
+    .map((s) => new Date(s * 1000 + 5.5 * 3600000).toISOString().slice(0, 10));
+};

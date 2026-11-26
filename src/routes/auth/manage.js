@@ -24,6 +24,7 @@ import {
 } from "../../utils/pricing.js";
 import { escapeRegex } from "../../utils/matching.js";
 import { deleteRemovedImages } from "../../utils/images.js";
+import { autoVerifyDue, getAutoVerifySettings, setAutoVerify } from "../../utils/autoVerify.js";
 import { EDITABLE, isComplete, pick } from "./profiles.js";
 import { removeMember } from "./accounts.js";
 import { brokerView } from "./broker.js";
@@ -961,6 +962,46 @@ router.post("/manage/pricing", adminOnly, async (req, res) => {
     });
   } catch (err) {
     console.error("Broker settle error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+// ───────────────────────── Auto-verify (admin) ─────────────────────────
+
+/** Members waiting on a help request, with the mode's state. */
+const autoVerifyState = async () => ({
+  ...(await getAutoVerifySettings()),
+  waiting: await User.countDocuments({ isVerified: { $ne: true }, "verifyHelp.at": { $exists: true } }),
+});
+
+router.get("/manage/auto-verify", adminOnly, async (_req, res) => {
+  try {
+    await dbConnect();
+    // Catch anyone whose 4 hours passed while no queued check reached them.
+    await autoVerifyDue();
+    return res.json(await autoVerifyState());
+  } catch (err) {
+    console.error("Auto-verify settings error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+/** Turns auto-verify mode on or off. Turning it on verifies everyone already due. */
+router.post("/manage/auto-verify", adminOnly, async (req, res) => {
+  try {
+    await dbConnect();
+    const enabled = req.body?.enabled === true;
+    // @ts-ignore
+    await setAutoVerify(enabled, req.user?.basic?.email ?? "admin");
+    const verified = enabled ? await autoVerifyDue() : 0;
+    return res.json({
+      msg: enabled
+        ? `Auto-verify is on${verified ? ` · ${verified} member${verified === 1 ? "" : "s"} verified now` : ""}`
+        : "Auto-verify is off",
+      ...(await autoVerifyState()),
+    });
+  } catch (err) {
+    console.error("Auto-verify toggle error:", err);
     return res.status(500).json({ msg: "Server error" });
   }
 });

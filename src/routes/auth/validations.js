@@ -1,7 +1,7 @@
 import { Router } from "express";
 import otpGenerator from "otp-generator";
 import sendEmail from "../../config/msg91Email.js";
-import upStash from "../../config/upStash.js";
+import upStash, { publishQStash } from "../../config/upStash.js";
 import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
 import User from "../../models/User.js";
 import otpLimiter, { countHit } from "../../middleware/otpLimiter.js";
@@ -12,6 +12,8 @@ import {
   MOBILE_RE,
   normalizeEmail,
 } from "../../utils/constants.js";
+import { isInternalRequest } from "../../utils/payments.js";
+import { AUTO_VERIFY_DELAY, autoVerifyDue, autoVerifyIfDue } from "../../utils/autoVerify.js";
 
 const router = Router();
 const MAX_OTP_ATTEMPTS = 5;
@@ -139,6 +141,65 @@ router.post("/verify-otp-registration", auth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+/**
+ * The member couldn't get or enter the OTP codes and copied the help message
+ * (OtpVerifyDialog). Records the details they want verified and queues a check
+ * 4 hours later; if the admin's auto-verify mode is on then, they're verified.
+ */
+router.post("/verification-help", auth, async (req, res) => {
+  // @ts-ignore
+  const userId = req.user.id;
+  const email = normalizeEmail(req.body?.email);
+  const mobile = String(req.body?.mobile || "");
+  if (!EMAIL_RE.test(email) || !MOBILE_RE.test(mobile))
+    return res.status(400).json({ msg: "Enter a valid email and 10-digit WhatsApp number" });
+
+  try {
+    await dbConnect();
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: "User not found" });
+    if (user.isVerified) return res.json({ msg: "Already verified" });
+
+    if (await User.exists({ "basic.email": email, _id: { $ne: userId } }))
+      return res.status(400).json({ msg: "Email already registered" });
+    if (await User.exists({ "basic.mobile": mobile, _id: { $ne: userId } }))
+      return res.status(400).json({ msg: "Mobile number already registered" });
+
+    // The clock starts at the first request; later requests only update the details.
+    const first = !user.verifyHelp?.at;
+    user.verifyHelp = { at: user.verifyHelp?.at ?? new Date(), email, mobile };
+    await user.save();
+
+    if (first) {
+      try {
+        await publishQStash("auto-verify", { userId: String(user._id) }, AUTO_VERIFY_DELAY);
+      } catch (err) {
+        // Not fatal: the next profile save or admin visit catches it too.
+        console.error("Auto-verify queue error:", err);
+      }
+    }
+    return res.json({ msg: "We've noted your request for help." });
+  } catch (err) {
+    console.error("Verification help error:", err);
+    return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+/** QStash, 4 hours after a help request: verifies that member (and anyone else due) if the mode is on. */
+router.post("/auto-verify", async (req, res) => {
+  if (!isInternalRequest(req)) return res.status(404).json({ msg: "Not found" });
+  try {
+    await dbConnect();
+    const user = req.body?.userId ? await User.findById(String(req.body.userId)) : null;
+    const one = user ? await autoVerifyIfDue(user) : false;
+    const others = await autoVerifyDue();
+    return res.json({ verified: one, alsoVerified: others });
+  } catch (err) {
+    console.error("Auto-verify error:", err);
+    return res.status(500).json({ msg: "Server error" });
   }
 });
 
