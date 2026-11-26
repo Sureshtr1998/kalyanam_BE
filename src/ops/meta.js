@@ -436,7 +436,7 @@ export const fetchPostPerformance = async (days = 28) => {
   );
   for (const p of fb?.data ?? []) {
     const [reach, clicks] = await Promise.all([
-      settle(graphGet(`${p.id}/insights`, { metric: "post_impressions_unique" }, token), "facebook reach"),
+      settle(graphGet(`${p.id}/insights`, { metric: "post_total_media_view_unique" }, token), "facebook reach"),
       settle(graphGet(`${p.id}/insights`, { metric: "post_clicks_by_type" }, token), "facebook link clicks"),
     ]);
     const byType = metricValue(clicks, "post_clicks_by_type");
@@ -446,7 +446,7 @@ export const fetchPostPerformance = async (days = 28) => {
       at: p.created_time,
       text: String(p.message || "").slice(0, 160),
       code: codeIn(p.message),
-      reach: metricValue(reach, "post_impressions_unique"),
+      reach: metricValue(reach, "post_total_media_view_unique"),
       engagement: (p.reactions?.summary?.total_count ?? 0) + (p.comments?.summary?.total_count ?? 0) + (p.shares?.count ?? 0),
       linkClicks: byType && typeof byType === "object" ? Number(byType["link clicks"] ?? 0) : null,
     });
