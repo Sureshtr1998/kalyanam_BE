@@ -4,11 +4,12 @@ import { execute, propose } from "./actions.js";
 import { THEME_NAMES } from "./postDesign.js";
 import { igConfigured } from "./meta.js";
 import { requestRenders } from "./organic.js";
-import { CLAIM_RULES, proposeIdeaCreatives } from "./adsCreative.js";
+import { CLAIM_RULES, adsetResults, pickWinners, proposeIdeaCreatives } from "./adsCreative.js";
 import { proposeIdeaAdset } from "./adsGrowth.js";
 import { RULES, batchGate } from "./adsEngine.js";
 import { IDEAS, ideaFacts, loadOwnerIdeas } from "./adsIdeas.js";
 import { adsSettings, lastBatchAt } from "./ads.js";
+import { calendarNotes } from "./hinduCalendar.js";
 
 /*
  * "Plan an idea": the owner (or the weekly review) writes an idea in plain
@@ -48,11 +49,13 @@ const STEP = {
     ad: {
       type: "object",
       additionalProperties: false,
-      required: ["campaignId", "adsetId", "variants"],
+      required: ["campaignId", "adsetId", "path", "useWinningAdset", "variants"],
       description: "ad_creatives only",
       properties: {
         campaignId: { type: "string" },
-        adsetId: { type: "string", description: "Ad set to add them to, or empty for the campaign's best one" },
+        adsetId: { type: "string", description: "Ad set to add them to, or empty to let the agent pick (never the winning ad set unless useWinningAdset)" },
+        path: { type: "string", description: "Page on the site the ad links to, without the language prefix, e.g. /pricing; empty for the ad set's usual page" },
+        useWinningAdset: { type: "boolean", description: "true only if the owner explicitly asked to put the ads into the winning/best ad set" },
         variants: {
           type: "array",
           items: {
@@ -136,6 +139,8 @@ export const planIdea = async ({ text, by = "admin", source = "owner" }) => {
   const config = await getConfig();
   await loadOwnerIdeas();
   const shape = await accountShape();
+  const adsetRows = await adsetResults().catch(() => []);
+  const winners = pickWinners(adsetRows);
   const upcoming = await OpsPost.find({ publishAt: { $gte: new Date() }, status: { $ne: "cancelled" } }).select("publishAt language topic").lean();
 
   const plan = await ask({
@@ -146,18 +151,26 @@ ${config.brief}
 Rules:
 - Only these step kinds exist: organic_post, ad_creatives, new_adset, budget. Anything else (videos, reels, WhatsApp broadcasts, offline events, website changes, price changes, boosting organic posts) is an "unsupported" step whose summary says exactly what the owner must do.
 - Organic posts are never ads. One post per day per date at most; avoid days already taken.
-- Ads only inside the existing campaigns and ad sets listed (use their ids). One campaign per language; a new ad set follows the naming of the existing ad sets in its campaign.
+- Ads only inside the existing campaigns and ad sets listed (use their ids). Ad sets marked WINNING are left alone so Meta's learning there isn't reset: put new ads in another ad set of that campaign unless the owner explicitly asked for the best/winning one.
+- When the idea is about one page of the site (prices → /pricing), set the ad's path to it so people land there. One campaign per language; a new ad set follows the naming of the existing ad sets in its campaign.
 - Owner's standing rules for ads:
 ${config.ads?.preferences ?? ""}
 ${CLAIM_RULES}
 ${ideaFacts()}
 - Write post and ad text in the target language's native script (English only for English), warm and natural, never a literal translation. No competitor names, no promises beyond the brief, no fake urgency.
 - Budgets in ₹/day. The whole account must stay under ₹${config.limits.maxDailySpend}/day.
-- Dates: today is ${todayIst()} (IST). Use the dates the idea implies; otherwise the next sensible days. Fill fields of other step kinds with empty values.`,
+- Dates: today is ${todayIst()} (IST). Use the dates the idea implies; otherwise the next sensible days. Fill fields of other step kinds with empty values.
+${calendarNotes({ days: 60 })}`,
     prompt: `Idea (from ${source === "owner" ? "the owner" : "the weekly review"}): """${idea.slice(0, 2000)}"""
 
 Campaigns: ${shape.campaigns.map((c) => `${c.name} [${c.id}]${c.dailyBudget ? ` ₹${c.dailyBudget}/day` : ""}${c.status && c.status !== "ACTIVE" ? ` (${c.status})` : ""}`).join("; ") || "none yet"}
-Ad sets: ${shape.adsets.map((a) => `${a.name} [${a.id}] in ${a.campaignId}${a.dailyBudget ? ` ₹${a.dailyBudget}/day` : ""}`).join("; ") || "none yet"}
+Ad sets (last 14 days): ${shape.adsets
+      .map((a) => {
+        const r = adsetRows.find((x) => x.id === a.id);
+        const res = r ? `, ${r.paid} members${r.paid ? ` at ₹${Math.round(r.spend / r.paid)} each` : ""}` : "";
+        return `${a.name} [${a.id}] in ${a.campaignId}${a.dailyBudget ? ` ₹${a.dailyBudget}/day` : ""}${a.status && a.status !== "ACTIVE" ? ` (${a.status})` : ""}${res}${winners.has(a.id) ? " WINNING" : ""}`;
+      })
+      .join("; ") || "none yet"}
 Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publishAt).toISOString().slice(0, 10)))].join(", ") || "none"}`,
     schema: SCHEMA,
     maxTokens: 16000,
@@ -209,7 +222,7 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
         if (!c) throw new Error("That campaign doesn't exist");
         if (!s.ad.variants?.length) throw new Error("No ad copy was written");
         const runAt = new Date(Math.max(noticeAt.getTime(), atIst(date, 6).getTime()));
-        const a = await proposeIdeaCreatives({ campaignId: c.id, campaignName: c.name, adsetId: s.ad.adsetId, language: s.language, variants: s.ad.variants, runAt, reason, ideaId });
+        const a = await proposeIdeaCreatives({ campaignId: c.id, campaignName: c.name, adsetId: s.ad.adsetId, language: s.language, variants: s.ad.variants, runAt, reason, ideaId, path: s.ad.path, useWinner: !!s.ad.useWinningAdset });
         row.status = a?.status ?? "skipped (Ads is Off)";
       } else if (s.kind === "new_adset") {
         if (auto && !settings.newAdsets) throw new Error("New ad sets are switched off (Ops → Settings → Ads rules); turn them on or schedule this yourself.");

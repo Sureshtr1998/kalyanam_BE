@@ -2,7 +2,9 @@ import imagekit from "../config/imageKit.js";
 import { AdSnapshot, OpsAction, OpsCreative, getConfig } from "./models.js";
 import { ask } from "./claude.js";
 import { Defer, handle, handleUndo, propose } from "./actions.js";
-import { languageOf } from "./adsEngine.js";
+import { RULES, languageOf } from "./adsEngine.js";
+import { langPath } from "./links.js";
+import { calendarNotes } from "./hinduCalendar.js";
 import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphPost, setStatus, uploadAdImage } from "./meta.js";
 import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaFacts, ideaOf, ideaTarget, loadIdeaLibrary, loadOwnerIdeas, organicWinners, pickIdeas } from "./adsIdeas.js";
 
@@ -96,7 +98,8 @@ export const reviewVariants = async ({ variants, language, audience, config }) =
 ${config.brief}
 ${CLAIM_RULES}
 ${ideaFacts()}
-For each variant: claimsOk is false if any line states or implies something outside the allowed facts or on the never-say list. languageOk is false if the ${language} text is unnatural, wrong, awkward or a literal translation, or doesn't suit "${audience}".
+${calendarNotes({ days: 21, language })}
+For each variant: claimsOk is false if any line states or implies something outside the allowed facts or on the never-say list, or names a festival or season that isn't in the calendar above or doesn't fall in it. languageOk is false if the ${language} text is unnatural, wrong, awkward or a literal translation, or doesn't suit "${audience}".
 When something is wrong and can be fixed without changing the idea, return a fixed version (all fields, same language, with an updated English translation); otherwise fixed is null.`,
     prompt: variants.map((v, i) => `Variant ${i}:\n${JSON.stringify(v)}`).join("\n\n"),
     schema: REVIEW_SCHEMA,
@@ -155,6 +158,65 @@ export const withUtmContent = (link, urlTags, value) => {
   tags.set("utm_content", value);
   return { link: nextLink, urlTags: tags.toString() };
 };
+
+/** A safe site path for an ad's link ("/pricing"), or null for "keep the copied ad's link". */
+export const cleanPath = (path) => {
+  const s = String(path ?? "").trim().replace(/\/+$/, "");
+  if (!s || !/^\/[a-z0-9][a-z0-9\-/]{0,79}$/i.test(s) || s.includes("//")) return null;
+  return s;
+};
+
+/** The copied ad's link pointed at a page in the ad's language, keeping its query (tracking). */
+export const withPath = (link, language, path) => {
+  const clean = cleanPath(path);
+  if (!clean) return link;
+  try {
+    const u = new URL(link);
+    u.pathname = `${langPath(language)}${clean}`;
+    return u.toString();
+  } catch {
+    return link;
+  }
+};
+
+/** "links to …/kn/pricing" or "same link as the copied ad", for a card's effect line. */
+const linkNote = (creatives, language) => {
+  const paths = [...new Set(creatives.map((c) => c.linkPath).filter(Boolean))];
+  return paths.length ? `links to seetharamakalyana.in${paths.map((p) => `${langPath(language)}${p}`).join(" and ")}` : "same link as the copied ad";
+};
+
+/**
+ * Winning ad sets, which idea plans leave alone so Meta's learning there isn't
+ * reset: in each campaign with 2+ active ad sets, the one with the lowest cost
+ * per member over 14 days, if it had at least RULES.minPaidToWin members.
+ * (A tired winner still gets fresh ads from the regular batch.)
+ * @param {Array<{ id, campaignId, name, status, spend, paid }>} rows ad sets with 14-day totals
+ * @returns {Map<string, { id, campaignId, name, cpp, paid }>}
+ */
+export const pickWinners = (rows) => {
+  const out = new Map();
+  const byCampaign = new Map();
+  for (const r of rows.filter((x) => x.status === "ACTIVE")) byCampaign.set(r.campaignId, [...(byCampaign.get(r.campaignId) ?? []), r]);
+  for (const sets of byCampaign.values()) {
+    if (sets.length < 2) continue;
+    const best = sets.filter((s) => s.paid >= RULES.minPaidToWin).sort((a, b) => a.spend / a.paid - b.spend / b.paid)[0];
+    if (best) out.set(best.id, { id: best.id, campaignId: best.campaignId, name: best.name, cpp: best.spend / best.paid, paid: best.paid });
+  }
+  return out;
+};
+
+/** Every ad set's last 14 days (spend, members) with its latest name and status. */
+export const adsetResults = async () => {
+  const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+  const rows = await AdSnapshot.aggregate([
+    { $match: { level: "adset", date: { $gte: since } } },
+    { $sort: { date: 1 } },
+    { $group: { _id: "$entityId", campaignId: { $last: "$campaignId" }, name: { $last: "$name" }, status: { $last: "$status" }, spend: { $sum: "$spend" }, paid: { $sum: "$paid" } } },
+  ]);
+  return rows.map((r) => ({ id: r._id, campaignId: r.campaignId, name: r.name, status: r.status, spend: r.spend ?? 0, paid: r.paid ?? 0 }));
+};
+
+export const winningAdsets = async () => pickWinners(await adsetResults());
 
 const copyOf = async (adId) => {
   const spec = await fetchCreativeSpec(adId).catch(() => null);
@@ -235,7 +297,8 @@ How to write:
 - Speak to this audience only: ${audience.label}.
 - Variant 1 is the PROVEN idea in fresh words: keep what makes the winning cards work (you can see them), say it differently.
 - Variant 2 TESTS a new idea: pick one of the test candidates, or answer one of the families' questions below with the "answer" idea. Make it clearly different from variant 1.
-- Use families' own words where they fit. Never print dates or deadlines; a festival or wedding season may only be named if you are sure it falls within 3 weeks of ${today} in this region.`,
+- Use families' own words where they fit. Never print dates or deadlines. Today is ${today}; a festival or season may be named only from this calendar:
+${calendarNotes({ days: 21, language })}`,
     prompt: `Campaign: ${campaignName} (${language}). Ad set: ${adsetName || adsetId} (${audience.key}).
 Why new ads now: ${notes.join(" ") || "the same people keep seeing the same ads"}.
 ${imageNote}
@@ -280,6 +343,8 @@ Write 2 variants: 1 = proven, 2 = test.`,
         title: v.title,
         translation: v.translation,
         utmContent: utmFor(language, audience.key, i),
+        // Ideas about one page (pricing) link to it.
+        linkPath: cleanPath(IDEAS[v.idea]?.path),
       })
     );
   }
@@ -292,7 +357,7 @@ Write 2 variants: 1 = proven, 2 = test.`,
       reason: `${notes.join(" ") || "Ad fatigue."} Built on "${base.name}" (${rupees(cpp(stats.get(base.id)))} per member).${checked.dropped ? ` The quality check dropped ${checked.dropped} variant.` : ""}\n${checked.kept
         .map((v, i) => `${i + 1}. ${label(v)}. ${v.angle}\n   ${v.review}\n   In English: ${v.translation}`)
         .join("\n")}`,
-      effect: `Adds ${created.length} ads next to the current ones in ${adsetName || "the ad set"} (same link, button and pixel as "${base.name}", own utm_content). Each is judged win / even / lose against the ad set after 7 days. The ad set re-learns for ~3 days.`,
+      effect: `Adds ${created.length} ads next to the current ones in ${adsetName || "the ad set"} (same button and pixel as "${base.name}", own utm_content; ${linkNote(created, language)}). Each is judged win / even / lose against the ad set after 7 days. The ad set re-learns for ~3 days.`,
       payload: { campaignId, adsetId, creativeIds: created.map((c) => String(c._id)), baseAdId: base.id, replaceAdId: null, ideas: checked.kept.map((v) => `${v.role}:${v.idea}`) },
       ref: { kind: "meta", id: `creative:${adsetId}` },
       runAt,
@@ -323,7 +388,8 @@ handle("ads.creative_launch", async (action) => {
   const adIds = [];
   for (const c of creatives.filter((x) => x.status === "ready")) {
     const hash = await uploadAdImage(await toBase64(c.imageUrl), `ops-${c._id}.jpg`);
-    const utm = c.utmContent ? withUtmContent(story.link_data.link, spec.url_tags, c.utmContent) : { link: story.link_data.link, urlTags: spec.url_tags };
+    const baseLink = withPath(story.link_data.link, c.language, c.linkPath);
+    const utm = c.utmContent ? withUtmContent(baseLink, spec.url_tags, c.utmContent) : { link: baseLink, urlTags: spec.url_tags };
     const linkData = { ...story.link_data, link: utm.link, image_hash: hash, message: c.primaryText, name: c.title };
     delete linkData.picture;
     delete linkData.child_attachments;
@@ -360,12 +426,26 @@ handleUndo("ads.creative_launch", async (action) => {
  * ads, copying the ad set's best ad for link, button and tracking. Nothing is
  * paused. Returns the proposed action.
  */
-export const proposeIdeaCreatives = async ({ campaignId, campaignName, adsetId, language, variants, runAt, reason, ideaId }) => {
-  const [ads, stats] = await Promise.all([fetchAds(), adStats()]);
+export const proposeIdeaCreatives = async ({ campaignId, campaignName, adsetId, language, variants, runAt, reason, ideaId, path = "", useWinner = false }) => {
+  const [ads, stats, winners] = await Promise.all([fetchAds(), adStats(), winningAdsets()]);
   const active = ads.filter((a) => a.campaign_id === campaignId && a.effective_status === "ACTIVE");
   if (!active.length) throw new Error(`No active ads in ${campaignName} to copy the setup from`);
   const ranked = [...active].filter((a) => (stats.get(a.id)?.paid ?? 0) >= 2).sort((a, b) => cpp(stats.get(a.id)) - cpp(stats.get(b.id)));
-  const target = adsetId && active.some((a) => a.adset_id === adsetId) ? adsetId : (ranked[0] ?? active[0]).adset_id;
+  let target = adsetId && active.some((a) => a.adset_id === adsetId) ? adsetId : (ranked[0] ?? active[0]).adset_id;
+  // The winning ad set is left alone (its learning isn't reset) unless the owner asked for it.
+  let protectNote = "";
+  const winner = winners.get(target);
+  if (winner && !useWinner) {
+    const others = [...new Set(active.map((a) => a.adset_id))].filter((id) => !winners.has(id));
+    const alt = ranked.find((a) => others.includes(a.adset_id))?.adset_id ?? others[0];
+    if (alt) {
+      target = alt;
+      protectNote = ` Kept out of "${winner.name}", this campaign's winning ad set (₹${Math.round(winner.cpp)} per member), so its learning isn't reset.`;
+    }
+  } else if (winner) {
+    protectNote = ` Goes into "${winner.name}", the winning ad set, as you asked; it re-learns for ~3 days.`;
+  }
+  const linkPath = cleanPath(path);
   const base = ranked.find((a) => a.adset_id === target) ?? ranked[0] ?? active.find((a) => a.adset_id === target) ?? active[0];
   const adsetName = (await AdSnapshot.findOne({ level: "adset", entityId: target }).sort({ date: -1 }).lean())?.name ?? "";
   const audience = audienceOf(adsetName);
@@ -397,17 +477,18 @@ export const proposeIdeaCreatives = async ({ campaignId, campaignName, adsetId, 
         // An owner's idea is always a test.
         idea: IDEA_KEYS.includes(v.idea) ? v.idea : undefined,
         role: "test",
+        linkPath: linkPath ?? cleanPath(IDEAS[v.idea]?.path),
       })
     );
   }
   return propose("ads", {
     type: "ads.creative_launch",
     title: `${created.length} new ad${created.length > 1 ? "s" : ""} for ${campaignName}`,
-    reason: `${reason} Headlines: “${variants.map((v) => [v.headline, v.highlight ?? v.subline].filter(Boolean).join(" ")).join("”, “")}”.${variants
+    reason: `${reason}${protectNote} Headlines: “${variants.map((v) => [v.headline, v.highlight ?? v.subline].filter(Boolean).join(" ")).join("”, “")}”.${variants
       .filter((v) => v.translation)
       .map((v, i) => `\n${i + 1}. In English: ${v.translation}`)
       .join("")}`,
-    effect: `Copies "${base.name}" (link, button, tracking) with the new images and text and starts ${created.length > 1 ? "them" : "it"} next to the current ads, each with its own utm_content. Nothing is paused.`,
+    effect: `Copies "${base.name}" (button, tracking) with the new images and text and starts ${created.length > 1 ? "them" : "it"} next to the current ads in ${adsetName || "the ad set"}, each with its own utm_content; ${linkNote(created, language)}. Nothing is paused.`,
     payload: { campaignId, adsetId: target, creativeIds: created.map((c) => String(c._id)), baseAdId: base.id, replaceAdId: null, ideaId },
     ref: { kind: "meta", id: `idea-creative:${ideaId}:${campaignId}` },
     runAt,

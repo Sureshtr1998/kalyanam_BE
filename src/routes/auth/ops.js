@@ -11,6 +11,7 @@ import { toolsOverview, updateTool } from "../../ops/tools.js";
 import { growth } from "../../ops/review.js";
 import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek, storyConcepts, unscheduleFacebook } from "../../ops/organic.js";
 import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.js";
+import { hinduCalendar } from "../../ops/hinduCalendar.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
 import { fetchScheduledPosts, resolvePage } from "../../ops/meta.js";
@@ -304,7 +305,10 @@ router.get(
       }
       if (day === 4) recurring.push({ at: at(10, 0), module: "organic", title: "Next week's posts planned" });
     }
-    return res.json({ actions, posts, recurring });
+    // Festivals and wedding periods the agent plans around (computed; see ops/hinduCalendar.js).
+    const istDate = (d) => new Date(d.getTime() + 5.5 * 3600000).toISOString().slice(0, 10);
+    const festivals = hinduCalendar(istDate(from), istDate(to));
+    return res.json({ actions, posts, recurring, festivals });
   })
 );
 

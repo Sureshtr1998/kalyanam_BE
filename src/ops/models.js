@@ -287,6 +287,8 @@ const CreativeSchema = new Schema(
     translation: String,
     // Own utm_content, so this ad's joins can be told apart from the ad it was copied from.
     utmContent: String,
+    // Page the ad links to (e.g. "/pricing", in the ad's language); null keeps the copied ad's link.
+    linkPath: { type: String, default: null },
     imageUrl: String,
     imageFileId: String,
     status: { type: String, enum: ["design", "ready", "live", "cancelled", "failed"], default: "design" },

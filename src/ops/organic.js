@@ -13,6 +13,7 @@ const scheduledOrNull = () => fetchScheduledTimes().catch((err) => {
 import { THEME_NAMES } from "./postDesign.js";
 import { devConfigured, dispatchRender } from "./dev.js";
 import { CLAIM_RULES } from "./adsCreative.js";
+import { calendarNotes } from "./hinduCalendar.js";
 import { IDEAS, IDEA_KEYS, bridesShare, familyDoubts, ideaFacts, ideaTarget, loadIdeaLibrary, loadOwnerIdeas } from "./adsIdeas.js";
 import { codeSource, postCode, shortUrl, trackedLink } from "./links.js";
 
@@ -140,7 +141,8 @@ ${config.brief}
 ${CLAIM_RULES}
 ${ideaFacts()}
 ${SAFETY_PROMISES}
-claimsOk is false if any line states or implies something outside the allowed facts and promises. languageOk is false if the text is unnatural, wrong or a literal translation for its language.
+${calendarNotes({ days: 21 })}
+claimsOk is false if any line states or implies something outside the allowed facts and promises, or names a festival or season that isn't in the calendar above or on a day it doesn't fall. languageOk is false if the text is unnatural, wrong or a literal translation for its language.
 When something is wrong and can be fixed without changing the idea, return a fixed version (same language); otherwise fixed is null.`,
     prompt: posts.map((p, i) => `Post ${i} (${p.language}):\n${JSON.stringify({ kicker: p.kicker, headline: p.headline, subline: p.subline, highlight: p.highlight, bullets: p.bullets, price: p.price, cta: p.cta, caption: p.caption })}`).join("\n\n"),
     schema: REVIEW_SCHEMA,
@@ -287,7 +289,9 @@ Two kinds:
 - "safety" (12:30 pm, a text card): "safe for daughters". It builds trust with brides' families (brides are the scarce side). Use only the safety promises above, one per card, warmly and plainly. Never say a phone number is shared only with consent (paid members can unlock contacts). Never promise the person reporting a refund. Idea is usually "daughters".
 - "story" (8:30 am, a 9:16 image for people who already follow the Page): one idea, one short line that nudges them to visit the profile and register; no caption. Rotate ideas across the week (only ideas listed below); at least one for brides' families; one shows a price from the pricing idea; one may answer a real family question listed below.
 Ideas: ${IDEA_KEYS.filter((k) => ideaTarget(k) !== "ads").map((k) => `${k} (${IDEAS[k].label})`).join(", ")}.
-Writing: entirely in the piece's language and native script (English pieces in English), natural and warm, never a literal translation.`,
+Writing: entirely in the piece's language and native script (English pieces in English), natural and warm, never a literal translation.
+A festival or season only from this calendar, on or just before its day, for the piece's language:
+${calendarNotes({ days: 7, now: monday.getTime() })}`,
     prompt: `Write exactly these ${want.length} pieces for the week starting ${monday.toDateString()} (day 0 = Monday):
 ${want.map((w) => `- day ${w.day}, ${w.kind}, ${w.language}`).join("\n")}
 Which ideas bring members cheapest in paid ads (learn the message, never copy an ad):
@@ -415,7 +419,8 @@ Rules for the mix:
 ${ownerIdeas.length ? `- Each of the owner's ideas gets at least one post this week: ${ownerIdeas.map((i) => i.key).join(", ")}.\n` : ""}
 - At least one post speaks to brides' families (daughters' parents).
 - When families' questions are listed below, at least one post uses the "answer" idea to answer one of them plainly, in the families' own words.
-- A festival or auspicious day only if you are sure it falls in that week for that region; no hard call to register on Amavasya or mourning days.
+- A festival, auspicious day or season only from the calendar below, for that post's language, on or just before its day; no hard call to register on Amavasya or mourning days.
+${calendarNotes({ days: 7, now: monday.getTime() })}
 Writing:
 - Each post entirely in its language and native script (English posts in English): natural and warm, never a literal translation.
 - The caption's first line is the hook. Keep lines short; families read on phones.
