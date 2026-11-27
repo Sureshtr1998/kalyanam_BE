@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import { AdSnapshot, getConfig } from "./models.js";
 import { monthSpendUsd } from "./claude.js";
+import { notice } from "./actions.js";
+import razorpay from "../config/razorpay.js";
 
 /*
  * Third-party services found in the code (scan of 25 Nov 2026). Usage is
@@ -15,8 +17,8 @@ export const TOOLS = [
   { id: "upstash-redis", name: "Upstash Redis", purpose: "Rate limits and caching", metric: "Commands per day", unit: "commands", source: "manual" },
   { id: "qstash", name: "Upstash QStash", purpose: "Payment fulfilment queue, delayed jobs, the ops tick", metric: "Messages per day", unit: "messages", source: "manual", hint: "The ops tick adds ~96 messages a day (every 15 min)." },
   { id: "imagekit", name: "ImageKit", purpose: "Member photos and post images", metric: "Bandwidth this month", unit: "GB", source: "auto", defaultLimit: 20 },
-  { id: "msg91", name: "MSG91", purpose: "WhatsApp OTP and all transactional email", metric: "Wallet balance", unit: "₹", source: "manual", lowIsBad: true, hint: "Prepaid: OTPs and emails stop when the wallet is empty." },
-  { id: "razorpay", name: "Razorpay", purpose: "Payments", metric: "Fees this month", unit: "₹", source: "manual" },
+  { id: "msg91", name: "MSG91", purpose: "WhatsApp OTP and all transactional email", metric: "WhatsApp prepaid balance", unit: "₹", source: "auto", lowIsBad: true, defaultLimit: 500, hint: "Prepaid: OTPs stop when it is empty. Read daily; an urgent alert below the limit (default ₹500)." },
+  { id: "razorpay", name: "Razorpay", purpose: "Payments", metric: "Fees this month", unit: "₹", source: "auto", hint: "Razorpay's fee incl. GST on this month's captured payments (IST), read daily." },
   { id: "openai", name: "OpenAI (gpt-4.1)", purpose: "Astrology insights", metric: "Spend this month", unit: "$", source: "manual" },
   { id: "claude", name: "Claude API", purpose: "This Ops agent", metric: "Spend this month", unit: "$", source: "auto" },
   { id: "freeastro", name: "FreeAstrologyAPI", purpose: "Astrology charts", metric: "Calls this month", unit: "calls", source: "manual" },
@@ -43,12 +45,50 @@ const imagekitUsage = async () => {
   return { value: (u.bandwidthBytes ?? 0) / 1e9, extra: { storageGB: (u.mediaLibraryStorageBytes ?? 0) / 1e9 } };
 };
 
+/** Razorpay's fees (incl. GST) on payments captured this month (IST), in ₹. */
+export const razorpayMonth = async (now = Date.now()) => {
+  const ist = new Date(now + 5.5 * 3600000);
+  const from = Math.floor((Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), 1) - 5.5 * 3600000) / 1000);
+  const to = Math.floor(now / 1000);
+  let fees = 0;
+  let gross = 0;
+  let count = 0;
+  for (let skip = 0; skip < 5000; skip += 100) {
+    const page = await razorpay.payments.all({ from, to, count: 100, skip });
+    const items = page?.items ?? [];
+    for (const p of items.filter((x) => x.status === "captured")) {
+      fees += Number(p.fee) || 0;
+      gross += Number(p.amount) || 0;
+      count++;
+    }
+    if (items.length < 100) break;
+  }
+  return { value: fees / 100, extra: { captured: gross / 100, payments: count } };
+};
+
+/** MSG91's WhatsApp prepaid balance in ₹ (POST /subscriptions/fetchPrepaidBalance). */
+export const msg91Balance = async () => {
+  if (!process.env.MSG91_AUTHKEY || !process.env.MSG91_WHATSAPP_SENDER_ID) throw new Error("MSG91 key or WhatsApp number not set");
+  const res = await fetch("https://control.msg91.com/api/v5/subscriptions/fetchPrepaidBalance", {
+    method: "POST",
+    headers: { Authkey: process.env.MSG91_AUTHKEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ integrated_number: String(process.env.MSG91_WHATSAPP_SENDER_ID).replace(/\D/g, ""), service: "whatsapp" }),
+    signal: AbortSignal.timeout(10000),
+  });
+  const body = await res.json().catch(() => ({}));
+  const balance = Number(body?.prepaid_balance ?? body?.data?.prepaid_balance);
+  if (!res.ok || !Number.isFinite(balance)) throw new Error(`MSG91 ${res.status}: ${String(body?.message ?? body?.status ?? "no balance in the reply").slice(0, 120)}`);
+  return { value: balance, extra: { planStatus: body.plan_status ?? null } };
+};
+
 const readers = {
   mongodb: async () => {
     const s = await mongoose.connection.db.stats();
     return { value: (s.storageSize + (s.indexSize ?? 0)) / 1e6, extra: { dataMB: s.dataSize / 1e6, objects: s.objects } };
   },
   imagekit: imagekitUsage,
+  razorpay: () => razorpayMonth(),
+  msg91: () => msg91Balance(),
   claude: async () => ({ value: await monthSpendUsd() }),
   meta: async () => {
     const row = await AdSnapshot.findOne({ level: "account", funds: { $ne: null } }).sort({ date: -1 }).lean();
@@ -67,7 +107,7 @@ export const readTools = async () => {
       const entry = tools[id] ?? {};
       const history = (entry.history ?? []).filter((h) => h.date !== today()).slice(-89);
       history.push({ date: today(), value: Math.round(r.value * 100) / 100 });
-      tools[id] = { ...entry, current: history.at(-1).value, extra: r.extra, history, readAt: new Date() };
+      tools[id] = { ...entry, current: history.at(-1).value, extra: r.extra, history, readAt: new Date(), error: null };
     } catch (err) {
       tools[id] = { ...(tools[id] ?? {}), error: String(err.message).slice(0, 200) };
     }
@@ -75,6 +115,20 @@ export const readTools = async () => {
   config.tools = tools;
   config.markModified("tools");
   await config.save();
+
+  // OTPs (and so sign-ups) stop when the MSG91 wallet is empty: say so before it is.
+  const m = tools.msg91;
+  const floor = m?.limit ?? 500;
+  if (m?.current != null && m.readAt && Date.now() - new Date(m.readAt).getTime() < 3600000 && m.current < floor) {
+    await notice("tools", {
+      type: "tools.msg91_low",
+      priority: "urgent",
+      title: `MSG91 balance is low: ₹${Math.round(m.current)}`,
+      reason: `Below your ₹${floor} alert level. WhatsApp OTPs stop when it runs out, and families can't sign up.`,
+      effect: "Top up the MSG91 wallet (msg91.com → Wallet). Alert only.",
+      payload: { dedupeKey: `msg91_low:${today()}` },
+    }).catch(() => {});
+  }
 };
 
 /** Growth per day over the stored history (least squares), or null. */
@@ -102,7 +156,7 @@ export const toolsOverview = async () => {
     }
     const pct = limit && current != null ? Math.round((current / limit) * 100) : null;
     const status =
-      s.error ? "error" : t.lowIsBad ? "ok" : pct == null ? "unknown" : pct >= 80 ? "upgrade" : pct >= 60 ? "watch" : "ok";
+      s.error ? "error" : t.lowIsBad ? (limit && current != null && current < limit ? "upgrade" : "ok") : pct == null ? "unknown" : pct >= 80 ? "upgrade" : pct >= 60 ? "watch" : "ok";
     return {
       ...t,
       plan: s.plan ?? "",

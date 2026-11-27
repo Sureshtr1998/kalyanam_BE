@@ -112,3 +112,37 @@ describe("ad links and winning ad sets", () => {
     expect(Math.round(w.get("a1").cpp)).toBe(200);
   });
 });
+
+describe("tools read automatically", () => {
+  it("sums Razorpay's fees on this month's captured payments, page by page", async () => {
+    const { vi } = await import("vitest");
+    const razorpay = (await import("../src/config/razorpay.js")).default;
+    const { razorpayMonth } = await import("../src/ops/tools.js");
+    const page1 = Array.from({ length: 100 }, () => ({ status: "captured", amount: 35100, fee: 828 }));
+    const page2 = [{ status: "captured", amount: 35100, fee: 828 }, { status: "failed", amount: 35100, fee: 0 }];
+    // The test setup's Razorpay stand-in has no payments.all; give it one.
+    const spy = vi.fn().mockResolvedValueOnce({ items: page1 }).mockResolvedValueOnce({ items: page2 });
+    razorpay.payments.all = spy;
+    const r = await razorpayMonth(Date.parse("2026-11-27T04:00:00Z"));
+    expect(r.value).toBeCloseTo(101 * 8.28, 2);
+    expect(r.extra).toEqual({ captured: 101 * 351, payments: 101 });
+    expect(spy.mock.calls[0][0].from).toBe(Date.parse("2026-10-31T18:30:00Z") / 1000);
+    expect(spy.mock.calls[1][0].skip).toBe(100);
+    delete razorpay.payments.all;
+  });
+
+  it("reads MSG91's WhatsApp prepaid balance and reports a bad reply", async () => {
+    const { vi } = await import("vitest");
+    const { msg91Balance } = await import("../src/ops/tools.js");
+    process.env.MSG91_AUTHKEY ||= "test-key";
+    process.env.MSG91_WHATSAPP_SENDER_ID ||= "919999999999";
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ status: "success", plan_status: "active", prepaid_balance: 250.75 }), { status: 200 }));
+    expect((await msg91Balance()).value).toBe(250.75);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toMatch(/fetchPrepaidBalance$/);
+    expect(JSON.parse(init.body).service).toBe("whatsapp");
+    spy.mockResolvedValueOnce(new Response(JSON.stringify({ status: "fail", message: "Invalid authkey" }), { status: 401 }));
+    await expect(msg91Balance()).rejects.toThrow(/Invalid authkey/);
+    spy.mockRestore();
+  });
+});
