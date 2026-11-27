@@ -1,11 +1,11 @@
 import imagekit from "../config/imageKit.js";
 import { AdSnapshot, OpsAction, OpsCreative, getConfig } from "./models.js";
 import { ask } from "./claude.js";
-import { Defer, handle, handleUndo, propose } from "./actions.js";
+import { Defer, handle, handleUndo, notice, propose } from "./actions.js";
 import { RULES, languageOf } from "./adsEngine.js";
 import { langPath } from "./links.js";
 import { calendarNotes } from "./hinduCalendar.js";
-import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphPost, setStatus, uploadAdImage } from "./meta.js";
+import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphDelete, graphPost, metaErrorText, setStatus, uploadAdImage } from "./meta.js";
 import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaFacts, ideaOf, ideaTarget, loadIdeaLibrary, loadOwnerIdeas, organicWinners, pickIdeas } from "./adsIdeas.js";
 
 export { languageOf, audienceOf };
@@ -389,6 +389,131 @@ const toBase64 = async (url) => {
   return Buffer.from(await res.arrayBuffer()).toString("base64");
 };
 
+/** Runs one step of a launch; a failure names the step and gives Meta's own explanation. */
+const step = async (label, fn) => {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof Defer) throw err;
+    const why = err.meta ? metaErrorText(err).replace(/^Meta said: /, "") : err.message;
+    throw Object.assign(new Error(`${label}: ${why}`.slice(0, 480)), { meta: err.meta });
+  }
+};
+
+/** Link-data fields Meta returns on an ad but refuses on a new creative, or that describe the old image. */
+const LINK_DATA_DROP = ["picture", "child_attachments", "image_crops", "image_url", "multi_share_end_card", "multi_share_optimized"];
+
+/**
+ * The fields for a new creative: the copied ad's Page, Instagram account,
+ * button and tracking, with this ad's image, text and link. Only what Meta
+ * accepts on create (Graph v22): the retired standard_enhancements bundle and
+ * the old Instagram field name are left out.
+ */
+export const creativeFieldsFor = (spec, { name, link, urlTags, hash, message, title }) => {
+  const story = { ...spec.object_story_spec };
+  if (story.instagram_actor_id && !story.instagram_user_id) story.instagram_user_id = story.instagram_actor_id;
+  delete story.instagram_actor_id;
+  const linkData = { ...story.link_data, link, image_hash: hash, message, name: title };
+  for (const k of LINK_DATA_DROP) delete linkData[k];
+  if (linkData.call_to_action?.value?.link) {
+    linkData.call_to_action = { ...linkData.call_to_action, value: { ...linkData.call_to_action.value, link } };
+  }
+  story.link_data = linkData;
+  const features = { ...(spec.degrees_of_freedom_spec?.creative_features_spec ?? {}) };
+  delete features.standard_enhancements;
+  const dof = Object.keys(features).length ? { ...spec.degrees_of_freedom_spec, creative_features_spec: features } : null;
+  return { name, object_story_spec: story, ...(urlTags ? { url_tags: urlTags } : {}), ...(dof ? { degrees_of_freedom_spec: dof } : {}) };
+};
+
+/** Reads the ad a launch copies; throws when its format can't be copied. */
+const launchSpec = async (baseAdId) => {
+  const spec = await step("Reading the ad it copies", () => fetchCreativeSpec(baseAdId));
+  if (!spec?.object_story_spec?.link_data) {
+    throw new Error("The best ad uses a format the agent can't copy (e.g. flexible or catalogue). The new images are in Ops → Ads; add them by hand.");
+  }
+  return spec;
+};
+
+/** Uploads the image and makes the Meta creative once (no ad is touched); a retry reuses it. */
+const prepareCreative = async (c, spec) => {
+  if (c.metaCreativeId) return c.metaCreativeId;
+  const label = `${c.language} ad "${c.design?.headline ?? c.title ?? ""}"`.slice(0, 80);
+  const hash = await step(`${label}: uploading the image`, async () => uploadAdImage(await toBase64(c.imageUrl), `ops-${c._id}.jpg`));
+  const baseLink = withPath(spec.object_story_spec.link_data.link, c.language, c.linkPath);
+  const utm = c.utmContent ? withUtmContent(baseLink, spec.url_tags, c.utmContent) : { link: baseLink, urlTags: spec.url_tags };
+  const fields = creativeFieldsFor(spec, {
+    name: `Ops | ${c.language} | ${c.design?.headline ?? ""}`.slice(0, 100),
+    link: utm.link,
+    urlTags: utm.urlTags,
+    hash,
+    message: c.primaryText,
+    title: c.title,
+  });
+  const creative = await step(`${label}: creating the creative`, () => createCreative(fields));
+  if (!creative?.id) throw new Error(`${label}: Meta didn't return the creative`);
+  c.metaCreativeId = creative.id;
+  await c.save();
+  return creative.id;
+};
+
+/**
+ * Makes the Meta creatives of a launch card now, without touching any ad, so
+ * a problem shows (with Meta's reason) hours before the launch instead of at
+ * it. The launch then reuses them. Returns { ok, error? }.
+ */
+export const checkLaunch = async (action) => {
+  const all = await OpsCreative.find({ _id: { $in: action.payload?.creativeIds ?? [] } });
+  // Images still being designed: check once they're ready.
+  if (all.some((c) => c.status === "design")) return { ok: true, checked: 0, pending: true };
+  const creatives = all.filter((c) => c.status === "ready");
+  if (!creatives.length) return { ok: true, checked: 0 };
+  try {
+    const spec = await launchSpec(action.payload.baseAdId);
+    for (const c of creatives) await prepareCreative(c, spec);
+    return { ok: true, checked: creatives.length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+};
+
+/**
+ * New-ad launches due within a day are checked ahead (their creatives made in
+ * Meta, no ad touched). If Meta refuses, the owner hears at once (urgent:
+ * WhatsApp) while there's time; the check repeats every 3 hours and the alert
+ * is marked resolved once it passes. One card per call, soonest first.
+ */
+export const preflightLaunches = async ({ now = Date.now() } = {}) => {
+  const card = await OpsAction.findOne({
+    type: "ads.creative_launch",
+    status: "scheduled",
+    runAt: { $lte: new Date(now + 24 * 3600000) },
+    $or: [{ "payload.checkedAt": null }, { "payload.checkError": { $ne: null }, "payload.checkedAt": { $lte: new Date(now - 3 * 3600000) } }],
+  }).sort({ runAt: 1 });
+  if (!card) return null;
+  const r = await checkLaunch(card);
+  if (r.pending) return r;
+  card.payload = { ...card.payload, checkedAt: new Date(), checkError: r.ok ? null : r.error };
+  card.markModified("payload");
+  await card.save();
+  if (r.ok) {
+    await OpsAction.updateMany(
+      { type: "ads.launch_check_failed", "payload.dedupeKey": `launch_check:${card._id}`, status: "info", "payload.resolvedAt": null },
+      { $set: { "payload.resolvedAt": new Date() } }
+    );
+  } else {
+    const due = new Date(card.runAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    await notice("ads", {
+      type: "ads.launch_check_failed",
+      priority: "urgent",
+      title: `New ads due ${due} would fail: ${card.title}`.slice(0, 160),
+      reason: `Meta refused the new ad while it was checked ahead: ${r.error}`,
+      effect: "Nothing in Meta was changed. The agent checks again every 3 hours; if it still fails at launch time, the card fails and can be retried after a fix.",
+      payload: { dedupeKey: `launch_check:${card._id}`, whatsappKey: "launch_check" },
+    });
+  }
+  return r;
+};
+
 handle("ads.creative_launch", async (action) => {
   const p = action.payload;
   const creatives = await OpsCreative.find({ _id: { $in: p.creativeIds } });
@@ -396,30 +521,26 @@ handle("ads.creative_launch", async (action) => {
     if ((p.deferrals ?? 0) >= 6) throw new Error("The ad images were never designed. Check the Ops render GitHub Action.");
     throw new Defer("Waiting for the ad images to be designed; trying again in 2 hours.");
   }
-  const spec = await fetchCreativeSpec(p.baseAdId);
-  const story = spec?.object_story_spec;
-  if (!story?.link_data) {
-    throw new Error("The best ad uses a format the agent can't copy (e.g. flexible or catalogue). The new images are in Ops → Ads; add them by hand.");
-  }
-  const adIds = [];
-  for (const c of creatives.filter((x) => x.status === "ready")) {
-    const hash = await uploadAdImage(await toBase64(c.imageUrl), `ops-${c._id}.jpg`);
-    const baseLink = withPath(story.link_data.link, c.language, c.linkPath);
-    const utm = c.utmContent ? withUtmContent(baseLink, spec.url_tags, c.utmContent) : { link: baseLink, urlTags: spec.url_tags };
-    const linkData = { ...story.link_data, link: utm.link, image_hash: hash, message: c.primaryText, name: c.title };
-    delete linkData.picture;
-    delete linkData.child_attachments;
+  const spec = await launchSpec(p.baseAdId);
+  const ready = creatives.filter((x) => x.status === "ready");
+  // Every creative first: a problem shows before any ad set is touched.
+  for (const c of ready) await prepareCreative(c, spec);
+  // Ads that went live on an earlier try of this card stay as they are.
+  const adIds = creatives.filter((c) => c.status === "live" && c.adId).map((c) => c.adId);
+  for (const c of ready) {
     const code = CODES[c.language] ?? "XX";
-    const creative = await createCreative({
-      name: `Ops | ${c.language} | ${c.design?.headline ?? ""}`.slice(0, 100),
-      object_story_spec: { ...story, link_data: linkData },
-      ...(utm.urlTags ? { url_tags: utm.urlTags } : {}),
-      ...(spec.degrees_of_freedom_spec ? { degrees_of_freedom_spec: spec.degrees_of_freedom_spec } : {}),
-    });
-    const adId = await copyAd(p.baseAdId, p.adsetId);
-    if (!adId) throw new Error("Meta didn't return the copied ad");
-    await graphPost(adId, { creative: { creative_id: creative.id }, name: `${code.toUpperCase()}-OPS ${c.utmContent ?? ""} ${c.design?.headline ?? ""}`.trim().slice(0, 100) });
-    await setStatus(adId, "ACTIVE");
+    const adId = await step("Copying the ad", () => copyAd(p.baseAdId, p.adsetId));
+    if (!adId) throw new Error("Copying the ad: Meta didn't return the copied ad");
+    try {
+      await step("Putting the new creative on the copy", () =>
+        graphPost(adId, { creative: { creative_id: c.metaCreativeId }, name: `${code.toUpperCase()}-OPS ${c.utmContent ?? ""} ${c.design?.headline ?? ""}`.trim().slice(0, 100) })
+      );
+      await step("Turning the new ad on", () => setStatus(adId, "ACTIVE"));
+    } catch (err) {
+      // The copy is still the old ad's paused twin: remove it, so a retry starts clean.
+      await graphDelete(adId).catch(() => setStatus(adId, "DELETED").catch(() => {}));
+      throw err;
+    }
     c.adId = adId;
     c.status = "live";
     c.liveAt = new Date();

@@ -47,6 +47,17 @@ export const accountId = () => {
 const encode = (params) =>
   Object.fromEntries(Object.entries(params).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]));
 
+/**
+ * Meta's short message ("Invalid parameter") plus its own explanation for
+ * people (error_user_title / error_user_msg) and the subcode, which say what
+ * was actually wrong.
+ */
+export const metaMessage = (e) => {
+  if (!e) return "";
+  const detail = [e.error_user_title, e.error_user_msg].filter((x) => x && x !== e.message).join(": ");
+  return `${e.message || ""}${detail ? ` (${detail})` : ""}${e.error_subcode ? ` [subcode ${e.error_subcode}]` : ""}`.trim();
+};
+
 const call = async (method, pathOrUrl, params = {}, token = process.env.META_ADS_TOKEN) => {
   const url = new URL(pathOrUrl.startsWith("http") ? pathOrUrl : `${GRAPH}/${pathOrUrl}`);
   /** @type {RequestInit} */
@@ -59,7 +70,7 @@ const call = async (method, pathOrUrl, params = {}, token = process.env.META_ADS
   const res = await fetch(url, init);
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.error) {
-    throw Object.assign(new Error(body.error?.message || `Meta API ${res.status}`), { meta: body.error });
+    throw Object.assign(new Error(metaMessage(body.error) || `Meta API ${res.status}`), { meta: body.error });
   }
   return body;
 };
@@ -391,7 +402,7 @@ export const publishFacebookStory = async ({ imageUrl }) => {
 /** Turns a Meta error into one line an admin can act on. */
 export const metaErrorText = (err) => {
   const code = err.meta?.code;
-  const msg = String(err.meta?.message || err.message || "");
+  const msg = String(metaMessage(err.meta) || err.message || "");
   if (code === 190) return "The Meta token has expired or is invalid. Generate a new one.";
   if (code === 10 || code === 200 || /permission/i.test(msg)) return `The Meta token is missing a permission: ${msg}`;
   if ([4, 17, 32, 613, 80000, 80004].includes(code)) return "Meta's rate limit was hit. It will retry on the next run.";

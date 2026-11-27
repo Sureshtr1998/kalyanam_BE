@@ -303,6 +303,8 @@ const CreativeSchema = new Schema(
     imageUrl: String,
     imageFileId: String,
     status: { type: String, enum: ["design", "ready", "live", "cancelled", "failed"], default: "design" },
+    // The Meta creative made from it (before any ad is touched), reused by a retry.
+    metaCreativeId: String,
     adId: String,
     // The idea behind it (adsIdeas.IDEAS) and whether it repeats a proven idea or tests a new one.
     idea: String,

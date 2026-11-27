@@ -11,7 +11,7 @@ import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
 import { runAdsPlanning } from "./adsGrowth.js";
-import { tagIdeaCreatives } from "./adsCreative.js";
+import { preflightLaunches, tagIdeaCreatives } from "./adsCreative.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
 import { autoVerifyDue, getAutoVerifySettings } from "../utils/autoVerify.js";
@@ -276,6 +276,11 @@ const runTick = async ({ config, t, done, deadline, source }) => {
   const lastRuns = (await OpsConfig.findById("ops").lean())?.lastRuns ?? {};
   const job = JOBS.find((j) => j.ready(config) && j.due(lastRuns[j.name], t));
   if (job && Date.now() < deadline - 25000) done.push(await attempt(job.name, job.run));
+
+  // New ads due within a day are checked with Meta ahead (no ad touched), so a refusal is known in time.
+  if (config.modes.ads === "live" && metaConfigured() && Date.now() < deadline - 20000) {
+    await preflightLaunches().catch((err) => console.error("[ops] launch check", err.message));
+  }
 
   // Anything that became due while the jobs ran (e.g. comment replies) goes out now.
   if (Date.now() < deadline - 5000) await runDue(deadline);

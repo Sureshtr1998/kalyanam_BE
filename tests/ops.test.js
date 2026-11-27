@@ -22,7 +22,7 @@ const standingIdea = vi.fn(() => ({ label: "Second marriages", hint: "Families l
 const adsReview = vi.fn();
 const metaRead = vi.hoisted(() => ({ scheduledDays: [], scheduledTimes: [], performance: [], structure: { campaigns: [], adsets: [] }, ads: null }));
 const commentTriage = vi.fn();
-const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})), deleteFacebookPost: vi.fn(async () => ({ success: true })) }));
+const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})), deleteFacebookPost: vi.fn(async () => ({ success: true })), graphDelete: vi.fn(async () => ({ success: true })) }));
 const hidden = [];
 vi.mock("../src/ops/meta.js", async (orig) => ({
   ...(await orig()),
@@ -50,6 +50,7 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   fetchScheduledTimes: vi.fn(async () => metaRead.scheduledTimes),
   fetchScheduledPosts: vi.fn(async () => metaRead.scheduledTimes.map((at, i) => ({ id: `sp${i}`, at, message: "" }))),
   deleteFacebookPost: metaCalls.deleteFacebookPost,
+  graphDelete: metaCalls.graphDelete,
   fetchPostPerformance: vi.fn(async () => metaRead.performance),
   fetchAds: vi.fn(async () => metaRead.ads ?? [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
   fetchStructure: vi.fn(async () => metaRead.structure),
@@ -1463,5 +1464,125 @@ describe("WhatsApp alerts to the owner", () => {
     // Clearing the number turns WhatsApp alerts off.
     const off = await api().post("/api/manage/ops/config").set("x-auth-token", t).send({ alerts: { whatsapp: "" } });
     expect(off.body.alerts.whatsapp).toBe("");
+  });
+});
+
+describe("new-ad launches that Meta refuses", () => {
+  const admin = async () => tokenFor(await createUser({ rest: { isAdmin: true } }));
+  const metaError = (message, extra = {}) => Object.assign(new Error(message), { meta: { message, code: 100, ...extra } });
+  const withImages = async (fn) => {
+    const before = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(Buffer.from("jpeg-bytes")));
+    try {
+      return await fn();
+    } finally {
+      globalThis.fetch = before;
+    }
+  };
+  const launchCard = async (runAt = new Date()) => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live" } }, { upsert: true });
+    const c = await OpsCreative.create({ campaignId: "c1", adsetId: "s1", language: "Tamil", baseAdId: "ad_best", status: "ready", imageUrl: "https://ik.example.test/ta.jpg", design: { headline: "உங்கள் சமூகம்" }, primaryText: "உரை", title: "தலைப்பு" });
+    const a = await OpsAction.create({
+      module: "ads", type: "ads.creative_launch", status: "scheduled", title: "1 new ad for SRK | Tamil", runAt,
+      payload: { campaignId: "c1", adsetId: "s1", creativeIds: [String(c._id)], baseAdId: "ad_best", replaceAdId: null },
+    });
+    return { c, a };
+  };
+
+  it("copies only what Meta accepts on a new creative (Graph v22)", async () => {
+    const { creativeFieldsFor } = await import("../src/ops/adsCreative.js");
+    const spec = {
+      url_tags: "utm_source=meta",
+      object_story_spec: {
+        page_id: "pg1",
+        instagram_actor_id: "ig1",
+        link_data: { link: "https://x.test/ta", picture: "old.jpg", image_crops: { "100x100": [[0, 0], [10, 10]] }, image_hash: "old", message: "old", name: "old", call_to_action: { type: "SIGN_UP", value: { link: "https://x.test/ta" } } },
+      },
+      degrees_of_freedom_spec: { creative_features_spec: { standard_enhancements: { enroll_status: "OPT_OUT" } } },
+    };
+    const f = creativeFieldsFor(spec, { name: "Ops | Tamil", link: "https://x.test/ta/pricing?utm_content=a", urlTags: "utm_source=meta&utm_content=a", hash: "new", message: "உரை", title: "தலைப்பு" });
+    expect(f.object_story_spec).toMatchObject({ page_id: "pg1", instagram_user_id: "ig1" });
+    expect(f.object_story_spec.instagram_actor_id).toBeUndefined();
+    expect(f.object_story_spec.link_data).toEqual({
+      link: "https://x.test/ta/pricing?utm_content=a",
+      image_hash: "new",
+      message: "உரை",
+      name: "தலைப்பு",
+      call_to_action: { type: "SIGN_UP", value: { link: "https://x.test/ta/pricing?utm_content=a" } },
+    });
+    expect(f.degrees_of_freedom_spec).toBeUndefined();
+    // Individual Advantage+ features are kept as the copied ad had them.
+    const kept = creativeFieldsFor({ ...spec, degrees_of_freedom_spec: { creative_features_spec: { standard_enhancements: {}, image_touchups: { enroll_status: "OPT_OUT" } } } }, { name: "n", link: "l", hash: "h" });
+    expect(kept.degrees_of_freedom_spec).toEqual({ creative_features_spec: { image_touchups: { enroll_status: "OPT_OUT" } } });
+  });
+
+  it("keeps Meta's own explanation, not just 'Invalid parameter'", async () => {
+    const { metaMessage, metaErrorText } = await import("../src/ops/meta.js");
+    const e = { message: "Invalid parameter", code: 100, error_subcode: 3858504, error_user_title: "Deprecated field", error_user_msg: "standard_enhancements is no longer supported." };
+    expect(metaMessage(e)).toBe("Invalid parameter (Deprecated field: standard_enhancements is no longer supported.) [subcode 3858504]");
+    expect(metaErrorText({ meta: e })).toMatch(/standard_enhancements is no longer supported/);
+  });
+
+  it("names the failed step, removes the half-made copy, and a retry reuses the creative", async () => {
+    const meta = await import("../src/ops/meta.js");
+    const { c, a } = await launchCard();
+    meta.createCreative.mockClear();
+    meta.graphPost.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "The creative can't be used with this ad." }));
+    await withImages(() => execute(a._id));
+    const failed = await OpsAction.findById(a._id);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toMatch(/^Putting the new creative on the copy: Invalid parameter \(The creative can't be used with this ad\.\)/);
+    expect(metaCalls.graphDelete).toHaveBeenCalledWith("ad_new");
+    expect((await OpsCreative.findById(c._id)).metaCreativeId).toBe("cr_1");
+    const alert = await OpsAction.findOne({ type: "ads.action_failed" });
+    expect(alert.reason).toMatch(/can't be used with this ad/);
+
+    const t = await admin();
+    const res = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/retry`).set("x-auth-token", t));
+    expect(res.status).toBe(200);
+    const done = await OpsAction.findById(a._id);
+    expect(done.status).toBe("done");
+    expect(done.result.adIds).toEqual(["ad_new"]);
+    // The creative made on the first try is reused, not made again.
+    expect(meta.createCreative).toHaveBeenCalledTimes(1);
+    expect((await OpsCreative.findById(c._id)).status).toBe("live");
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+  });
+
+  it("only failed actions can be retried", async () => {
+    const { a } = await launchCard(new Date(Date.now() + 3600000));
+    const res = await api().post(`/api/manage/ops/actions/${a._id}/retry`).set("x-auth-token", await admin());
+    expect(res.status).toBe(409);
+  });
+
+  it("checks launches due within a day ahead, alerts once if Meta refuses, and touches no ad", async () => {
+    const meta = await import("../src/ops/meta.js");
+    const { preflightLaunches } = await import("../src/ops/adsCreative.js");
+    const { c, a } = await launchCard(new Date(Date.now() + 15 * 3600000));
+    meta.copyAd.mockClear();
+    meta.createCreative.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "Instagram account field is not valid." }));
+    await withImages(() => preflightLaunches());
+    const alert = await OpsAction.findOne({ type: "ads.launch_check_failed" });
+    expect(alert).toMatchObject({ priority: "urgent" });
+    expect(alert.reason).toMatch(/creating the creative: Invalid parameter \(Instagram account field is not valid\.\)/);
+    expect((await OpsAction.findById(a._id)).payload.checkError).toMatch(/Instagram account/);
+    expect(meta.copyAd).not.toHaveBeenCalled();
+
+    // Not checked again within 3 hours; after that it passes and the alert is resolved.
+    await withImages(() => preflightLaunches());
+    expect(meta.createCreative).toHaveBeenCalledTimes(1);
+    await withImages(() => preflightLaunches({ now: Date.now() + 3.1 * 3600000 }));
+    expect((await OpsCreative.findById(c._id)).metaCreativeId).toBe("cr_1");
+    expect((await OpsAction.findById(a._id)).payload.checkError).toBeNull();
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+    expect(meta.copyAd).not.toHaveBeenCalled();
+  });
+
+  it("lets an admin check a launch card by hand", async () => {
+    const { a } = await launchCard(new Date(Date.now() + 40 * 3600000));
+    const t = await admin();
+    const res = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/check`).set("x-auth-token", t));
+    expect(res.status).toBe(200);
+    expect(res.body.msg).toMatch(/Ready: 1 creative/);
   });
 });

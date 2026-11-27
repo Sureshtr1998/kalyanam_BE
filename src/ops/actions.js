@@ -240,6 +240,29 @@ export const runDue = async (deadline) => {
   return ran.filter(Boolean).length;
 };
 
+/**
+ * Puts a failed action back in the queue (the "Retry" button). Its failure
+ * alert is marked resolved. Returns the action, or null if it isn't failed.
+ */
+export const retry = async (id, by, runAt = new Date()) => {
+  const a = await OpsAction.findOneAndUpdate(
+    { _id: id, status: "failed" },
+    { $set: { status: "scheduled", runAt, decidedBy: by }, $unset: { error: "", ranAt: "" } },
+    { new: true }
+  );
+  if (!a) return null;
+  if (!handlers.has(a.type)) {
+    a.status = "failed";
+    a.error = `No handler for ${a.type}`;
+    return a.save();
+  }
+  await OpsAction.updateMany(
+    { "payload.dedupeKey": `failed:${a._id}`, status: "info", "payload.resolvedAt": null },
+    { $set: { "payload.resolvedAt": new Date() } }
+  );
+  return a;
+};
+
 export const cancel = (id, by) =>
   OpsAction.findOneAndUpdate(
     { _id: id, status: { $in: ["scheduled", "needs_you", "idea", "shadow"] } },

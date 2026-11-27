@@ -3,7 +3,8 @@ import { Router } from "express";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
 import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory, OpsConfig } from "../../ops/models.js";
-import { cancel, execute, undo } from "../../ops/actions.js";
+import { cancel, execute, retry, undo } from "../../ops/actions.js";
+import { checkLaunch } from "../../ops/adsCreative.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
 import { adsSettings, unitStates } from "../../ops/ads.js";
 import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
@@ -163,6 +164,35 @@ router.post(
     const a = await execute(req.params.id, by(req));
     if (!a) return res.status(409).json({ msg: "This action has already run or was cancelled" });
     return res.json({ action: a, msg: a.status === "done" ? "Done" : a.error || "Failed" });
+  })
+);
+
+/** "Retry" for a failed action: back in the queue and run now (or at runAt). */
+router.post(
+  "/manage/ops/actions/:id/retry",
+  wrap(async (req, res) => {
+    const runAt = req.body?.runAt ? new Date(req.body.runAt) : new Date();
+    if (Number.isNaN(runAt.getTime())) return res.status(400).json({ msg: "runAt must be a date" });
+    const a = await retry(req.params.id, by(req), runAt);
+    if (!a) return res.status(409).json({ msg: "Only a failed action can be retried" });
+    if (a.status === "failed") return res.status(400).json({ msg: a.error });
+    if (runAt.getTime() > Date.now()) return res.json({ action: a, msg: "Scheduled again" });
+    const done = await execute(a._id, by(req));
+    // A retry that fails again is an error (red), with Meta's reason.
+    if (!["done", "scheduled"].includes(done?.status)) return res.status(400).json({ action: done, msg: done?.error || "Failed" });
+    return res.json({ action: done, msg: done.status === "done" ? "Done" : "Scheduled: waiting for a step" });
+  })
+);
+
+/** Makes a launch card's Meta creatives now (no ad is touched), to see if the launch would work. */
+router.post(
+  "/manage/ops/actions/:id/check",
+  wrap(async (req, res) => {
+    const a = await OpsAction.findById(req.params.id).lean();
+    if (!a || a.type !== "ads.creative_launch") return res.status(404).json({ msg: "Only new-ad launches can be checked" });
+    const r = await checkLaunch(a);
+    await OpsAction.updateOne({ _id: a._id }, { $set: { "payload.checkedAt": new Date(), "payload.checkError": r.ok ? null : r.error } });
+    return res.status(r.ok ? 200 : 400).json({ ...r, msg: r.ok ? `Ready: ${r.checked} creative(s) made in Meta, no ad changed yet` : r.error });
   })
 );
 
