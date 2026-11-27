@@ -1521,6 +1521,9 @@ describe("new-ad launches that Meta refuses", () => {
     const e = { message: "Invalid parameter", code: 100, error_subcode: 3858504, error_user_title: "Deprecated field", error_user_msg: "standard_enhancements is no longer supported." };
     expect(metaMessage(e)).toBe("Invalid parameter (Deprecated field: standard_enhancements is no longer supported.) [subcode 3858504]");
     expect(metaErrorText({ meta: e })).toMatch(/standard_enhancements is no longer supported/);
+    // The app in Development mode: say what to do, in plain words.
+    const dev = { message: "Invalid parameter", code: 100, error_subcode: 1885183, error_user_msg: "Ads creative post was created by an app that is in development mode." };
+    expect(metaErrorText({ meta: dev })).toMatch(/SRK Ads Reporting\) is in Development mode\. Switch it to Live/);
   });
 
   it("names the failed step, removes the half-made copy, and a retry reuses the creative", async () => {

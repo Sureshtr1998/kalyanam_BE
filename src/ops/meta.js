@@ -404,6 +404,10 @@ export const metaErrorText = (err) => {
   const code = err.meta?.code;
   const msg = String(metaMessage(err.meta) || err.message || "");
   if (code === 190) return "The Meta token has expired or is invalid. Generate a new one.";
+  // New ads' posts are made by the agent's Meta app; Meta refuses them while that app is in Development mode.
+  if (err.meta?.error_subcode === 1885183) {
+    return "Meta refuses new ads while the agent's Meta app (SRK Ads Reporting) is in Development mode. Switch it to Live: developers.facebook.com → My Apps → SRK Ads Reporting → Publish.";
+  }
   if (code === 10 || code === 200 || /permission/i.test(msg)) return `The Meta token is missing a permission: ${msg}`;
   if ([4, 17, 32, 613, 80000, 80004].includes(code)) return "Meta's rate limit was hit. It will retry on the next run.";
   return `Meta said: ${msg || "unknown error"}`;
