@@ -629,7 +629,8 @@ router.post(
       return res.status(400).json({ msg: message });
     }
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "alerts.lastSentAt": new Date(), "alerts.lastError": "" } });
-    return res.json({ msg: "Sent. Check your WhatsApp." });
+    // MSG91 takes the request first and delivers after; a refused delivery shows only in its logs.
+    return res.json({ msg: "Handed to MSG91. It should reach your WhatsApp within a minute; if not, see MSG91 → WhatsApp → Logs → Failed Logs." });
   })
 );
 
