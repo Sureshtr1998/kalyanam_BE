@@ -15,6 +15,7 @@ import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.j
 import { hinduCalendar } from "../../ops/hinduCalendar.js";
 import { langPath } from "../../ops/links.js";
 import { formatDraft } from "../../ops/support.js";
+import razorpay from "../../config/razorpay.js";
 import { ALERT_TEMPLATE, ALERT_TEMPLATE_BODY, normalizeWhatsapp, sendWhatsappAlert, whatsappConfigured } from "../../ops/whatsapp.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
@@ -164,6 +165,48 @@ router.post(
     const a = await execute(req.params.id, by(req));
     if (!a) return res.status(409).json({ msg: "This action has already run or was cancelled" });
     return res.json({ action: a, msg: a.status === "done" ? "Done" : a.error || "Failed" });
+  })
+);
+
+/**
+ * The owner's Refund button for a payment the card found in Razorpay (the
+ * person has no account, or the payment isn't on it). Only a payment listed
+ * on this open refund card; checked with Razorpay again right before. The
+ * card's reply is sent afterwards by the button (run), as for other refunds.
+ */
+router.post(
+  "/manage/ops/actions/:id/refund",
+  wrap(async (req, res) => {
+    const a = await OpsAction.findById(req.params.id);
+    if (!a || a.type !== "support.refund" || a.status !== "needs_you") return res.status(409).json({ msg: "This refund card is no longer open" });
+    const paymentId = String(req.body?.paymentId || "");
+    const list = a.payload?.payments ?? [];
+    const i = list.findIndex((p) => p.paymentId === paymentId && p.source === "razorpay");
+    if (i < 0) return res.status(404).json({ msg: "That payment isn't on this card" });
+    if (list[i].refunded || list[i].refundId) return res.status(400).json({ msg: "This payment has already been refunded" });
+    const live = await razorpay.payments.fetch(paymentId);
+    if (live?.status === "refunded" || (Number(live?.amount_refunded) || 0) >= (Number(live?.amount) || 0)) {
+      list[i] = { ...list[i], refunded: true };
+      a.payload = { ...a.payload, payments: list };
+      a.markModified("payload");
+      await a.save();
+      return res.status(400).json({ msg: "Razorpay shows this payment already refunded" });
+    }
+    let refund;
+    try {
+      refund = await razorpay.payments.refund(paymentId, {
+        speed: "normal",
+        // @ts-ignore
+        notes: { reason: "Refunded by admin (refund request card)", admin: by(req), card: String(a._id) },
+      });
+    } catch (err) {
+      return res.status(400).json({ msg: err?.error?.description || "Razorpay could not process this refund" });
+    }
+    list[i] = { ...list[i], refunded: true, refundId: refund.id, refundedAt: new Date(), refundedBy: by(req) };
+    a.payload = { ...a.payload, payments: list };
+    a.markModified("payload");
+    await a.save();
+    return res.json({ msg: `Refunded ₹${refund.amount != null ? refund.amount / 100 : list[i].amount} · ${refund.id}` });
   })
 );
 

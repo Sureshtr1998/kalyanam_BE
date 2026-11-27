@@ -61,6 +61,18 @@ export const propose = async (module, fields, { dedupeKey } = {}) => {
   return doc;
 };
 
+/**
+ * The owner acted on a member's mail card (approved, ran, cancelled): that
+ * member's "mailed N times and needs you" alert is marked resolved.
+ */
+export const ownerActed = async (action, by) => {
+  if (!action || !by || by === "agent" || action.module !== "support" || !action.payload?.to) return;
+  await OpsAction.updateMany(
+    { type: "support.repeat_mail", "payload.to": action.payload.to, status: "info", "payload.resolvedAt": null },
+    { $set: { "payload.resolvedAt": new Date() } }
+  ).catch(() => {});
+};
+
 /** Runs one action now. Safe to call twice: only one caller can claim it. */
 export const execute = async (id, by = "agent") => {
   const action = await OpsAction.findOneAndUpdate(
@@ -94,6 +106,7 @@ export const execute = async (id, by = "agent") => {
   }
   action.ranAt = new Date();
   const saved = await action.save();
+  await ownerActed(saved, by);
   // A failed ad change, post, mail reply, verification or refund is something the owner must hear
   // about (urgent: email + WhatsApp, at most one WhatsApp per kind of failure in 12 h).
   if (saved.status === "failed" && ["ads", "organic", "support"].includes(saved.module)) {
@@ -263,12 +276,38 @@ export const retry = async (id, by, runAt = new Date()) => {
   return a;
 };
 
-export const cancel = (id, by) =>
-  OpsAction.findOneAndUpdate(
+export const cancel = async (id, by) => {
+  const a = await OpsAction.findOneAndUpdate(
     { _id: id, status: { $in: ["scheduled", "needs_you", "idea", "shadow"] } },
     { status: "cancelled", decidedBy: by },
     { new: true }
   );
+  await ownerActed(a, by);
+  return a;
+};
+
+/**
+ * Once: repeat-mail alerts the owner already acted on (a card of that member
+ * decided by the owner after the alert) are marked resolved.
+ */
+export const resolveHandledRepeats = async () => {
+  let resolved = 0;
+  for (const alert of await OpsAction.find({ type: "support.repeat_mail", status: "info", "payload.resolvedAt": null })) {
+    const acted = await OpsAction.exists({
+      module: "support",
+      "payload.to": alert.payload?.to,
+      status: { $in: ["done", "cancelled"] },
+      decidedBy: { $nin: [null, "agent"] },
+      updatedAt: { $gt: alert.createdAt },
+    });
+    if (!acted) continue;
+    alert.payload = { ...alert.payload, resolvedAt: new Date() };
+    alert.markModified("payload");
+    await alert.save();
+    resolved += 1;
+  }
+  return resolved;
+};
 
 /** A one-line notice in the feed (alerts, summaries). Shown even in shadow mode. */
 export const notice = (module, fields) => propose(module, { ...fields, status: "info" });

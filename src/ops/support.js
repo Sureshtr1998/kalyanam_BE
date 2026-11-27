@@ -1,4 +1,5 @@
 import User from "../models/User.js";
+import razorpay from "../config/razorpay.js";
 import { notify } from "../config/msg91Email.js";
 import { OpsAction, OpsMail, getConfig } from "./models.js";
 import { ask } from "./claude.js";
@@ -94,6 +95,45 @@ export const fundsMail = (mail) =>
   FUNDS_SENDERS.test(mail.from.email.split("@")[1] || "") && FUNDS_WORDS.test(`${mail.subject} ${mail.text.slice(0, 400)}`);
 
 const normalizeMobile = (s) => String(s || "").replace(/\D/g, "").slice(-10);
+
+/**
+ * Razorpay payments (last `days`) made with any of these emails or this mobile,
+ * for refund requests from people with no account or no payment on it (e.g. they
+ * paid but never finished registering). Read only: nothing is refunded here.
+ * Each: { paymentId, amount, note, date, source: "razorpay", refunded, refundedOn }.
+ */
+export const findRazorpayPayments = async ({ emails = [], mobile = "", days = 60, now = Date.now() } = {}) => {
+  const wanted = new Set(emails.map((e) => String(e || "").toLowerCase().trim()).filter(Boolean));
+  const mobile10 = normalizeMobile(mobile);
+  if (!wanted.size && mobile10.length !== 10) return [];
+  const from = Math.floor((now - days * 86400000) / 1000);
+  const to = Math.floor(now / 1000);
+  const found = [];
+  for (let skip = 0; skip < 3000; skip += 100) {
+    const page = await razorpay.payments.all({ from, to, count: 100, skip });
+    const items = page?.items ?? [];
+    for (const p of items) {
+      if (!["captured", "refunded"].includes(p.status)) continue;
+      const byEmail = wanted.has(String(p.email || "").toLowerCase().trim());
+      const byMobile = mobile10.length === 10 && normalizeMobile(p.contact) === mobile10;
+      if (!byEmail && !byMobile) continue;
+      const refunded = p.status === "refunded" || (Number(p.amount_refunded) || 0) >= (Number(p.amount) || 0);
+      found.push({
+        paymentId: p.id,
+        amount: (Number(p.amount) || 0) / 100,
+        note: p.description || p.notes?.purpose || "Razorpay payment",
+        date: p.created_at ? new Date(p.created_at * 1000) : undefined,
+        source: "razorpay",
+        matchedBy: byEmail ? "email" : "mobile",
+        refunded,
+      });
+    }
+    if (items.length < 100) break;
+  }
+  return found;
+};
+
+const day = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short" }) : "");
 
 const replySystem = (brief) => `You write email replies for the support team of Seetha Rama Kalyana.
 ${brief}
@@ -240,6 +280,50 @@ export const runSupportCycle = async () => {
 
 const WAITING = ["scheduled", "needs_you", "shadow"];
 
+/**
+ * Once: open refund cards made before one-card-per-member and the Razorpay
+ * lookup. Several cards from one person fold into the newest; a card with no
+ * payment looks it up in Razorpay by the person's email (read only, nothing
+ * is refunded). Returns how many cards changed.
+ */
+export const refreshOpenRefunds = async () => {
+  const cards = await OpsAction.find({ type: "support.refund", status: { $in: WAITING } }).sort({ createdAt: 1 });
+  const byPerson = new Map();
+  for (const c of cards) {
+    const key = String(c.payload?.to || c._id).toLowerCase();
+    byPerson.set(key, [...(byPerson.get(key) ?? []), c]);
+  }
+  let changed = 0;
+  for (const list of byPerson.values()) {
+    const keep = list.at(-1);
+    for (const old of list.slice(0, -1)) {
+      old.status = "cancelled";
+      old.decidedBy = "agent";
+      old.error = "Replaced: they wrote again, and the newest refund card covers all their mails.";
+      await old.save();
+      changed += 1;
+    }
+    let reason = keep.reason ?? "";
+    if (list.length > 1 && !/^They wrote \d+ times/.test(reason)) reason = `They wrote ${list.length} times about this refund. ${reason}`;
+    if (!(keep.payload?.payments ?? []).length && keep.payload?.to) {
+      const found = await findRazorpayPayments({ emails: [keep.payload.to] }).catch(() => null);
+      if (found) {
+        keep.payload = { ...keep.payload, payments: found };
+        keep.markModified("payload");
+        reason += found.length
+          ? ` Found in Razorpay by their email: ${found.map((p) => `₹${p.amount} on ${day(p.date)}${p.refunded ? " (already refunded)" : ""}`).join(", ")}.`
+          : " No payment with their email in Razorpay in the last 60 days: ask them for the payment ID or UPI reference.";
+      }
+    }
+    if (reason !== keep.reason) {
+      keep.reason = reason;
+      await keep.save();
+      changed += 1;
+    }
+  }
+  return changed;
+};
+
 /** Cancels the older reply cards a newer mail now covers, and says so on the new card. */
 const supersede = async (earlier, doc) => {
   if (!earlier.length) return;
@@ -371,22 +455,47 @@ const handleMail = async (config, m, delay) => {
 
   if (t.category === "refund") {
     const user = await User.findOne({ "basic.email": { $in: [m.from.email, String(t.email || "").toLowerCase()] } }).select("basic transactions isVerified createdAt").lean();
-    const payments = (user?.transactions ?? [])
+    let payments = (user?.transactions ?? [])
       .filter((x) => x.paymentId && x.amountPaid > 0 && !x.refundId)
       .map((x) => ({ paymentId: x.paymentId, amount: x.amountPaid, note: x.note, date: x.dateOfTrans }));
+    // Paid but no account (or none on it): look the payment up in Razorpay by their email or mobile.
+    let lookup = "";
+    if (!payments.length) {
+      const found = await findRazorpayPayments({ emails: [m.from.email, t.email, user?.basic?.email], mobile: t.mobile || user?.basic?.mobile }).catch((err) => {
+        lookup = ` Razorpay couldn't be searched (${err?.error?.description || err.message}).`;
+        return null;
+      });
+      if (found) {
+        payments = found;
+        const open = found.filter((p) => !p.refunded);
+        const done = found.filter((p) => p.refunded);
+        lookup = found.length
+          ? ` Found in Razorpay by their ${[...new Set(found.map((p) => p.matchedBy))].join(" and ")}: ${found.map((p) => `₹${p.amount} on ${day(p.date)}${p.refunded ? " (already refunded)" : ""}`).join(", ")}.${done.length && !open.length ? " Razorpay shows it already refunded: tell them it can take 5–7 working days to reach them." : ""}`
+          : " No payment with their email or mobile in Razorpay in the last 60 days: ask them for the payment ID or UPI reference.";
+      }
+    }
     doc.matchedUser = user?._id;
     doc.needsTeam = true;
     doc.draft = await draftReply(config, mail, "Confirm we have refunded their payment; it reaches the original payment method in 5–7 working days.");
-    await propose("support", {
+    // One refund card per member: earlier open ones from the same person are folded into this one.
+    const earlierRefunds = await OpsAction.find({ module: "support", type: "support.refund", status: { $in: WAITING }, "payload.to": m.from.email }).lean();
+    const again = earlierRefunds.length ? `They wrote ${earlierRefunds.length + 1} times about this refund. ` : "";
+    const card = await propose("support", {
       type: "support.refund",
       status: "needs_you",
       priority: "normal",
       title: `Refund request from ${who}`,
-      reason: `${t.summary} ${user ? `Member ${user.basic.fullName}, joined ${new Date(user.createdAt).toLocaleDateString("en-IN")}, ${payments.length} refundable payment(s).` : "No account found with this email."}`,
+      reason: `${again}${t.summary} ${user ? `Member ${user.basic.fullName}, joined ${new Date(user.createdAt).toLocaleDateString("en-IN")}, ${(user.transactions ?? []).filter((x) => x.paymentId && x.amountPaid > 0 && !x.refundId).length} refundable payment(s) on the account.` : "No account found with this email."}${lookup}`,
       effect: "Waits for you: Refund (Razorpay) or Ignore. Refunds are never automatic.",
       payload: { userId: user?._id ? String(user._id) : null, payments, to: m.from.email, subject: m.subject, inReplyTo: m.messageId, draft: doc.draft },
       ref,
     });
+    if (card && earlierRefunds.length) {
+      await OpsAction.updateMany(
+        { _id: { $in: earlierRefunds.map((a) => a._id) }, status: { $in: WAITING } },
+        { $set: { status: "cancelled", decidedBy: "agent", error: "Replaced: they wrote again, and the newest refund card covers all their mails." } }
+      );
+    }
     return finish();
   }
 

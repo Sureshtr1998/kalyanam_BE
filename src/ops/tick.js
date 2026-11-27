@@ -1,10 +1,10 @@
 import { OpsAction, OpsConfig, getConfig } from "./models.js";
-import { mergeLegacyPairs, notice, runDue, tidyStaleAlerts } from "./actions.js";
+import { mergeLegacyPairs, notice, resolveHandledRepeats, runDue, tidyStaleAlerts } from "./actions.js";
 import { metaConfigured, pageConfigured, resolvePage, igConfigured } from "./meta.js";
 import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
-import { runSupportCycle } from "./support.js";
+import { refreshOpenRefunds, runSupportCycle } from "./support.js";
 import { runCommentsCycle } from "./comments.js";
 import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
 import { readTools } from "./tools.js";
@@ -239,6 +239,18 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await tagIdeaCreatives()
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.ideaTags20261127": new Date() } }))
       .catch((err) => console.error("[ops] idea tags", err.message));
+  }
+  // Once: repeat-mail alerts the owner already acted on (before acting closed them) are resolved.
+  if (!config.migrations?.repeatResolved20261127) {
+    await resolveHandledRepeats()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.repeatResolved20261127": new Date() } }))
+      .catch((err) => console.error("[ops] repeat alerts", err.message));
+  }
+  // Once: open refund cards from before one-card-per-member fold together and look their payment up in Razorpay.
+  if (!config.migrations?.refundCards20261127) {
+    await refreshOpenRefunds()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.refundCards20261127": new Date() } }))
+      .catch((err) => console.error("[ops] refund cards", err.message));
   }
   // Once: fold the old two-card pairs (hide + delete, Facebook + Instagram) into one card each.
   if (!config.migrations?.mergePairs20261127b) {

@@ -1645,3 +1645,109 @@ describe("new-ad launches that Meta refuses", () => {
     expect((await OpsAction.findById(a._id)).payload.checkError).toBeNull();
   });
 });
+
+describe("refund requests and repeat-mail alerts", () => {
+  const goLive = () => OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.support": "live" } }, { upsert: true });
+  const admin = async () => tokenFor(await createUser({ rest: { isAdmin: true } }));
+  const rzpPayment = (over = {}) => ({ id: "pay_rzp1", status: "captured", amount: 35100, amount_refunded: 0, email: "paid.no.account@example.test", contact: "+919876543210", description: "Registration", created_at: Math.floor(Date.now() / 1000) - 5 * 86400, ...over });
+  let razorpay;
+  beforeEach(async () => {
+    razorpay = (await import("../src/config/razorpay.js")).default;
+    razorpay.payments.all = vi.fn(async () => ({ items: [rzpPayment(), rzpPayment({ id: "pay_other", email: "someone@else.test", contact: "+919000000000" })] }));
+    razorpay.payments.fetch = vi.fn(async (id) => rzpPayment({ id }));
+    razorpay.payments.refund.mockClear?.();
+  });
+
+  it("finds the payment in Razorpay when they have no account, and keeps one card per person", async () => {
+    await goLive();
+    triage.mockReturnValue({ category: "refund", language: "English", summary: "Paid ₹351, OTP failed, wants the money back", mobile: "98765 43210", email: "", confidence: 0.9 });
+    inbox.push(mail(401, "paid.no.account@example.test", "I paid 351 but OTP never came, refund please"));
+    await runSupportCycle();
+    const first = await OpsAction.findOne({ type: "support.refund" });
+    expect(first.payload.payments).toEqual([expect.objectContaining({ paymentId: "pay_rzp1", amount: 351, source: "razorpay", refunded: false })]);
+    expect(first.reason).toMatch(/No account found with this email\. Found in Razorpay by their email: ₹351 on/);
+    expect(razorpay.payments.refund).not.toHaveBeenCalled();
+
+    // The second mail folds into one card.
+    inbox.push(mail(402, "paid.no.account@example.test", "still waiting for my refund"));
+    await runSupportCycle();
+    const cards = await OpsAction.find({ type: "support.refund" }).sort({ createdAt: 1 });
+    expect(cards.map((c) => c.status)).toEqual(["cancelled", "needs_you"]);
+    expect(cards[0].error).toMatch(/Replaced/);
+    expect(cards[1].reason).toMatch(/^They wrote 2 times about this refund\./);
+    expect(razorpay.payments.refund).not.toHaveBeenCalled();
+  });
+
+  it("says when Razorpay shows it already refunded, and when nothing is found", async () => {
+    await goLive();
+    razorpay.payments.all = vi.fn(async () => ({ items: [rzpPayment({ status: "refunded", amount_refunded: 35100 })] }));
+    triage.mockReturnValue({ category: "refund", language: "English", summary: "Refund not received", mobile: "", email: "", confidence: 0.9 });
+    inbox.push(mail(411, "paid.no.account@example.test", "my refund hasn't come"));
+    await runSupportCycle();
+    const card = await OpsAction.findOne({ type: "support.refund" });
+    expect(card.payload.payments[0]).toMatchObject({ refunded: true });
+    expect(card.reason).toMatch(/already refunded/);
+
+    razorpay.payments.all = vi.fn(async () => ({ items: [] }));
+    inbox.push(mail(412, "nobody@example.test", "refund"));
+    await runSupportCycle();
+    const none = await OpsAction.findOne({ type: "support.refund", "payload.to": "nobody@example.test" });
+    expect(none.reason).toMatch(/No payment with their email or mobile in Razorpay/);
+  });
+
+  it("refunds a payment found in Razorpay only from the owner's button, once, and only if it's on the card", async () => {
+    const a = await OpsAction.create({
+      module: "support", type: "support.refund", status: "needs_you", title: "Refund request from X",
+      payload: { userId: null, to: "paid.no.account@example.test", payments: [{ paymentId: "pay_rzp1", amount: 351, source: "razorpay", refunded: false }] },
+    });
+    const t = await admin();
+    expect((await api().post(`/api/manage/ops/actions/${a._id}/refund`).set("x-auth-token", t).send({ paymentId: "pay_not_on_card" })).status).toBe(404);
+    razorpay.payments.refund.mockResolvedValueOnce({ id: "rfnd_1", amount: 35100 });
+    const ok = await api().post(`/api/manage/ops/actions/${a._id}/refund`).set("x-auth-token", t).send({ paymentId: "pay_rzp1" });
+    expect(ok.status).toBe(200);
+    expect(ok.body.msg).toMatch(/Refunded ₹351 · rfnd_1/);
+    expect(razorpay.payments.refund).toHaveBeenCalledWith("pay_rzp1", expect.objectContaining({ speed: "normal" }));
+    expect((await OpsAction.findById(a._id)).payload.payments[0]).toMatchObject({ refunded: true, refundId: "rfnd_1" });
+    // Never twice.
+    const again = await api().post(`/api/manage/ops/actions/${a._id}/refund`).set("x-auth-token", t).send({ paymentId: "pay_rzp1" });
+    expect(again.status).toBe(400);
+    expect(razorpay.payments.refund).toHaveBeenCalledTimes(1);
+    // Members can't reach it.
+    const member = await createUser();
+    expect((await api().post(`/api/manage/ops/actions/${a._id}/refund`).set("x-auth-token", tokenFor(member)).send({ paymentId: "pay_rzp1" })).status).toBe(404);
+  });
+
+  it("tidies refund cards made before: one per person, payment looked up in Razorpay", async () => {
+    const { refreshOpenRefunds } = await import("../src/ops/support.js");
+    const old = await OpsAction.create({ module: "support", type: "support.refund", status: "needs_you", title: "Refund request from V", reason: "Paid via GPay. No account found with this email.", payload: { to: "paid.no.account@example.test", payments: [] } });
+    const newer = await OpsAction.create({ module: "support", type: "support.refund", status: "needs_you", title: "Refund request from V", reason: "Refund not arrived. No account found with this email.", payload: { to: "paid.no.account@example.test", payments: [] } });
+    const other = await OpsAction.create({ module: "support", type: "support.refund", status: "needs_you", title: "Refund request from R", reason: "Has a payment.", payload: { to: "r@x.test", userId: "u1", payments: [{ paymentId: "pay_acc", amount: 351 }] } });
+    await refreshOpenRefunds();
+    expect((await OpsAction.findById(old._id)).status).toBe("cancelled");
+    const kept = await OpsAction.findById(newer._id);
+    expect(kept.status).toBe("needs_you");
+    expect(kept.reason).toMatch(/^They wrote 2 times about this refund\. .*Found in Razorpay by their email: ₹351 on/);
+    expect(kept.payload.payments[0]).toMatchObject({ paymentId: "pay_rzp1", source: "razorpay" });
+    expect((await OpsAction.findById(other._id)).reason).toBe("Has a payment.");
+    expect(razorpay.payments.refund).not.toHaveBeenCalled();
+  });
+
+  it("closes a member's repeat-mail alert when the owner acts on their card, not when the agent does", async () => {
+    const { notice, cancel, resolveHandledRepeats } = await import("../src/ops/actions.js");
+    const alert = await notice("support", { type: "support.repeat_mail", priority: "urgent", title: "Ravi has mailed 3 times and needs you", payload: { dedupeKey: "repeat:ravi@x.test", to: "ravi@x.test" } });
+    const byAgent = await OpsAction.create({ module: "support", type: "support.reply", status: "needs_you", title: "Reply to Ravi", payload: { to: "ravi@x.test", draft: "d" } });
+    await cancel(byAgent._id, "agent");
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt ?? null).toBeNull();
+    const byOwner = await OpsAction.create({ module: "support", type: "support.reply", status: "needs_you", title: "Reply to Ravi", payload: { to: "ravi@x.test", draft: "d" } });
+    await cancel(byOwner._id, "SRK0001");
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+
+    // Alerts the owner acted on before this existed are resolved once.
+    const old = await notice("support", { type: "support.repeat_mail", priority: "urgent", title: "Naveen has mailed 3 times", payload: { dedupeKey: "repeat:naveen@x.test", to: "naveen@x.test" } });
+    await OpsAction.create({ module: "support", type: "support.reply", status: "cancelled", decidedBy: "SRK0001", title: "Profile change from Naveen", payload: { to: "naveen@x.test" } });
+    const waiting = await notice("support", { type: "support.repeat_mail", priority: "urgent", title: "Asha has mailed 3 times", payload: { dedupeKey: "repeat:asha@x.test", to: "asha@x.test" } });
+    expect(await resolveHandledRepeats()).toBe(1);
+    expect((await OpsAction.findById(old._id)).payload.resolvedAt).toBeTruthy();
+    expect((await OpsAction.findById(waiting._id)).payload.resolvedAt ?? null).toBeNull();
+  });
+});
