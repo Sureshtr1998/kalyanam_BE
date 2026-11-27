@@ -246,7 +246,7 @@ const sendReminder = async (user, key, endsAt) => {
   const tpl = REMINDERS[key];
   const name = user.basic?.fullName || "";
   const date = istDate(endsAt);
-  const link = `${siteUrl()}/accounts`;
+  const link = `${siteUrl()}/account`;
   let whatsapp;
   if (tpl.whatsapp && whatsappConfigured()) {
     try {

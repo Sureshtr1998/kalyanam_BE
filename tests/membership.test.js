@@ -104,6 +104,8 @@ describe("daily membership job", () => {
     expect(out.reminders).toEqual({});
     expect(sendWhatsappTemplate).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendWhatsappTemplate).mock.calls[0][0]).toMatchObject({ name: "membership_ending_30d", language: "en" });
+    // {{3}} is the Account page, where the member renews.
+    expect(vi.mocked(sendWhatsappTemplate).mock.calls[0][0].components.body_3.value).toMatch(/\/account$/);
 
     setNow("2028-03-20T05:00:00Z");
     await User.updateOne({ _id: m._id }, { lastActiveAt: new Date() });
