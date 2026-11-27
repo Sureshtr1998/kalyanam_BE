@@ -1751,3 +1751,19 @@ describe("refund requests and repeat-mail alerts", () => {
     expect((await OpsAction.findById(waiting._id)).payload.resolvedAt ?? null).toBeNull();
   });
 });
+
+describe("Ads screen: the agent's ads", () => {
+  it("lists every upcoming ad with when it goes live, ahead of old ones", async () => {
+    await OpsCreative.deleteMany({});
+    const old = await OpsCreative.create({ language: "Kannada", status: "cancelled", design: { headline: "old" } });
+    const soon = await OpsCreative.create({ language: "Tamil", status: "ready", imageUrl: "https://ik.example.test/a.jpg", design: { headline: "soon" } });
+    const runAt = new Date(Date.now() + 10 * 3600000);
+    await OpsAction.create({ module: "ads", type: "ads.creative_launch", status: "scheduled", title: "1 new ad for SRK | Tamil", runAt, payload: { creativeIds: [String(soon._id)] } });
+    const res = await api().get("/api/manage/ops/ads?days=7").set("x-auth-token", tokenFor(await createUser({ rest: { isAdmin: true } })));
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(res.body.creatives.map((c) => [c._id, c]));
+    expect(new Date(byId[soon._id].launchAt).getTime()).toBe(runAt.getTime());
+    expect(byId[old._id].launchAt).toBeNull();
+    expect(res.body.creatives[0]._id).toBe(String(soon._id));
+  });
+});

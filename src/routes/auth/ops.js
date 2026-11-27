@@ -458,10 +458,20 @@ router.get(
       OpsAction.find({ module: "ads" }).sort({ updatedAt: -1 }).limit(30).lean(),
     ]);
     const [creatives, config, ideas] = await Promise.all([
-      OpsCreative.find().sort({ createdAt: -1 }).limit(12).lean(),
+      // Every ad still to come, plus the latest live and old ones.
+      Promise.all([
+        OpsCreative.find({ status: { $in: ["design", "ready"] } }).sort({ createdAt: -1 }).limit(40).lean(),
+        OpsCreative.find({ status: { $nin: ["design", "ready"] } }).sort({ updatedAt: -1 }).limit(24).lean(),
+      ]).then(([upcoming, rest]) => [...upcoming, ...rest]),
       getConfig(),
       loadIdeaLibrary(60).catch(() => []),
     ]);
+    // Scheduled launch cards: when each upcoming ad goes live.
+    const launches = await OpsAction.find({ type: "ads.creative_launch", status: { $in: ["scheduled", "needs_you", "shadow"] } })
+      .select("runAt payload.creativeIds")
+      .lean();
+    const launchAt = new Map();
+    for (const l of launches) for (const id of l.payload?.creativeIds ?? []) launchAt.set(String(id), l.runAt ?? null);
     const cpp = (a) => (a.paid ? a.spend / a.paid : Infinity);
     const ranked = [...ads].sort((a, b) => cpp(a) - cpp(b));
     return res.json({
@@ -478,6 +488,9 @@ router.get(
       ideas: ideas.map(({ ads: names, ...r }) => ({ ...r, label: IDEAS[r.idea]?.label ?? "Other", ads: names.length })),
       creatives: creatives.map((c) => ({
         _id: c._id,
+        // When its launch card runs (scheduled ads), or when it went live.
+        launchAt: launchAt.get(String(c._id)) ?? null,
+        liveAt: c.liveAt ?? null,
         campaignName: c.campaignName,
         adsetName: c.adsetName,
         language: c.language,
