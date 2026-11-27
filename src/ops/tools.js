@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { AdSnapshot, getConfig } from "./models.js";
+import { AdSnapshot, OpsAction, getConfig } from "./models.js";
 import { monthSpendUsd } from "./claude.js";
 import { notice } from "./actions.js";
 import razorpay from "../config/razorpay.js";
@@ -128,6 +128,12 @@ export const readTools = async () => {
       effect: "Top up the MSG91 wallet (msg91.com → Wallet). Alert only.",
       payload: { dedupeKey: `msg91_low:${today()}` },
     }).catch(() => {});
+  } else if (m?.current != null && m.current >= floor) {
+    // Topped up: earlier low-balance alerts are marked resolved and leave Today.
+    await OpsAction.updateMany(
+      { type: "tools.msg91_low", status: "info", "payload.resolvedAt": null },
+      { $set: { "payload.resolvedAt": new Date() } }
+    ).catch(() => {});
   }
 };
 

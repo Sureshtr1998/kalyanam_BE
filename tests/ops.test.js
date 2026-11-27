@@ -1241,3 +1241,33 @@ describe("stale alerts", () => {
     expect(await OpsAction.countDocuments({ type: "comments.paid_complaint" })).toBe(0);
   });
 });
+
+describe("Format my mail", () => {
+  const admin = async () => tokenFor(await createUser({ rest: { isAdmin: true } }));
+  it("turns the owner's notes into a structured reply in the member's language, without saving it", async () => {
+    const { ask } = await import("../src/ops/claude.js");
+    await OpsMail.create({ uid: 9001, messageId: "<m-format@x>", from: { email: "ravi@example.com", name: "Ravi" }, subject: "OTP not received", text: "I did not get the OTP", language: "Kannada (Kannada script)" });
+    const a = await OpsAction.create({ module: "support", type: "support.reply", status: "scheduled", title: "Reply to Ravi", runAt: new Date(Date.now() + 3600000), payload: { to: "ravi@example.com", subject: "OTP not received", inReplyTo: "<m-format@x>", draft: "old draft" } });
+    ask.mockResolvedValueOnce("ಆತ್ಮೀಯ ರವಿ,\n\nನಿಮ್ಮ ಖಾತೆ ಪರಿಶೀಲಿಸಲಾಗಿದೆ.\n\nWarm regards,\nTeam Seetha Rama Kalyana");
+    const res = await api().post(`/api/manage/ops/actions/${a._id}/format`).set("x-auth-token", await admin()).send({ text: "account verified now, login with email and password" });
+    expect(res.status).toBe(200);
+    expect(res.body.draft).toMatch(/Team Seetha Rama Kalyana/);
+    const call = ask.mock.calls.at(-1)[0];
+    expect(call.task).toBe("support.format");
+    expect(call.system).toMatch(/Kannada \(Kannada script\)/);
+    expect(call.system).toMatch(/Add nothing they don't say/);
+    expect(call.prompt).toMatch(/account verified now/);
+    // Nothing is saved until the owner presses Save.
+    expect((await OpsAction.findById(a._id)).payload.draft).toBe("old draft");
+  });
+
+  it("refuses comment replies, finished cards and empty notes", async () => {
+    const reply = await OpsAction.create({ module: "comments", type: "comments.reply", status: "scheduled", title: "Reply", payload: { reply: "hi" } });
+    const done = await OpsAction.create({ module: "support", type: "support.reply", status: "done", title: "Reply", payload: { draft: "x" } });
+    const open = await OpsAction.create({ module: "support", type: "support.reply", status: "scheduled", title: "Reply", payload: { draft: "x" } });
+    const t = await admin();
+    expect((await api().post(`/api/manage/ops/actions/${reply._id}/format`).set("x-auth-token", t).send({ text: "thanks a lot" })).status).toBe(400);
+    expect((await api().post(`/api/manage/ops/actions/${done._id}/format`).set("x-auth-token", t).send({ text: "thanks a lot" })).status).toBe(409);
+    expect((await api().post(`/api/manage/ops/actions/${open._id}/format`).set("x-auth-token", t).send({ text: "ok" })).status).toBe(400);
+  });
+});

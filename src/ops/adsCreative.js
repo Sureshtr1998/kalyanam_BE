@@ -218,6 +218,22 @@ export const adsetResults = async () => {
 
 export const winningAdsets = async () => pickWinners(await adsetResults());
 
+/** The idea whose page an ad links to (e.g. "/pricing" → pricing), if any. */
+export const ideaForPath = (path) => {
+  const clean = cleanPath(path);
+  return clean ? IDEA_KEYS.find((k) => cleanPath(IDEAS[k]?.path) === clean) : undefined;
+};
+
+/** Once: ads planned from an idea before they were tagged take the idea of the page they link to. */
+export const tagIdeaCreatives = async () => {
+  let tagged = 0;
+  for (const k of IDEA_KEYS.filter((x) => cleanPath(IDEAS[x]?.path))) {
+    const r = await OpsCreative.updateMany({ linkPath: cleanPath(IDEAS[k].path), idea: null }, { $set: { idea: k } });
+    tagged += r.modifiedCount ?? 0;
+  }
+  return tagged;
+};
+
 const copyOf = async (adId) => {
   const spec = await fetchCreativeSpec(adId).catch(() => null);
   const link = spec?.object_story_spec?.link_data;
@@ -474,8 +490,8 @@ export const proposeIdeaCreatives = async ({ campaignId, campaignName, adsetId, 
         title: v.title,
         translation: v.translation,
         utmContent: utmFor(language, audience.key, i),
-        // An owner's idea is always a test.
-        idea: IDEA_KEYS.includes(v.idea) ? v.idea : undefined,
+        // An owner's idea is always a test; untagged ads that link to an idea's page take that idea.
+        idea: IDEA_KEYS.includes(v.idea) ? v.idea : ideaForPath(linkPath),
         role: "test",
         linkPath: linkPath ?? cleanPath(IDEAS[v.idea]?.path),
       })

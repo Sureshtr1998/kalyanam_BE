@@ -12,6 +12,8 @@ import { growth } from "../../ops/review.js";
 import { deletePostImage, organicSignups, renderDone, renderQueue, replanWeek, storyConcepts, unscheduleFacebook } from "../../ops/organic.js";
 import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.js";
 import { hinduCalendar } from "../../ops/hinduCalendar.js";
+import { langPath } from "../../ops/links.js";
+import { formatDraft } from "../../ops/support.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
 import { fetchScheduledPosts, resolvePage } from "../../ops/meta.js";
@@ -206,6 +208,20 @@ router.post(
   })
 );
 
+/** "Format my mail": the owner's own words → a structured reply (returned, not saved). */
+router.post(
+  "/manage/ops/actions/:id/format",
+  wrap(async (req, res) => {
+    const a = await OpsAction.findById(req.params.id).lean();
+    if (!a || !["scheduled", "needs_you", "idea", "shadow"].includes(a.status)) {
+      return res.status(409).json({ msg: "This action can no longer be changed" });
+    }
+    if (typeof a.payload?.draft !== "string") return res.status(400).json({ msg: "Only mail replies can be formatted" });
+    const draft = await formatDraft({ action: a, text: req.body?.text });
+    return res.json({ draft });
+  })
+);
+
 router.post(
   "/manage/ops/actions/:id/read",
   wrap(async (req, res) => {
@@ -365,6 +381,8 @@ router.get(
         title: c.title,
         translation: c.translation,
         utmContent: c.utmContent,
+        // The page the ad links to, e.g. "/kn/pricing" (null: the copied ad's own link).
+        linkPage: c.linkPath ? `${langPath(c.language)}${c.linkPath}` : null,
         idea: c.idea,
         ideaLabel: IDEAS[c.idea]?.label,
         role: c.role,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { calendarNotes, elongation, hinduCalendar, newMoons, sunTimes, tithiAt } from "../src/ops/hinduCalendar.js";
 import { cleanPath, pickWinners, withPath } from "../src/ops/adsCreative.js";
 
@@ -144,5 +144,57 @@ describe("tools read automatically", () => {
     spy.mockResolvedValueOnce(new Response(JSON.stringify({ status: "fail", message: "Invalid authkey" }), { status: 401 }));
     await expect(msg91Balance()).rejects.toThrow(/Invalid authkey/);
     spy.mockRestore();
+  });
+});
+
+describe("idea tags and resolved alerts", () => {
+  beforeAll(async () => {
+    const { default: dbConnect } = await import("../src/utils/dbConnect.js");
+    await dbConnect();
+  });
+  it("tags idea ads by the page they link to, once, leaving tagged ones alone", async () => {
+    const { OpsCreative } = await import("../src/ops/models.js");
+    const { ideaForPath, tagIdeaCreatives } = await import("../src/ops/adsCreative.js");
+    expect(ideaForPath("/pricing")).toBe("pricing");
+    expect(ideaForPath("/about")).toBeUndefined();
+    expect(ideaForPath(null)).toBeUndefined();
+    const base = { campaignId: "c", language: "Kannada", status: "ready" };
+    const [untagged, tagged, other] = await OpsCreative.create([
+      { ...base, linkPath: "/pricing" },
+      { ...base, linkPath: "/pricing", idea: "why351" },
+      { ...base, linkPath: null },
+    ]);
+    expect(await tagIdeaCreatives()).toBe(1);
+    expect((await OpsCreative.findById(untagged._id)).idea).toBe("pricing");
+    expect((await OpsCreative.findById(tagged._id)).idea).toBe("why351");
+    expect((await OpsCreative.findById(other._id)).idea ?? null).toBeNull();
+  });
+
+  it("marks the MSG91 low-balance alert resolved once the balance is back above the limit", async () => {
+    const { vi } = await import("vitest");
+    const { OpsAction, OpsConfig } = await import("../src/ops/models.js");
+    const { readTools } = await import("../src/ops/tools.js");
+    const razorpay = (await import("../src/config/razorpay.js")).default;
+    razorpay.payments.all = vi.fn(async () => ({ items: [] }));
+    process.env.MSG91_AUTHKEY ||= "test-key";
+    process.env.MSG91_WHATSAPP_SENDER_ID ||= "919999999999";
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { tools: {} } }, { upsert: true });
+    let balance = 405;
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
+      String(url).includes("msg91")
+        ? new Response(JSON.stringify({ status: "success", prepaid_balance: balance }), { status: 200 })
+        : new Response("{}", { status: 500 })
+    );
+    await readTools();
+    const alert = await OpsAction.findOne({ type: "tools.msg91_low" });
+    expect(alert.priority).toBe("urgent");
+    expect(alert.payload.resolvedAt ?? null).toBeNull();
+
+    balance = 704;
+    await readTools();
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+    expect(await OpsAction.countDocuments({ type: "tools.msg91_low" })).toBe(1);
+    spy.mockRestore();
+    delete razorpay.payments.all;
   });
 });

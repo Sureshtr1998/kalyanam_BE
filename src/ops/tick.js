@@ -11,6 +11,7 @@ import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
 import { runAdsPlanning } from "./adsGrowth.js";
+import { tagIdeaCreatives } from "./adsCreative.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
 import { autoVerifyDue, getAutoVerifySettings } from "../utils/autoVerify.js";
@@ -177,6 +178,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await tidyStaleAlerts()
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.staleAlerts20261127": new Date() } }))
       .catch((err) => console.error("[ops] stale alerts", err.message));
+  }
+  // Once: idea ads planned before they carried their idea (the 28 Nov pricing ads) take it from their link.
+  if (!config.migrations?.ideaTags20261127) {
+    await tagIdeaCreatives()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.ideaTags20261127": new Date() } }))
+      .catch((err) => console.error("[ops] idea tags", err.message));
   }
   // Once: fold the old two-card pairs (hide + delete, Facebook + Instagram) into one card each.
   if (!config.migrations?.mergePairs20261127b) {

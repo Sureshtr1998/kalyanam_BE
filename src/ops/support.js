@@ -107,6 +107,45 @@ What to say: ${instruction}`,
     maxTokens: 600,
   });
 
+/**
+ * Turns the owner's rough notes into a well-structured reply to the mail a
+ * card answers, in the member's language. Adds only a greeting, paragraphs and
+ * the sign-off: never a fact, promise, date, price or link the notes don't have.
+ * @param {{ action: { payload: { inReplyTo?: string, subject?: string, to?: string } }, text: string }} p
+ * @returns {Promise<string>} the formatted mail body (not saved)
+ */
+export const formatDraft = async ({ action, text }) => {
+  const notes = String(text || "").trim();
+  if (notes.length < 5) throw Object.assign(new Error("Write a sentence or two first"), { status: 400 });
+  const config = await getConfig();
+  const p = action.payload ?? {};
+  const mail = p.inReplyTo ? await OpsMail.findOne({ messageId: p.inReplyTo }).lean() : null;
+  const out = await ask({
+    task: "support.format",
+    tier: "sort",
+    system: `You turn the support team's rough notes into a clear, well-structured email reply for Seetha Rama Kalyana.
+${config.brief}
+Rules:
+- Keep exactly the meaning and facts of the notes. Add nothing they don't say: no new promises, refunds, dates, prices, links or steps.
+- Structure: a greeting ("Dear <their name>," when the name is known, else "Dear Member,"), then short paragraphs in a sensible order; a numbered list only when the notes give steps; a short closing line; then the sign-off on its own lines: "Warm regards," and "Team Seetha Rama Kalyana".
+- Fix grammar and spelling; warm, polite and plain. Plain text only (no markdown, no asterisks).
+- Language: ${mail?.language ? `write in ${mail.language} (the member's language and script), unless the notes clearly ask for another language` : "write in the language of the notes"}.
+- Never include a password or anyone else's contact details.
+Output only the email body, no subject line.`,
+    prompt: `${mail ? `The member's mail (from ${mail.from?.name || "the member"}, subject "${mail.subject ?? p.subject ?? ""}"):
+"""${String(mail.text ?? "").slice(0, 2500)}"""
+
+` : p.subject ? `Subject of the conversation: "${p.subject}"
+
+` : ""}The team's notes for the reply:
+"""${notes.slice(0, 3000)}"""`,
+    maxTokens: 900,
+  });
+  const body = String(out || "").trim();
+  if (!body) throw new Error("Couldn't format the mail; try again");
+  return body.slice(0, 5000);
+};
+
 /** Reads new mail and turns each into actions. Returns how many were read. */
 export const runSupportCycle = async () => {
   const config = await getConfig();

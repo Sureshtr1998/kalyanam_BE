@@ -7,7 +7,7 @@ import { requestRenders } from "./organic.js";
 import { CLAIM_RULES, adsetResults, pickWinners, proposeIdeaCreatives } from "./adsCreative.js";
 import { proposeIdeaAdset } from "./adsGrowth.js";
 import { RULES, batchGate } from "./adsEngine.js";
-import { IDEAS, ideaFacts, loadOwnerIdeas } from "./adsIdeas.js";
+import { IDEAS, IDEA_KEYS, ideaFacts, ideaTarget, loadOwnerIdeas } from "./adsIdeas.js";
 import { adsSettings, lastBatchAt } from "./ads.js";
 import { calendarNotes } from "./hinduCalendar.js";
 
@@ -61,8 +61,9 @@ const STEP = {
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["kicker", "headline", "highlight", "bullets", "price", "cta", "primaryText", "title", "translation"],
+            required: ["idea", "kicker", "headline", "highlight", "bullets", "price", "cta", "primaryText", "title", "translation"],
             properties: {
+              idea: { type: "string", description: "Key of the idea this ad uses, from the ideas list (e.g. pricing); empty if none fits" },
               kicker: { type: "string", description: "Pill on the image, max 6 words" },
               headline: { type: "string", description: "Headline line 1, max 5 words" },
               highlight: { type: "string", description: "Headline line 2 (the punchline), max 5 words" },
@@ -157,6 +158,7 @@ Rules:
 ${config.ads?.preferences ?? ""}
 ${CLAIM_RULES}
 ${ideaFacts()}
+- Tag each ad variant with the key of the idea it uses, so its results are learned: ${IDEA_KEYS.filter((k) => ideaTarget(k) !== "organic").map((k) => `${k} (${IDEAS[k].label})`).join(", ")}.
 - Write post and ad text in the target language's native script (English only for English), warm and natural, never a literal translation. No competitor names, no promises beyond the brief, no fake urgency.
 - Budgets in ₹/day. The whole account must stay under ₹${config.limits.maxDailySpend}/day.
 - Dates: today is ${todayIst()} (IST). Use the dates the idea implies; otherwise the next sensible days. Fill fields of other step kinds with empty values.
