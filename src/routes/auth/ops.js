@@ -4,7 +4,7 @@ import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
 import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory, OpsConfig } from "../../ops/models.js";
 import { cancel, execute, retry, undo } from "../../ops/actions.js";
-import { checkAndRecord } from "../../ops/adsCreative.js";
+import { checkAndRecord, rehearseLaunch } from "../../ops/adsCreative.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
 import { adsSettings, unitStates } from "../../ops/ads.js";
 import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
@@ -193,6 +193,17 @@ router.post(
     const r = await checkAndRecord(a);
     if (r.pending) return res.json({ ...r, msg: "The ad images are still being designed; check again once they're ready" });
     return res.status(r.ok ? 200 : 400).json({ ...r, msg: r.ok ? `Ready: ${r.checked} creative(s) made in Meta, no ad changed yet` : r.error });
+  })
+);
+
+/** Rehearses a launch card's Meta steps (copy paused, new creative on it, copy deleted); nothing goes live. */
+router.post(
+  "/manage/ops/actions/:id/rehearse",
+  wrap(async (req, res) => {
+    const a = await OpsAction.findById(req.params.id).lean();
+    if (!a || a.type !== "ads.creative_launch") return res.status(404).json({ msg: "Only new-ad launches can be rehearsed" });
+    const r = await rehearseLaunch(a);
+    return res.status(r.ok ? 200 : 400).json({ ...r, msg: r.ok ? `Rehearsal passed: ${r.steps.join("; ")}` : `${r.error} (${r.steps.join("; ")})` });
   })
 );
 

@@ -5,7 +5,7 @@ import { Defer, handle, handleUndo, notice, propose } from "./actions.js";
 import { RULES, languageOf } from "./adsEngine.js";
 import { langPath } from "./links.js";
 import { calendarNotes } from "./hinduCalendar.js";
-import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphDelete, graphPost, metaErrorText, setStatus, uploadAdImage } from "./meta.js";
+import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphDelete, graphGet, graphPost, metaErrorText, setStatus, uploadAdImage } from "./meta.js";
 import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaFacts, ideaOf, ideaTarget, loadIdeaLibrary, loadOwnerIdeas, organicWinners, pickIdeas } from "./adsIdeas.js";
 
 export { languageOf, audienceOf };
@@ -473,6 +473,44 @@ export const checkLaunch = async (action) => {
     return { ok: true, checked: creatives.length };
   } catch (err) {
     return { ok: false, error: err.message };
+  }
+};
+
+/**
+ * A full rehearsal of a launch card's Meta steps with nothing going live: the
+ * creatives are made, the ad is copied into its ad set (paused, as a launch
+ * does), the new creative is put on the copy and read back, and the copy is
+ * deleted. Returns { ok, steps, error? }.
+ */
+export const rehearseLaunch = async (action) => {
+  const p = action.payload ?? {};
+  const steps = [];
+  const creatives = await OpsCreative.find({ _id: { $in: p.creativeIds ?? [] }, status: "ready" });
+  if (!creatives.length) return { ok: false, steps, error: "No ready ad on this card to test" };
+  let adId = null;
+  try {
+    const spec = await launchSpec(p.baseAdId);
+    steps.push("Read the ad it copies");
+    for (const c of creatives) await prepareCreative(c, spec);
+    steps.push(`Made ${creatives.length} creative(s) in Meta`);
+    const c = creatives[0];
+    adId = await step("Copying the ad", () => copyAd(p.baseAdId, p.adsetId));
+    if (!adId) throw new Error("Copying the ad: Meta didn't return the copied ad");
+    steps.push("Copied the ad into its ad set (paused)");
+    await step("Putting the new creative on the copy", () => graphPost(adId, { creative: { creative_id: c.metaCreativeId }, name: "OPS TEST (deleted after the test)" }));
+    const back = await step("Reading the copy back", () => graphGet(adId, { fields: "creative{id},adset_id,effective_status" }));
+    if (String(back.creative?.id) !== String(c.metaCreativeId)) throw new Error("Reading the copy back: the new creative isn't on it");
+    if (String(back.adset_id) !== String(p.adsetId)) throw new Error("Reading the copy back: it landed in another ad set");
+    if (back.effective_status === "ACTIVE") throw new Error("Reading the copy back: it's live, but a test copy must stay paused");
+    steps.push(`Put the new creative on the copy (status ${back.effective_status})`);
+    return { ok: true, steps };
+  } catch (err) {
+    return { ok: false, steps, error: err.message };
+  } finally {
+    if (adId) {
+      const removed = await graphDelete(adId).then(() => true, () => setStatus(adId, "DELETED").then(() => true, () => false));
+      steps.push(removed ? "Deleted the test copy" : `Couldn't delete the test copy ${adId}: delete it in Ads Manager`);
+    }
   }
 };
 

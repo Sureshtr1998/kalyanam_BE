@@ -22,7 +22,7 @@ const standingIdea = vi.fn(() => ({ label: "Second marriages", hint: "Families l
 const adsReview = vi.fn();
 const metaRead = vi.hoisted(() => ({ scheduledDays: [], scheduledTimes: [], performance: [], structure: { campaigns: [], adsets: [] }, ads: null }));
 const commentTriage = vi.fn();
-const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})), deleteFacebookPost: vi.fn(async () => ({ success: true })), graphDelete: vi.fn(async () => ({ success: true })) }));
+const metaCalls = vi.hoisted(() => ({ setStatus: vi.fn(async () => ({})), setDailyBudget: vi.fn(async () => ({})), deleteFacebookPost: vi.fn(async () => ({ success: true })), graphDelete: vi.fn(async () => ({ success: true })), graphGet: vi.fn(async () => ({ creative: { id: "cr_1" }, adset_id: "s1", effective_status: "PAUSED" })) }));
 const hidden = [];
 vi.mock("../src/ops/meta.js", async (orig) => ({
   ...(await orig()),
@@ -51,6 +51,7 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   fetchScheduledPosts: vi.fn(async () => metaRead.scheduledTimes.map((at, i) => ({ id: `sp${i}`, at, message: "" }))),
   deleteFacebookPost: metaCalls.deleteFacebookPost,
   graphDelete: metaCalls.graphDelete,
+  graphGet: metaCalls.graphGet,
   fetchPostPerformance: vi.fn(async () => metaRead.performance),
   fetchAds: vi.fn(async () => metaRead.ads ?? [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
   fetchStructure: vi.fn(async () => metaRead.structure),
@@ -1579,6 +1580,35 @@ describe("new-ad launches that Meta refuses", () => {
     expect((await OpsAction.findById(a._id)).payload.checkError).toBeNull();
     expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
     expect(meta.copyAd).not.toHaveBeenCalled();
+  });
+
+  it("rehearses a launch: copies paused, puts the creative on, reads it back, deletes the copy; nothing goes live", async () => {
+    const meta = await import("../src/ops/meta.js");
+    const { a } = await launchCard(new Date(Date.now() + 15 * 3600000));
+    metaCalls.setStatus.mockClear();
+    metaCalls.graphDelete.mockClear();
+    const t = await admin();
+    const res = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/rehearse`).set("x-auth-token", t));
+    expect(res.status).toBe(200);
+    expect(res.body.steps).toEqual([
+      "Read the ad it copies",
+      "Made 1 creative(s) in Meta",
+      "Copied the ad into its ad set (paused)",
+      "Put the new creative on the copy (status PAUSED)",
+      "Deleted the test copy",
+    ]);
+    expect(meta.copyAd).toHaveBeenCalledWith("ad_best", "s1");
+    expect(metaCalls.graphDelete).toHaveBeenCalledWith("ad_new");
+    expect(metaCalls.setStatus).not.toHaveBeenCalledWith("ad_new", "ACTIVE");
+    // The card itself is untouched and still launches at its time.
+    expect((await OpsAction.findById(a._id)).status).toBe("scheduled");
+
+    // A failure still deletes the copy and says which step failed.
+    meta.graphPost.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "Creative not allowed." }));
+    await OpsCreative.updateMany({}, { $unset: { metaCreativeId: "" } });
+    const bad = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/rehearse`).set("x-auth-token", t));
+    expect(bad.status).toBe(400);
+    expect(bad.body.msg).toMatch(/^Putting the new creative on the copy: Invalid parameter \(Creative not allowed\.\).*Deleted the test copy/);
   });
 
   it("lets an admin check a launch card by hand, which also clears its 'would fail' alert", async () => {
