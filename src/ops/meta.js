@@ -244,7 +244,18 @@ export const fetchAdImage = async (adId) => {
   }
 };
 
-/** Copies an ad into an ad set (keeps its tracking and settings), paused. */
+/** Creates an ad in an ad set from a creative (fields: name, adset_id, creative, status, tracking); returns its id. */
+export const createAd = async (fields) => (await graphPost(`${accountId()}/ads`, fields)).id;
+
+/** An ad's own tracking (pixel specs, conversion domain), to give a new ad the same. */
+export const fetchAdTracking = (adId) => graphGet(adId, { fields: "tracking_specs,conversion_domain" });
+
+/**
+ * Copies an ad into an ad set, paused. Meta refuses this for ads whose
+ * creative uses the retired "standard enhancements" (subcode 3858504), which
+ * is every ad made in Ads Manager before 2025, so new ads are created with
+ * createAd instead.
+ */
 export const copyAd = async (adId, adsetId) => {
   const r = await graphPost(`${adId}/copies`, { adset_id: adsetId, status_option: "PAUSED" });
   return r.copied_ad_id ?? r.ad_object_ids?.[0]?.copied_id;

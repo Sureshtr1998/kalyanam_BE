@@ -56,7 +56,12 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   fetchAds: vi.fn(async () => metaRead.ads ?? [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
   fetchStructure: vi.fn(async () => metaRead.structure),
   createCreative: vi.fn(async () => ({ id: "cr_1" })),
-  copyAd: vi.fn(async () => "ad_new"),
+  copyAd: vi.fn(async () => "ad_copy"),
+  createAd: vi.fn(async () => "ad_new"),
+  fetchAdTracking: vi.fn(async () => ({
+    tracking_specs: [{ "action.type": ["offsite_conversion"], fb_pixel: ["px1"] }, { "action.type": ["post_engagement"], page: ["pg1"], post: ["old_post"] }],
+    conversion_domain: "seetharamakalyana.in",
+  })),
   graphPost: vi.fn(async () => ({ success: true })),
   setStatus: metaCalls.setStatus,
   setDailyBudget: metaCalls.setDailyBudget,
@@ -1515,6 +1520,9 @@ describe("new-ad launches that Meta refuses", () => {
     // Individual Advantage+ features are kept as the copied ad had them.
     const kept = creativeFieldsFor({ ...spec, degrees_of_freedom_spec: { creative_features_spec: { standard_enhancements: {}, image_touchups: { enroll_status: "OPT_OUT" } } } }, { name: "n", link: "l", hash: "h" });
     expect(kept.degrees_of_freedom_spec).toEqual({ creative_features_spec: { image_touchups: { enroll_status: "OPT_OUT" } } });
+    // Re-made without a new image (new ad sets): the old picture and text stay.
+    const same = creativeFieldsFor({ ...spec, object_story_spec: { page_id: "pg1", link_data: { link: "https://x.test/ta", picture: "old.jpg", message: "old", name: "old" } } }, { name: "n", link: "https://x.test/ta" });
+    expect(same.object_story_spec.link_data).toEqual({ link: "https://x.test/ta", picture: "old.jpg", message: "old", name: "old" });
   });
 
   it("keeps Meta's own explanation, not just 'Invalid parameter'", async () => {
@@ -1531,11 +1539,22 @@ describe("new-ad launches that Meta refuses", () => {
     const meta = await import("../src/ops/meta.js");
     const { c, a } = await launchCard();
     meta.createCreative.mockClear();
-    meta.graphPost.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "The creative can't be used with this ad." }));
+    metaCalls.setStatus.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "The creative can't be used with this ad." }));
     await withImages(() => execute(a._id));
     const failed = await OpsAction.findById(a._id);
     expect(failed.status).toBe("failed");
-    expect(failed.error).toMatch(/^Putting the new creative on the copy: Invalid parameter \(The creative can't be used with this ad\.\)/);
+    expect(failed.error).toMatch(/^Turning the new ad on: Invalid parameter \(The creative can't be used with this ad\.\)/);
+    // Created, not copied, with the copied ad's pixel tracking only (not its old post's).
+    expect(meta.copyAd).not.toHaveBeenCalled();
+    expect(meta.createAd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adset_id: "s1",
+        creative: { creative_id: "cr_1" },
+        status: "PAUSED",
+        tracking_specs: [{ "action.type": ["offsite_conversion"], fb_pixel: ["px1"] }],
+        conversion_domain: "seetharamakalyana.in",
+      })
+    );
     expect(metaCalls.graphDelete).toHaveBeenCalledWith("ad_new");
     expect((await OpsCreative.findById(c._id)).metaCreativeId).toBe("cr_1");
     const alert = await OpsAction.findOne({ type: "ads.action_failed" });
@@ -1563,14 +1582,14 @@ describe("new-ad launches that Meta refuses", () => {
     const meta = await import("../src/ops/meta.js");
     const { preflightLaunches } = await import("../src/ops/adsCreative.js");
     const { c, a } = await launchCard(new Date(Date.now() + 15 * 3600000));
-    meta.copyAd.mockClear();
+    meta.createAd.mockClear();
     meta.createCreative.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "Instagram account field is not valid." }));
     await withImages(() => preflightLaunches());
     const alert = await OpsAction.findOne({ type: "ads.launch_check_failed" });
     expect(alert).toMatchObject({ priority: "urgent" });
     expect(alert.reason).toMatch(/creating the creative: Invalid parameter \(Instagram account field is not valid\.\)/);
     expect((await OpsAction.findById(a._id)).payload.checkError).toMatch(/Instagram account/);
-    expect(meta.copyAd).not.toHaveBeenCalled();
+    expect(meta.createAd).not.toHaveBeenCalled();
 
     // Not checked again within 3 hours; after that it passes and the alert is resolved.
     await withImages(() => preflightLaunches());
@@ -1579,10 +1598,10 @@ describe("new-ad launches that Meta refuses", () => {
     expect((await OpsCreative.findById(c._id)).metaCreativeId).toBe("cr_1");
     expect((await OpsAction.findById(a._id)).payload.checkError).toBeNull();
     expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
-    expect(meta.copyAd).not.toHaveBeenCalled();
+    expect(meta.createAd).not.toHaveBeenCalled();
   });
 
-  it("rehearses a launch: copies paused, puts the creative on, reads it back, deletes the copy; nothing goes live", async () => {
+  it("rehearses a launch: creates the ad paused, reads it back, deletes it; nothing goes live", async () => {
     const meta = await import("../src/ops/meta.js");
     const { a } = await launchCard(new Date(Date.now() + 15 * 3600000));
     metaCalls.setStatus.mockClear();
@@ -1593,22 +1612,25 @@ describe("new-ad launches that Meta refuses", () => {
     expect(res.body.steps).toEqual([
       "Read the ad it copies",
       "Made 1 creative(s) in Meta",
-      "Copied the ad into its ad set (paused)",
-      "Put the new creative on the copy (status PAUSED)",
-      "Deleted the test copy",
+      "Read the ad's tracking (pixel)",
+      "Created the new ad in its ad set (paused)",
+      "Read it back: new creative on it, status PAUSED",
+      "Deleted the test ad",
     ]);
-    expect(meta.copyAd).toHaveBeenCalledWith("ad_best", "s1");
+    expect(meta.createAd).toHaveBeenCalledWith(expect.objectContaining({ adset_id: "s1", status: "PAUSED", creative: { creative_id: "cr_1" } }));
     expect(metaCalls.graphDelete).toHaveBeenCalledWith("ad_new");
     expect(metaCalls.setStatus).not.toHaveBeenCalledWith("ad_new", "ACTIVE");
     // The card itself is untouched and still launches at its time.
     expect((await OpsAction.findById(a._id)).status).toBe("scheduled");
 
-    // A failure still deletes the copy and says which step failed.
-    meta.graphPost.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "Creative not allowed." }));
-    await OpsCreative.updateMany({}, { $unset: { metaCreativeId: "" } });
+    // A failure says which step failed; a created test ad is still deleted.
+    metaCalls.graphGet.mockResolvedValueOnce({ creative: { id: "someone_else" }, adset_id: "s1", effective_status: "PAUSED" });
     const bad = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/rehearse`).set("x-auth-token", t));
     expect(bad.status).toBe(400);
-    expect(bad.body.msg).toMatch(/^Putting the new creative on the copy: Invalid parameter \(Creative not allowed\.\).*Deleted the test copy/);
+    expect(bad.body.msg).toMatch(/^Reading the test ad back: the new creative isn't on it.*Deleted the test ad/);
+    meta.createAd.mockRejectedValueOnce(metaError("Invalid parameter", { error_user_msg: "Creative should not include standard enhancements" }));
+    const refused = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/rehearse`).set("x-auth-token", t));
+    expect(refused.body.msg).toMatch(/^Creating the new ad: Invalid parameter \(Creative should not include standard enhancements\)/);
   });
 
   it("lets an admin check a launch card by hand, which also clears its 'would fail' alert", async () => {

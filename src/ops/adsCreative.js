@@ -5,7 +5,7 @@ import { Defer, handle, handleUndo, notice, propose } from "./actions.js";
 import { RULES, languageOf } from "./adsEngine.js";
 import { langPath } from "./links.js";
 import { calendarNotes } from "./hinduCalendar.js";
-import { copyAd, createCreative, fetchAdImage, fetchAds, fetchCreativeSpec, graphDelete, graphGet, graphPost, metaErrorText, setStatus, uploadAdImage } from "./meta.js";
+import { createAd, createCreative, fetchAdImage, fetchAdTracking, fetchAds, fetchCreativeSpec, graphDelete, graphGet, metaErrorText, setStatus, uploadAdImage } from "./meta.js";
 import { IDEAS, IDEA_KEYS, audienceOf, bridesShare, familyDoubts, ideaFacts, ideaOf, ideaTarget, loadIdeaLibrary, loadOwnerIdeas, organicWinners, pickIdeas } from "./adsIdeas.js";
 
 export { languageOf, audienceOf };
@@ -400,8 +400,10 @@ const step = async (label, fn) => {
   }
 };
 
-/** Link-data fields Meta returns on an ad but refuses on a new creative, or that describe the old image. */
-const LINK_DATA_DROP = ["picture", "child_attachments", "image_crops", "image_url", "multi_share_end_card", "multi_share_optimized"];
+/** Link-data fields Meta returns on an ad but refuses on a new single-image creative. */
+const LINK_DATA_DROP = ["child_attachments", "multi_share_end_card", "multi_share_optimized"];
+/** Fields that describe the old image: dropped when the new creative gets its own image. */
+const IMAGE_FIELDS = ["picture", "image_crops", "image_url"];
 
 /**
  * The fields for a new creative: the copied ad's Page, Instagram account,
@@ -413,7 +415,13 @@ export const creativeFieldsFor = (spec, { name, link, urlTags, hash, message, ti
   const story = { ...spec.object_story_spec };
   if (story.instagram_actor_id && !story.instagram_user_id) story.instagram_user_id = story.instagram_actor_id;
   delete story.instagram_actor_id;
-  const linkData = { ...story.link_data, link, image_hash: hash, message, name: title };
+  const linkData = { ...story.link_data, link };
+  if (hash) {
+    for (const k of IMAGE_FIELDS) delete linkData[k];
+    linkData.image_hash = hash;
+  }
+  if (message != null) linkData.message = message;
+  if (title != null) linkData.name = title;
   for (const k of LINK_DATA_DROP) delete linkData[k];
   if (linkData.call_to_action?.value?.link) {
     linkData.call_to_action = { ...linkData.call_to_action, value: { ...linkData.call_to_action.value, link } };
@@ -457,6 +465,34 @@ const prepareCreative = async (c, spec) => {
 };
 
 /**
+ * The copied ad's own tracking for a new ad: its pixel / dataset specs and
+ * conversion domain. Specs tied to the old ad's post are left out (Meta adds
+ * the new post's own).
+ */
+const trackingOf = async (baseAdId) => {
+  const t = await step("Reading the ad's tracking", () => fetchAdTracking(baseAdId));
+  const specs = (t?.tracking_specs ?? []).filter((s) => s.fb_pixel || s.dataset);
+  return { ...(specs.length ? { tracking_specs: specs } : {}), ...(t?.conversion_domain ? { conversion_domain: t.conversion_domain } : {}) };
+};
+
+/**
+ * A fresh ad in another ad set with the same image, text, link and tracking
+ * as an existing ad, paused (for new ad sets). Meta no longer copies ads made
+ * with the retired standard enhancements, so the creative is made again
+ * without them. Returns the new ad's id.
+ */
+export const recreateAd = async (baseAdId, adsetId, name) => {
+  const spec = await launchSpec(baseAdId);
+  const ld = spec.object_story_spec.link_data;
+  const fields = creativeFieldsFor(spec, { name: `Ops | ${name}`.slice(0, 100), link: ld.link, urlTags: spec.url_tags, hash: ld.image_hash });
+  const creative = await step(`${name}: making its creative`, () => createCreative(fields));
+  const tracking = await trackingOf(baseAdId);
+  return step(`${name}: creating the ad`, () =>
+    createAd({ name: String(name).slice(0, 100), adset_id: adsetId, creative: { creative_id: creative.id }, status: "PAUSED", ...tracking })
+  );
+};
+
+/**
  * Makes the Meta creatives of a launch card now, without touching any ad, so
  * a problem shows (with Meta's reason) hours before the launch instead of at
  * it. The launch then reuses them. Returns { ok, error? }.
@@ -478,9 +514,8 @@ export const checkLaunch = async (action) => {
 
 /**
  * A full rehearsal of a launch card's Meta steps with nothing going live: the
- * creatives are made, the ad is copied into its ad set (paused, as a launch
- * does), the new creative is put on the copy and read back, and the copy is
- * deleted. Returns { ok, steps, error? }.
+ * creatives are made, the new ad is created in its ad set (paused, as a launch
+ * does), read back, and deleted. Returns { ok, steps, error? }.
  */
 export const rehearseLaunch = async (action) => {
   const p = action.payload ?? {};
@@ -494,22 +529,25 @@ export const rehearseLaunch = async (action) => {
     for (const c of creatives) await prepareCreative(c, spec);
     steps.push(`Made ${creatives.length} creative(s) in Meta`);
     const c = creatives[0];
-    adId = await step("Copying the ad", () => copyAd(p.baseAdId, p.adsetId));
-    if (!adId) throw new Error("Copying the ad: Meta didn't return the copied ad");
-    steps.push("Copied the ad into its ad set (paused)");
-    await step("Putting the new creative on the copy", () => graphPost(adId, { creative: { creative_id: c.metaCreativeId }, name: "OPS TEST (deleted after the test)" }));
-    const back = await step("Reading the copy back", () => graphGet(adId, { fields: "creative{id},adset_id,effective_status" }));
-    if (String(back.creative?.id) !== String(c.metaCreativeId)) throw new Error("Reading the copy back: the new creative isn't on it");
-    if (String(back.adset_id) !== String(p.adsetId)) throw new Error("Reading the copy back: it landed in another ad set");
-    if (back.effective_status === "ACTIVE") throw new Error("Reading the copy back: it's live, but a test copy must stay paused");
-    steps.push(`Put the new creative on the copy (status ${back.effective_status})`);
+    const tracking = await trackingOf(p.baseAdId);
+    steps.push(`Read the ad's tracking (${tracking.tracking_specs?.length ? "pixel" : "no pixel"})`);
+    adId = await step("Creating the new ad", () =>
+      createAd({ name: "OPS TEST (deleted after the test)", adset_id: p.adsetId, creative: { creative_id: c.metaCreativeId }, status: "PAUSED", ...tracking })
+    );
+    if (!adId) throw new Error("Creating the new ad: Meta didn't return the ad");
+    steps.push("Created the new ad in its ad set (paused)");
+    const back = await step("Reading the test ad back", () => graphGet(adId, { fields: "creative{id},adset_id,effective_status" }));
+    if (String(back.creative?.id) !== String(c.metaCreativeId)) throw new Error("Reading the test ad back: the new creative isn't on it");
+    if (String(back.adset_id) !== String(p.adsetId)) throw new Error("Reading the test ad back: it landed in another ad set");
+    if (back.effective_status === "ACTIVE") throw new Error("Reading the test ad back: it's live, but a test ad must stay paused");
+    steps.push(`Read it back: new creative on it, status ${back.effective_status}`);
     return { ok: true, steps };
   } catch (err) {
     return { ok: false, steps, error: err.message };
   } finally {
     if (adId) {
       const removed = await graphDelete(adId).then(() => true, () => setStatus(adId, "DELETED").then(() => true, () => false));
-      steps.push(removed ? "Deleted the test copy" : `Couldn't delete the test copy ${adId}: delete it in Ads Manager`);
+      steps.push(removed ? "Deleted the test ad" : `Couldn't delete the test ad ${adId}: delete it in Ads Manager`);
     }
   }
 };
@@ -573,17 +611,25 @@ handle("ads.creative_launch", async (action) => {
   for (const c of ready) await prepareCreative(c, spec);
   // Ads that went live on an earlier try of this card stay as they are.
   const adIds = creatives.filter((c) => c.status === "live" && c.adId).map((c) => c.adId);
+  // The new ads get the copied ad's pixel tracking; they're created, not copied (Meta refuses
+  // to copy ads made with the retired standard enhancements).
+  const tracking = ready.length ? await trackingOf(p.baseAdId) : {};
   for (const c of ready) {
     const code = CODES[c.language] ?? "XX";
-    const adId = await step("Copying the ad", () => copyAd(p.baseAdId, p.adsetId));
-    if (!adId) throw new Error("Copying the ad: Meta didn't return the copied ad");
+    const adId = await step("Creating the new ad", () =>
+      createAd({
+        name: `${code.toUpperCase()}-OPS ${c.utmContent ?? ""} ${c.design?.headline ?? ""}`.trim().slice(0, 100),
+        adset_id: p.adsetId,
+        creative: { creative_id: c.metaCreativeId },
+        status: "PAUSED",
+        ...tracking,
+      })
+    );
+    if (!adId) throw new Error("Creating the new ad: Meta didn't return the ad");
     try {
-      await step("Putting the new creative on the copy", () =>
-        graphPost(adId, { creative: { creative_id: c.metaCreativeId }, name: `${code.toUpperCase()}-OPS ${c.utmContent ?? ""} ${c.design?.headline ?? ""}`.trim().slice(0, 100) })
-      );
       await step("Turning the new ad on", () => setStatus(adId, "ACTIVE"));
     } catch (err) {
-      // The copy is still the old ad's paused twin: remove it, so a retry starts clean.
+      // A paused ad that couldn't be turned on is removed, so a retry starts clean.
       await graphDelete(adId).catch(() => setStatus(adId, "DELETED").catch(() => {}));
       throw err;
     }

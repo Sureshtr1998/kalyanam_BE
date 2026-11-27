@@ -3,9 +3,8 @@ import { ask } from "./claude.js";
 import { handle, handleUndo, hoursFromNow, propose } from "./actions.js";
 import { adsSettings, lastBatchAt, planAdPauses, unitStates } from "./ads.js";
 import { batchGate } from "./adsEngine.js";
-import { CLAIM_RULES, planCreativeRefresh, tiredAdset } from "./adsCreative.js";
+import { CLAIM_RULES, planCreativeRefresh, recreateAd, tiredAdset } from "./adsCreative.js";
 import {
-  copyAd,
   copyAdset,
   fetchAds,
   fetchAdset,
@@ -237,7 +236,8 @@ handle("ads.new_adset", async (action) => {
   if (!baseAds.length) throw new Error("The ad set to copy has no active ads");
   const adIds = [];
   for (const a of baseAds) {
-    const id = await copyAd(a.id, newId);
+    // Made fresh, not copied: Meta refuses to copy ads made with the retired standard enhancements.
+    const id = await recreateAd(a.id, newId, a.name);
     if (id) {
       await setStatus(id, "ACTIVE");
       adIds.push(id);
