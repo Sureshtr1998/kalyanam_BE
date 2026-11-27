@@ -14,6 +14,7 @@ import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.j
 import { hinduCalendar } from "../../ops/hinduCalendar.js";
 import { langPath } from "../../ops/links.js";
 import { formatDraft } from "../../ops/support.js";
+import { ALERT_TEMPLATE, ALERT_TEMPLATE_BODY, normalizeWhatsapp, sendWhatsappAlert, whatsappConfigured } from "../../ops/whatsapp.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
 import { verifyRenderToken } from "../../ops/renderToken.js";
 import { fetchScheduledPosts, resolvePage } from "../../ops/meta.js";
@@ -76,6 +77,18 @@ router.post("/ops/render-done", async (req, res) => {
 router.use("/manage/ops", staffAuth, adminOnly);
 
 const by = (req) => req.user?.basic?.uniqueId || req.user?.basic?.email || "admin";
+/** Ops → Settings → WhatsApp alerts. */
+const alertSettings = (config) => ({
+  whatsapp: config.alerts?.whatsapp ?? "",
+  lastSentAt: config.alerts?.lastSentAt ?? null,
+  lastError: config.alerts?.lastError ?? "",
+  lastErrorAt: config.alerts?.lastErrorAt ?? null,
+  ready: whatsappConfigured(),
+  template: ALERT_TEMPLATE.name,
+  templateLanguage: ALERT_TEMPLATE.language,
+  templateBody: ALERT_TEMPLATE_BODY,
+});
+
 const wrap = (fn) => async (req, res) => {
   try {
     return await fn(req, res);
@@ -116,6 +129,7 @@ router.get(
       modes: config.modes,
       limits: config.limits,
       ads: adsSettings(config),
+      alerts: alertSettings(config),
       organic: { planEvenings: !!config.organic?.planEvenings, ownerUntil: config.organic?.ownerUntil ?? null },
       targets: config.targets,
       brief: config.brief,
@@ -543,7 +557,13 @@ router.post(
   "/manage/ops/config",
   wrap(async (req, res) => {
     const config = await getConfig();
-    const { modes, limits, targets, brief, ads, organic } = req.body || {};
+    const { modes, limits, targets, brief, ads, organic, alerts } = req.body || {};
+    if (alerts && typeof alerts.whatsapp === "string") {
+      const raw = alerts.whatsapp.trim();
+      const number = raw ? normalizeWhatsapp(raw) : "";
+      if (number === null) return res.status(400).json({ msg: "Enter a 10-digit Indian mobile number for WhatsApp alerts" });
+      config.set("alerts.whatsapp", number);
+    }
     if (organic && typeof organic.planEvenings === "boolean") config.set("organic.planEvenings", organic.planEvenings);
     if (organic && "ownerUntil" in organic) {
       const d = organic.ownerUntil ? new Date(organic.ownerUntil) : null;
@@ -585,7 +605,31 @@ router.post(
     }
     config.updatedBy = by(req);
     await config.save();
-    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config), organic: { planEvenings: !!config.organic?.planEvenings, ownerUntil: config.organic?.ownerUntil ?? null } });
+    return res.json({ msg: "Saved", modes: config.modes, limits: config.limits, targets: config.targets, brief: config.brief, ads: adsSettings(config), alerts: alertSettings(config), organic: { planEvenings: !!config.organic?.planEvenings, ownerUntil: config.organic?.ownerUntil ?? null } });
+  })
+);
+
+/** Sends a test WhatsApp alert to the saved number (shows MSG91's answer if it refuses). */
+router.post(
+  "/manage/ops/alerts/test",
+  wrap(async (_req, res) => {
+    const config = await getConfig();
+    const to = normalizeWhatsapp(config.alerts?.whatsapp);
+    if (!to) return res.status(400).json({ msg: "Save your WhatsApp number first" });
+    if (!whatsappConfigured()) return res.status(400).json({ msg: "MSG91 WhatsApp isn't set up on the server" });
+    try {
+      await sendWhatsappAlert({
+        to,
+        title: "Test alert",
+        detail: "WhatsApp alerts are on. You'll get one here when something fails, a member writes 3 times for something only you can settle, or anything else urgent needs you.",
+      });
+    } catch (err) {
+      const message = String(err?.response?.data?.message || err?.message || err).slice(0, 300);
+      await OpsConfig.updateOne({ _id: "ops" }, { $set: { "alerts.lastError": message, "alerts.lastErrorAt": new Date() } });
+      return res.status(400).json({ msg: message });
+    }
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "alerts.lastSentAt": new Date(), "alerts.lastError": "" } });
+    return res.json({ msg: "Sent. Check your WhatsApp." });
   })
 );
 

@@ -87,6 +87,12 @@ export const vendorAlert = (mail) => {
   return VENDOR_ALERT.test(text) ? mail.subject || "Account alert" : null;
 };
 
+/** Meta / MSG91 mails about balance, top-ups or payments: funds are the owner's to watch, so no WhatsApp. */
+const FUNDS_SENDERS = /(facebookmail\.com|meta\.com|msg91\.com)$/i;
+const FUNDS_WORDS = /(balance|funds|top.?up|recharge|insufficient|prepaid|wallet|payment|billing|invoice|spending limit|unpaid|overdue)/i;
+export const fundsMail = (mail) =>
+  FUNDS_SENDERS.test(mail.from.email.split("@")[1] || "") && FUNDS_WORDS.test(`${mail.subject} ${mail.text.slice(0, 400)}`);
+
 const normalizeMobile = (s) => String(s || "").replace(/\D/g, "").slice(-10);
 
 const replySystem = (brief) => `You write email replies for the support team of Seetha Rama Kalyana.
@@ -106,6 +112,74 @@ Their mail (subject "${mail.subject}"):
 What to say: ${instruction}`,
     maxTokens: 600,
   });
+
+const ANSWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reply", "answered"],
+  properties: {
+    reply: { type: "string", description: "The reply body" },
+    answered: { type: "boolean", description: "false when the facts didn't answer what they asked, so the reply only says the team will check" },
+  },
+};
+
+/** Drafts the reply to a question or complaint, and says whether the brief answered it. */
+const draftAnswer = async (config, mail, tier) => {
+  const out = await ask({
+    task: "support.reply",
+    tier,
+    system: `${replySystem(config.brief)}
+Also say whether the facts above answered what they asked ("answered": false when the reply can only say the team will check).`,
+    prompt: `Language and script to reply in: ${mail.language}
+Their mail (subject "${mail.subject}"):
+"""${mail.text.slice(0, 3000)}"""
+
+What to say: Answer their question using only the facts in the brief. If the brief doesn't cover it, say the team will check and reply soon.`,
+    schema: ANSWER_SCHEMA,
+    maxTokens: 700,
+  });
+  if (typeof out === "string") return { reply: out, answered: true };
+  return { reply: String(out?.reply ?? ""), answered: out?.answered !== false };
+};
+
+/** From this many mails, a member the agent couldn't help goes to the owner's WhatsApp. */
+export const REPEAT_ALERT_AT = 3;
+
+/**
+ * A member who has written 3+ times (in 30 days, since the owner last acted on
+ * their mails) about something only the owner can settle: a refund, a question
+ * the brief doesn't answer, an account it couldn't match. Urgent: WhatsApp.
+ */
+const repeatAlert = async (m, who, doc) => {
+  const email = m.from.email;
+  const lastOwnerAct = await OpsAction.findOne({
+    module: "support",
+    "payload.to": email,
+    status: { $in: ["done", "cancelled"] },
+    decidedBy: { $nin: [null, "agent"] },
+  })
+    .sort({ updatedAt: -1 })
+    .select("updatedAt")
+    .lean();
+  const since = Math.max(Date.now() - 30 * 86400000, lastOwnerAct?.updatedAt ? new Date(lastOwnerAct.updatedAt).getTime() : 0);
+  const mails = await OpsMail.find({ "from.email": email, needsTeam: true, createdAt: { $gt: new Date(since) } })
+    .sort({ createdAt: 1 })
+    .select("category summary")
+    .lean();
+  if (mails.length < REPEAT_ALERT_AT) return null;
+  const refund = mails.some((x) => x.category === "refund");
+  return notice("support", {
+    type: "support.repeat_mail",
+    priority: "urgent",
+    title: `${who} has mailed ${mails.length} times${refund ? " about a refund" : ""} and needs you`.slice(0, 160),
+    reason: mails.map((x, i) => `${i + 1}) ${x.summary || x.category}`).join(" ").slice(0, 500),
+    effect: refund
+      ? "Refunds are never automatic: refund or reply from Ops → Support."
+      : "The agent couldn't settle this on its own. Reply from Ops → Support (Format my mail helps), or add the answer to the brief.",
+    payload: { dedupeKey: `repeat:${email}`, whatsappKey: `support:${email.toLowerCase()}`, to: email },
+    ref: { kind: "mail", id: String(doc._id) },
+  });
+};
 
 /**
  * Turns the owner's rough notes into a well-structured reply to the mail a
@@ -195,7 +269,10 @@ const handleMail = async (config, m, delay) => {
         title: `${m.from.name || m.from.email}: ${alert}`,
         reason: m.text.replace(/\s+/g, " ").slice(0, 300),
         effect: "Alert only. Open the mail in contactus@ and act on it.",
-        payload: { dedupeKey: `vendor:${alert.toLowerCase().slice(0, 80)}:${new Date().toISOString().slice(0, 10)}` },
+        payload: {
+          dedupeKey: `vendor:${alert.toLowerCase().slice(0, 80)}:${new Date().toISOString().slice(0, 10)}`,
+          ...(fundsMail(m) ? { whatsapp: false } : {}),
+        },
         ref: { kind: "mail", id: String(doc._id) },
       });
     }
@@ -219,7 +296,9 @@ const handleMail = async (config, m, delay) => {
   const finish = async () => {
     await supersede(earlier, doc);
     doc.status = "handled";
-    return doc.save();
+    const saved = await doc.save();
+    if (doc.needsTeam) await repeatAlert(m, who, doc).catch((err) => console.error("[ops] repeat alert", err.message));
+    return saved;
   };
 
   const t = await ask({
@@ -271,6 +350,7 @@ const handleMail = async (config, m, delay) => {
         runAt: hoursFromNow(delay),
       });
     } else {
+      doc.needsTeam = true;
       await propose("support", {
         type: "support.reply",
         status: "needs_you",
@@ -295,6 +375,7 @@ const handleMail = async (config, m, delay) => {
       .filter((x) => x.paymentId && x.amountPaid > 0 && !x.refundId)
       .map((x) => ({ paymentId: x.paymentId, amount: x.amountPaid, note: x.note, date: x.dateOfTrans }));
     doc.matchedUser = user?._id;
+    doc.needsTeam = true;
     doc.draft = await draftReply(config, mail, "Confirm we have refunded their payment; it reaches the original payment method in 5–7 working days.");
     await propose("support", {
       type: "support.refund",
@@ -311,20 +392,21 @@ const handleMail = async (config, m, delay) => {
 
   // An earlier urgent mail keeps the reply urgent even if the newest one reads calmer.
   const urgent = t.category === "urgent" || earlier.some((a) => a.priority === "urgent");
-  doc.draft = await draftReply(
-    config,
-    mail,
-    urgent
-      ? "Acknowledge with care, say the team is looking into it personally today. Promise nothing else."
-      : "Answer their question using only the facts in the brief. If the brief doesn't cover it, say the team will check and reply soon.",
-    t.category === "complaint" || urgent || t.confidence < 0.6 ? "write" : "sort"
-  );
+  const tier = t.category === "complaint" || urgent || t.confidence < 0.6 ? "write" : "sort";
+  if (urgent) {
+    doc.draft = await draftReply(config, mail, "Acknowledge with care, say the team is looking into it personally today. Promise nothing else.", tier);
+    doc.needsTeam = true;
+  } else {
+    const { reply, answered } = await draftAnswer(config, mail, tier);
+    doc.draft = reply;
+    doc.needsTeam = !answered;
+  }
   await propose("support", {
     type: "support.reply",
     status: urgent ? "needs_you" : "scheduled",
     priority: urgent ? "urgent" : "normal",
     title: urgent ? `Urgent: ${who}` : `Reply to ${who}`,
-    reason: t.summary,
+    reason: doc.needsTeam && !urgent ? `${t.summary} The brief doesn't answer this, so the reply says the team will check.` : t.summary,
     effect: urgent ? "Waits for you. Read the mail before replying." : `Sends the drafted reply in ${t.language}.`,
     payload: { to: m.from.email, subject: m.subject, inReplyTo: m.messageId, draft: doc.draft },
     ref,
@@ -372,6 +454,7 @@ const handleProfileChange = async (config, doc, mail, t, ref, who, delay) => {
   }
   const requested = t.changes ?? [];
   if (!user) {
+    doc.needsTeam = true;
     await propose("support", {
       type: "support.reply",
       status: "needs_you",
@@ -408,6 +491,7 @@ const handleProfileChange = async (config, doc, mail, t, ref, who, delay) => {
     });
   }
   if (manual.length || !requested.length) {
+    doc.needsTeam = true;
     await propose("support", {
       type: "support.reply",
       status: "needs_you",

@@ -53,8 +53,8 @@ export const propose = async (module, fields, { dedupeKey } = {}) => {
     status,
     payload: { ...(fields.payload ?? {}), ...(key ? { dedupeKey: key } : {}), mode },
   });
-  // Urgent alerts also go to the owner's email (imported lazily: alerts.js reads models and mail).
-  if (status === "info" && fields.priority === "urgent") {
+  // Urgent alerts and urgent cards also go to the owner's email and WhatsApp (imported lazily: alerts.js reads models and mail).
+  if (fields.priority === "urgent") {
     const { alertOwner } = await import("./alerts.js");
     await alertOwner(doc);
   }
@@ -94,15 +94,16 @@ export const execute = async (id, by = "agent") => {
   }
   action.ranAt = new Date();
   const saved = await action.save();
-  // A failed ad change or post is something the owner must hear about (emailed as urgent).
-  if (saved.status === "failed" && (saved.module === "ads" || saved.module === "organic")) {
+  // A failed ad change, post, mail reply, verification or refund is something the owner must hear
+  // about (urgent: email + WhatsApp, at most one WhatsApp per kind of failure in 12 h).
+  if (saved.status === "failed" && ["ads", "organic", "support"].includes(saved.module)) {
     await notice(saved.module, {
       type: `${saved.module}.action_failed`,
       priority: "urgent",
       title: `Failed: ${saved.title}`.slice(0, 160),
       reason: saved.error,
       effect: "Nothing was changed by this step. Open the Ops tab to retry or cancel it.",
-      payload: { dedupeKey: `failed:${saved._id}` },
+      payload: { dedupeKey: `failed:${saved._id}`, whatsappKey: `failed:${saved.type}` },
     }).catch(() => {});
   }
   return saved;

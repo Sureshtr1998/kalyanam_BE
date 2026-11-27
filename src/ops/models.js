@@ -74,6 +74,15 @@ const ConfigSchema = new Schema(
       alertEmail: { type: String, default: "" },
       preferences: { type: String, default: DEFAULT_ADS_PREFERENCES },
     },
+    // Urgent alerts to the owner's own WhatsApp (MSG91 "ops_alert" template). Blank number = off.
+    alerts: {
+      whatsapp: { type: String, default: "" },
+      lastSentAt: { type: Date, default: null },
+      lastError: { type: String, default: "" },
+      lastErrorAt: { type: Date, default: null },
+    },
+    // Vital flows (e.g. registration OTPs): consecutive failures, so a breakage is noticed.
+    health: { type: Schema.Types.Mixed, default: {} },
     // Monthly targets, e.g. [{ month: "2026-12", members: 600, revenue: 210000, spend: 200000 }].
     targets: [{ month: String, members: Number, revenue: Number, spend: Number, _id: false }],
     // Facts the agent may state in replies and posts. Edited in the Ops tab.
@@ -185,6 +194,8 @@ const MailSchema = new Schema(
     summary: String,
     matchedUser: { type: Schema.Types.ObjectId, ref: "User" },
     draft: String,
+    // The agent couldn't settle it alone (refund, a question the brief doesn't answer, an unmatched account...).
+    needsTeam: { type: Boolean, default: false },
     status: { type: String, enum: ["new", "handled", "ignored", "replied"], default: "new" },
   },
   { versionKey: false, timestamps: true }

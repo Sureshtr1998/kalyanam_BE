@@ -3,6 +3,7 @@ import otpGenerator from "otp-generator";
 import sendEmail from "../../config/msg91Email.js";
 import upStash, { publishQStash } from "../../config/upStash.js";
 import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
+import { flowFailed, flowOk } from "../../ops/health.js";
 import User from "../../models/User.js";
 import otpLimiter, { countHit } from "../../middleware/otpLimiter.js";
 import dbConnect from "../../utils/dbConnect.js";
@@ -85,10 +86,13 @@ router.post("/send-otp", otpLimiter, auth, async (req, res) => {
     });
     // Send WhatsApp OTP
     await sendWhatsappOTP(`91${mobile}`, otpRecord.mobileOtp);
+    await flowOk("otp");
 
     res.json({ success: true, msg: "OTP sent to email and WhatsApp" });
   } catch (err) {
     console.error(err);
+    // Several failures in a row = registration is broken: the owner hears on WhatsApp.
+    await flowFailed("otp", err);
     res.status(500).json({ success: false, msg: "Failed to send OTP" });
   }
 });

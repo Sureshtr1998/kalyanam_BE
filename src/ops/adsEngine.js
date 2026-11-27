@@ -418,6 +418,8 @@ export const adDecisions = ({ ads, campaignCpp14, now = new Date() }) => {
 };
 
 const ACCOUNT_STATUS = { 2: "disabled", 3: "unsettled (a payment failed)", 7: "under risk review", 8: "pending settlement", 9: "in a grace period", 100: "pending closure", 101: "closed" };
+/** Account states caused by payments: funds are the owner's to handle, so these aren't sent to WhatsApp. */
+const PAYMENT_STATUSES = new Set([3, 8, 9]);
 
 /**
  * Alarms that can't wait for the weekly cycle. Urgent ones are emailed to the owner.
@@ -447,6 +449,7 @@ export const emergencies = ({ today, budgetTotal, accountStatus, adIssues = [], 
       title: `Meta ad account is ${ACCOUNT_STATUS[accountStatus] ?? `in status ${accountStatus}`}`,
       reason: "No ads deliver until this is fixed.",
       effect: "Open Meta Billing / Account quality and fix it. Alert only.",
+      ...(PAYMENT_STATUSES.has(accountStatus) ? { whatsapp: false } : {}),
     });
   }
   const disapproved = adIssues.filter((a) => a.effective_status === "DISAPPROVED");
@@ -476,6 +479,8 @@ export const emergencies = ({ today, budgetTotal, accountStatus, adIssues = [], 
       title: `Ads spent only ₹${Math.round(yesterdaySpend)} yesterday (budgets ₹${Math.round(budgetTotal)})`,
       reason: "Under 40% of the daily budgets went out. Usual causes: an account spending limit, disapproved ads, a payment problem or a billing hold.",
       effect: "Check Ads Manager → Delivery and Billing. Alert only.",
+      // Prepaid funds below a day's budgets explain it: funds are the owner's, so no WhatsApp.
+      ...(today?.funds != null && today.funds < budgetTotal ? { whatsapp: false } : {}),
     });
   }
   if (today && budgetTotal > 0 && today.spend > budgetTotal * 1.5) {

@@ -285,9 +285,9 @@ export const runAdsCycle = async ({ weekly = false } = {}) => {
     // Empty ad lists mean the read failed, not that nothing runs.
     uncovered: ads.length ? languageCoverage({ campaigns: snap.structure.campaigns, adsets: snap.structure.adsets, ads }) : [],
   });
-  for (const e of alarms) {
+  for (const { whatsapp, ...e } of alarms) {
     const key = ["ads.disapproved", "ads.issues", "ads.language_gap"].includes(e.type) ? `${e.type}:${e.reason.slice(0, 120)}` : `${e.type}:${snap.today}`;
-    await notice("ads", { ...e, payload: { dedupeKey: key } });
+    await notice("ads", { ...e, payload: { dedupeKey: key, ...(whatsapp === false ? { whatsapp: false } : {}) } });
   }
   // New ads that have run 7+ days get their verdict against their ad set (feeds the idea library).
   // New ads launched together are judged together: one alert per ad set, not one per ad.

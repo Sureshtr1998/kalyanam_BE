@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The mailbox and Claude are replaced; everything else is the real app.
 const inbox = [];
@@ -1270,5 +1270,198 @@ describe("Format my mail", () => {
     expect((await api().post(`/api/manage/ops/actions/${reply._id}/format`).set("x-auth-token", t).send({ text: "thanks a lot" })).status).toBe(400);
     expect((await api().post(`/api/manage/ops/actions/${done._id}/format`).set("x-auth-token", t).send({ text: "thanks a lot" })).status).toBe(409);
     expect((await api().post(`/api/manage/ops/actions/${open._id}/format`).set("x-auth-token", t).send({ text: "ok" })).status).toBe(400);
+  });
+});
+
+describe("WhatsApp alerts to the owner", () => {
+  const OWNER = "9876500001";
+  let send;
+  const goLive = () => OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.support": "live" } }, { upsert: true });
+  const setNumber = () => OpsConfig.updateOne({ _id: "ops" }, { $set: { "alerts.whatsapp": `91${OWNER}` } }, { upsert: true });
+  const sentTitles = () => send.mock.calls.map(([, body]) => body.payload.template.to_and_components[0].components.body_1.value);
+
+  beforeEach(async () => {
+    const { default: axios } = await import("axios");
+    Object.assign(process.env, { MSG91_AUTHKEY: "test-key", MSG91_WHATSAPP_SENDER_ID: "918000000000", MSG91_WHATSAPP_API: "https://msg91.example.test/bulk" });
+    send = vi.spyOn(axios, "post").mockResolvedValue({ data: { status: "success", hasError: false } });
+    await setNumber();
+  });
+  afterEach(() => {
+    send.mockRestore();
+    for (const k of ["MSG91_AUTHKEY", "MSG91_WHATSAPP_SENDER_ID", "MSG91_WHATSAPP_API"]) delete process.env[k];
+  });
+
+  it("sends urgent alerts with the ops_alert template, once per 12 hours, and never funds alerts", async () => {
+    const { notice } = await import("../src/ops/actions.js");
+    await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "2 ads disapproved by Meta", reason: "KN-09: Personal attributes", effect: "Alert only.", payload: { dedupeKey: "d1" } });
+    expect(send).toHaveBeenCalledTimes(1);
+    const [url, body, opts] = send.mock.calls[0];
+    expect(url).toBe("https://msg91.example.test/bulk");
+    expect(opts.headers.authkey).toBe("test-key");
+    expect(body.payload.template).toMatchObject({ name: "ops_alert", language: { code: "en" } });
+    const { to, components } = body.payload.template.to_and_components[0];
+    expect(to).toEqual([`91${OWNER}`]);
+    expect(components.body_1.value).toBe("2 ads disapproved by Meta");
+    expect(components.body_2.value).toMatch(/KN-09: Personal attributes Alert only\./);
+    expect((await OpsAction.findOne({ type: "ads.disapproved" })).payload.whatsappAt).toBeTruthy();
+
+    // Not urgent, a low balance, a funds-caused alert, or the same thing again within 12 h: no WhatsApp.
+    await notice("ads", { type: "ads.issues", priority: "normal", title: "1 ad has delivery issues", payload: { dedupeKey: "i1" } });
+    await notice("tools", { type: "tools.msg91_low", priority: "urgent", title: "MSG91 balance is ₹300", payload: { dedupeKey: "m1" } });
+    await notice("ads", { type: "ads.account_status", priority: "urgent", title: "Meta ad account is unsettled", payload: { dedupeKey: "a1", whatsapp: false } });
+    await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "2 ads disapproved by Meta", reason: "again", payload: { dedupeKey: "d2", whatsappKey: "d1" } });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Meta payment problems and prepaid-funds stalls off WhatsApp", async () => {
+    const { emergencies } = await import("../src/ops/adsEngine.js");
+    const unsettled = emergencies({ accountStatus: 3 });
+    const disabled = emergencies({ accountStatus: 2 });
+    expect(unsettled[0].whatsapp).toBe(false);
+    expect(disabled[0].whatsapp).toBeUndefined();
+    const stalledNoFunds = emergencies({ today: { funds: 500, spend: 0 }, budgetTotal: 8000, yesterdaySpend: 300 });
+    const stalled = emergencies({ today: { funds: 20000, spend: 0 }, budgetTotal: 8000, yesterdaySpend: 300 });
+    expect(stalledNoFunds.find((e) => e.type === "ads.delivery_stalled").whatsapp).toBe(false);
+    expect(stalled.find((e) => e.type === "ads.delivery_stalled").whatsapp).toBeUndefined();
+  });
+
+  it("sends nothing when no number is saved", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "alerts.whatsapp": "" } });
+    const { notice } = await import("../src/ops/actions.js");
+    await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "x", payload: { dedupeKey: "n1" } });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("records MSG91's refusal so Settings can show it", async () => {
+    send.mockResolvedValueOnce({ data: { status: "fail", hasError: true, errors: "Template not found" } });
+    const { notice } = await import("../src/ops/actions.js");
+    const a = await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "x", payload: { dedupeKey: "r1" } });
+    expect((await OpsAction.findById(a._id)).payload.whatsappError).toMatch(/Template not found/);
+    expect((await OpsConfig.findById("ops").lean()).alerts.lastError).toMatch(/Template not found/);
+  });
+
+  it("alerts on a member's 3rd mail about a refund, not before", async () => {
+    await goLive();
+    triage.mockReturnValue({ category: "refund", language: "English", summary: "Wants the ₹351 back", mobile: "", email: "", confidence: 0.9 });
+    inbox.push(mail(301, "refund.me@example.test", "refund please"));
+    inbox.push(mail(302, "refund.me@example.test", "refund please, still waiting"));
+    await runSupportCycle();
+    expect(await OpsAction.exists({ type: "support.repeat_mail" })).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+
+    inbox.push(mail(303, "refund.me@example.test", "third time asking for my refund"));
+    await runSupportCycle();
+    const alert = await OpsAction.findOne({ type: "support.repeat_mail" });
+    expect(alert).toMatchObject({ priority: "urgent" });
+    expect(alert.title).toMatch(/Ramesh has mailed 3 times about a refund/);
+    expect(sentTitles()).toEqual([alert.title]);
+    expect(send.mock.calls[0][1].payload.template.to_and_components[0].components.body_2.value).toMatch(/From refund\.me@example\.test/);
+
+    // A 4th mail the same day doesn't send a second WhatsApp.
+    inbox.push(mail(304, "refund.me@example.test", "hello??"));
+    await runSupportCycle();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts questions the brief can't answer, and starts again after the owner acts", async () => {
+    await goLive();
+    const { ask } = await import("../src/ops/claude.js");
+    const original = ask.getMockImplementation();
+    ask.mockImplementation(async (o) => (o.task === "support.reply" ? { reply: "The team will check and reply soon.", answered: false } : original(o)));
+    try {
+      triage.mockReturnValue({ category: "question", language: "English", summary: "Asks about horoscope matching for Nadi dosha", mobile: "", email: "", confidence: 0.9 });
+      inbox.push(mail(311, "curious@example.test", "Do you check nadi dosha?"));
+      await runSupportCycle();
+      const first = await OpsMail.findOne({ uid: 311 });
+      expect(first.needsTeam).toBe(true);
+      expect((await OpsAction.findOne({ type: "support.reply", "payload.to": "curious@example.test" })).reason).toMatch(/brief doesn't answer/);
+
+      // The owner answers by hand: earlier mails no longer count.
+      await OpsAction.updateMany({ "payload.to": "curious@example.test", type: "support.reply" }, { $set: { status: "done", decidedBy: "SRK0001" } });
+      inbox.push(mail(312, "curious@example.test", "and gothra?"));
+      inbox.push(mail(313, "curious@example.test", "and gothra??"));
+      await runSupportCycle();
+      expect(await OpsAction.exists({ type: "support.repeat_mail" })).toBeNull();
+      inbox.push(mail(314, "curious@example.test", "hello?"));
+      await runSupportCycle();
+      expect((await OpsAction.findOne({ type: "support.repeat_mail" })).title).toMatch(/mailed 3 times and needs you/);
+    } finally {
+      ask.mockImplementation(original);
+    }
+  });
+
+  it("doesn't count questions the agent answered", async () => {
+    await goLive();
+    triage.mockReturnValue({ category: "question", language: "English", summary: "Asks the price", mobile: "", email: "", confidence: 0.9 });
+    for (const uid of [321, 322, 323]) inbox.push(mail(uid, "price@example.test", "price?"));
+    await runSupportCycle();
+    expect(await OpsAction.exists({ type: "support.repeat_mail" })).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("sends an urgent mail (safety, legal, payment dispute) at once", async () => {
+    await goLive();
+    triage.mockReturnValue({ category: "urgent", language: "English", summary: "Says a profile is cheating them", mobile: "", email: "", confidence: 0.9 });
+    inbox.push(mail(331, "worried@example.test", "this profile asked me for money"));
+    await runSupportCycle();
+    expect(sentTitles()).toEqual(["Urgent: Ramesh"]);
+  });
+
+  it("alerts when a job keeps failing and marks it resolved when it works again", async () => {
+    const { tick } = await import("../src/ops/tick.js");
+    const { fetchNewMail } = await import("../src/ops/mail.js");
+    await goLive();
+    fetchNewMail.mockRejectedValueOnce(new Error("IMAP login failed")).mockRejectedValueOnce(new Error("IMAP login failed")).mockRejectedValueOnce(new Error("IMAP login failed"));
+    await tick({ only: "support" });
+    await tick({ only: "support" });
+    expect(await OpsAction.exists({ type: "ops.job_failing" })).toBeNull();
+    await tick({ only: "support" });
+    const alert = await OpsAction.findOne({ type: "ops.job_failing" });
+    expect(alert.title).toBe("Reading the support inbox is failing");
+    expect(alert.reason).toMatch(/3 times in a row.*IMAP login failed/);
+    expect(sentTitles()).toEqual(["Reading the support inbox is failing"]);
+    expect((await OpsConfig.findById("ops").lean()).lastRuns.support.fails).toBe(3);
+
+    await tick({ only: "support" });
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+    expect((await OpsConfig.findById("ops").lean()).lastRuns.support.fails).toBeUndefined();
+  });
+
+  it("alerts when registration OTPs fail 3 times in a row, never for an MSG91 balance error", async () => {
+    const { flowFailed, flowOk } = await import("../src/ops/health.js");
+    await flowFailed("otp", new Error("Template paused"));
+    await flowOk("otp");
+    await flowFailed("otp", new Error("Template paused"));
+    await flowFailed("otp", new Error("Template paused"));
+    expect(await OpsAction.exists({ type: "ops.flow_failing" })).toBeNull();
+    await flowFailed("otp", { message: "x", response: { data: { message: "Template paused by Meta" } } });
+    const alert = await OpsAction.findOne({ type: "ops.flow_failing" });
+    expect(alert.title).toBe("Registration OTPs are failing");
+    expect(alert.reason).toMatch(/Template paused by Meta/);
+    expect(sentTitles()).toEqual(["Registration OTPs are failing"]);
+    await flowOk("otp");
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+
+    await OpsAction.deleteMany({ type: "ops.flow_failing" });
+    for (let i = 0; i < 3; i++) await flowFailed("otp", new Error("Insufficient balance"));
+    expect((await OpsAction.findOne({ type: "ops.flow_failing" })).payload.whatsapp).toBe(false);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves the number from Settings and sends a test", async () => {
+    const t = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const bad = await api().post("/api/manage/ops/config").set("x-auth-token", t).send({ alerts: { whatsapp: "12345" } });
+    expect(bad.status).toBe(400);
+    const ok = await api().post("/api/manage/ops/config").set("x-auth-token", t).send({ alerts: { whatsapp: "+91 98765 00002" } });
+    expect(ok.status).toBe(200);
+    expect(ok.body.alerts).toMatchObject({ whatsapp: "919876500002", ready: true, template: "ops_alert" });
+    const test = await api().post("/api/manage/ops/alerts/test").set("x-auth-token", t);
+    expect(test.status).toBe(200);
+    expect(send.mock.calls[0][1].payload.template.to_and_components[0].to).toEqual(["919876500002"]);
+    const overview = await api().get("/api/manage/ops/overview").set("x-auth-token", t);
+    expect(overview.body.alerts.lastSentAt).toBeTruthy();
+    // Clearing the number turns WhatsApp alerts off.
+    const off = await api().post("/api/manage/ops/config").set("x-auth-token", t).send({ alerts: { whatsapp: "" } });
+    expect(off.body.alerts.whatsapp).toBe("");
   });
 });

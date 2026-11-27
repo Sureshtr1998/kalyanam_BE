@@ -15,6 +15,7 @@ import { areKnownUploads, rememberAnonymousUploads } from "../../utils/images.js
 import { brokerAuth } from "../../middleware/auth.js";
 import sendEmail, { notify } from "../../config/msg91Email.js";
 import sendWhatsappOTP from "../../config/msg91Whatsapp.js";
+import { flowFailed, flowOk } from "../../ops/health.js";
 import upStash from "../../config/upStash.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { uploadToImageKit } from "../../utils/utils.js";
@@ -110,9 +111,11 @@ router.post("/broker-send-otp", otpLimiter, async (req, res) => {
     await upStash.set(otpKey(email, phone), JSON.stringify(record), { ex: 300 });
     await sendEmail({ to: [{ email }], template_id: "otp_verify_2", variables: { otp: record.emailOtp } });
     await sendWhatsappOTP(`91${phone}`, record.mobileOtp);
+    await flowOk("otp");
     return res.json({ success: true, msg: "OTP sent to email and WhatsApp" });
   } catch (err) {
     console.error("Broker send OTP error:", err);
+    await flowFailed("otp", err);
     return res.status(500).json({ success: false, msg: "Failed to send OTP" });
   }
 });

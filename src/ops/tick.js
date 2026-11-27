@@ -102,16 +102,71 @@ const JOBS = [
 const record = async (name, entry) =>
   OpsConfig.updateOne({ _id: "ops" }, { $set: { [`lastRuns.${name}`]: entry } });
 
+/** What each job does, in the owner's words (for failure alerts). */
+const JOB_LABEL = {
+  actions: "Running due actions (replies, verifications, ad changes, posts)",
+  support: "Reading the support inbox",
+  comments: "Reading Facebook and Instagram comments",
+  adsSnapshot: "Reading Meta ads",
+  adsWeekly: "Monday ad budgets",
+  adsPlan: "The ads batch (new and paused ads)",
+  weeklyReview: "The weekly review",
+  organicPlan: "Planning next week's posts",
+  organicStats: "Reading post results",
+  storyStats: "Reading story results",
+  seoWeekly: "The Search Console read",
+  ideasAuto: "Planning waiting ideas",
+  tools: "Reading the tools' balances",
+};
+
+/**
+ * Failures in a row before the owner hears (WhatsApp + email). Weekly jobs don't
+ * run again for a week, so one failure is enough; jobs that run every 15 minutes
+ * get 3 tries (45 min) so a passing hiccup stays quiet.
+ */
+const ALERT_AFTER = { adsWeekly: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
+
+/** Alerts once when a job keeps failing; marks the alert resolved when it works again. */
+const watchFailures = async (name, prev, failed, error) => {
+  if (!failed) {
+    if (prev?.ok === false) {
+      await OpsAction.updateMany(
+        { type: "ops.job_failing", "payload.job": name, status: "info", "payload.resolvedAt": null },
+        { $set: { "payload.resolvedAt": new Date() } }
+      );
+    }
+    return {};
+  }
+  const fails = prev?.ok === false ? (prev.fails ?? 1) + 1 : 1;
+  const failingSince = fails > 1 ? (prev.failingSince ?? prev.at) : new Date();
+  if (fails === (ALERT_AFTER[name] ?? 3)) {
+    const since = new Date(failingSince).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+    await notice("tools", {
+      type: "ops.job_failing",
+      priority: "urgent",
+      title: `${JOB_LABEL[name] ?? name} is failing`,
+      reason: `It failed ${fails === 1 ? "on its run" : `${fails} times in a row`} (since ${since}): ${error}`,
+      effect: "It runs again on its usual schedule, and this alert is marked resolved once it works. If it keeps failing, check Ops → Settings → Connections.",
+      payload: { dedupeKey: `job_failing:${name}:${new Date(failingSince).toISOString()}`, job: name },
+    });
+  }
+  return { fails, failingSince };
+};
+
 const attempt = async (name, fn) => {
   const t = ist();
   const started = Date.now();
+  const prev = (await OpsConfig.findById("ops").select(`lastRuns.${name}`).lean().catch(() => null))?.lastRuns?.[name];
   try {
     const result = await fn();
     await record(name, { at: new Date(), date: t.date, ok: true, ms: Date.now() - started, result: result ?? null });
+    await watchFailures(name, prev, false).catch(() => {});
     return { name, ok: true, result };
   } catch (err) {
     console.error(`[ops] ${name}:`, err.message);
-    await record(name, { at: new Date(), date: t.date, ok: false, ms: Date.now() - started, error: String(err.message).slice(0, 300) });
+    const error = String(err.message).slice(0, 300);
+    const streak = await watchFailures(name, prev, true, error).catch(() => ({}));
+    await record(name, { at: new Date(), date: t.date, ok: false, ms: Date.now() - started, error, ...streak });
     return { name, ok: false, error: err.message };
   }
 };
