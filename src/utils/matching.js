@@ -49,7 +49,7 @@ const LIST_PREFS = {
 };
 
 const PUBLIC_FIELDS =
-  "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -skippedProfiles -interests -transactions -astrology -shortlisted -profileViews -__v";
+  "-basic.password -basic.email -basic.mobile -basic.alternateMob -personal.address -hideProfiles -skippedProfiles -interests -transactions -astrology -shortlisted -profileViews -__v -membershipReminders -marriageNote -hiddenForInactivityAt -dormantWarnedAt -dormantFinalWarnedAt";
 
 export const publicProjection = PUBLIC_FIELDS;
 
@@ -154,7 +154,7 @@ export const isBlocked = (a, b) =>
 export const canView = (viewer, candidate) => {
   if (!viewer || !candidate) return false;
   if (String(viewer._id) === String(candidate._id)) return false;
-  if (candidate.isHidden || candidate.isCorrupted) return false;
+  if (candidate.isHidden || candidate.isCorrupted || candidate.isPaused || candidate.marriedAt) return false;
   if (
     String(viewer.basic?.gender || "").toLowerCase() ===
     String(candidate.basic?.gender || "").toLowerCase()

@@ -17,6 +17,7 @@ import { geocodePlace, validCoords } from "./astrology/astroHelper.js";
 import { areKnownUploads } from "./images.js";
 import { findReferrerMember } from "./referrals.js";
 import upStash from "../config/upStash.js";
+import { canRenew } from "./membership.js";
 
 const str = (v, max = 200) =>
   typeof v === "string" ? v.trim().slice(0, max) : "";
@@ -223,6 +224,23 @@ export const buildInterestOrder = async (user, pack) => {
     amount: plan.amount,
     interests: plan.interests,
     note: "Interest Purchase",
+  };
+};
+
+/** One more year of membership. Offered from 30 days before the end date. */
+export const buildRenewalOrder = async (user) => {
+  if (!canRenew(user)) {
+    throw new HttpError(400, "Your membership is active. Renewal opens 30 days before it ends.");
+  }
+  const pricing = await getPricing();
+  return {
+    purpose: "renewal",
+    email: user.basic.email,
+    phone: user.basic.mobile,
+    name: user.basic.fullName,
+    amount: pricing.renewalFee,
+    interests: pricing.renewalInterests,
+    note: "Membership renewal",
   };
 };
 

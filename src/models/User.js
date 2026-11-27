@@ -223,12 +223,41 @@ const userSchema = new Schema(
       default: [],
     },
     lastActiveAt: { type: Date },
+    // Membership (see utils/membership.js). Set at registration and on each
+    // renewal; older members get it from the daily membership job. No schema
+    // default on purpose: Mongoose would fill it on load with today's date.
+    membershipEndsAt: { type: Date },
+    // Membership ended more than GRACE_DAYS ago: hidden from everyone until
+    // renewed. Separate from isHidden, which a login clears.
+    isPaused: { type: Boolean, default: false },
+    // Reminders already sent, one per stage per membership end date.
+    membershipReminders: {
+      type: [
+        {
+          key: { type: String },
+          endsAt: { type: Date },
+          at: { type: Date, default: Date.now },
+          whatsapp: { type: Boolean },
+          email: { type: Boolean },
+        },
+      ],
+      default: [],
+    },
+    // isHidden was set by the daily job after INACTIVE_DAYS without a visit.
+    hiddenForInactivityAt: { type: Date },
+    // "Marriage fixed": profile closed by the member, no reminders.
+    marriedAt: { type: Date },
+    marriageNote: { type: String },
+    // Dormant clean-up warnings (see runMembershipCycle).
+    dormantWarnedAt: { type: Date },
+    dormantFinalWarnedAt: { type: Date },
     // Tokens issued before this are refused (see middleware/auth.js).
     passwordChangedAt: { type: Date },
   },
   { timestamps: true }
 );
 userSchema.index({ createdAt: -1 });
+userSchema.index({ membershipEndsAt: 1 });
 userSchema.index({ referralCode: 1 }, { unique: true, sparse: true });
 userSchema.index({ referredBy: 1 }, { sparse: true });
 userSchema.index({ "basic.gender": 1, isHidden: 1, hasCompleteProfile: 1 });

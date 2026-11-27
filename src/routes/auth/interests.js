@@ -5,6 +5,7 @@ import { notify } from "../../config/msg91Email.js";
 import User from "../../models/User.js";
 import dbConnect from "../../utils/dbConnect.js";
 import { canView, isBlocked } from "../../utils/matching.js";
+import { membershipBlock, membershipError } from "../../utils/membership.js";
 
 const router = Router();
 
@@ -48,6 +49,9 @@ router.post("/send-interest", auth, async (req, res) => {
     if (!sender || !receiver) {
       return res.status(404).json({ msg: "User not found" });
     }
+
+    const blocked = membershipBlock(sender);
+    if (blocked) return res.status(403).json(membershipError(blocked));
 
     if (hasId(sender.interests.sent, receiver._id)) {
       return res.status(400).json({ msg: "Interest already sent" });
@@ -121,7 +125,7 @@ router.get("/fetch-invitation-status", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
-      "-basic.password -transactions -interests -hideProfiles -skippedProfiles -astrology -shortlisted -profileViews -__v"
+      "-basic.password -transactions -interests -hideProfiles -skippedProfiles -astrology -shortlisted -profileViews -__v -membershipReminders -marriageNote -hiddenForInactivityAt -dormantWarnedAt -dormantFinalWarnedAt"
     ).lean();
 
     const actedAt = (id) => interests.actedAt?.get(String(id)) ?? null;
@@ -263,6 +267,8 @@ router.post("/view-contact", auth, async (req, res) => {
     if (hasId(sender.interests.viewed, receiver._id)) {
       return res.status(400).json({ msg: "Contact already viewed" });
     }
+    const blocked = membershipBlock(sender);
+    if (blocked) return res.status(403).json(membershipError(blocked));
     const theyReachedOut = hasId(sender.interests.received, receiver._id);
     if (isBlocked(sender, receiver) || (!theyReachedOut && !canView(sender, receiver))) {
       return res.status(403).json({ msg: "This profile is not available" });
@@ -304,7 +310,7 @@ router.get("/view-contact", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: uniqueOrdered } },
-      "-basic.password -transactions -interests -hideProfiles -skippedProfiles -astrology -shortlisted -profileViews -__v"
+      "-basic.password -transactions -interests -hideProfiles -skippedProfiles -astrology -shortlisted -profileViews -__v -membershipReminders -marriageNote -hiddenForInactivityAt -dormantWarnedAt -dormantFinalWarnedAt"
     ).lean();
 
     const sortedUsers = uniqueOrdered

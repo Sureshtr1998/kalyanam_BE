@@ -16,6 +16,7 @@ import { preflightLaunches, tagIdeaCreatives } from "./adsCreative.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
 import { autoVerifyDue, getAutoVerifySettings } from "../utils/autoVerify.js";
+import { runMembershipCycle } from "../utils/membership.js";
 
 // Handlers register themselves on import.
 import "./dev.js";
@@ -34,6 +35,14 @@ const ist = () => {
 
 /** Jobs in priority order. `due` decides from the last run and the IST clock. */
 const JOBS = [
+  {
+    // Membership end dates, reminders, pausing, 90-day inactivity hide, dormant clean-up.
+    // First so the daily Vercel Cron fallback (09:30 IST) always runs it.
+    name: "membership",
+    ready: () => true,
+    due: (last, t) => t.hour >= 9 && last?.date !== t.date,
+    run: () => runMembershipCycle(),
+  },
   {
     name: "adsWeekly",
     ready: (c) => c.modes.ads !== "off" && metaConfigured(),

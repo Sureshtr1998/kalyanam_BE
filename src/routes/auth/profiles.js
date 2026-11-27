@@ -11,6 +11,7 @@ import { deleteRemovedImages } from "../../utils/images.js";
 import upStash from "../../config/upStash.js";
 import { normalizeEmail } from "../../utils/constants.js";
 import { autoVerifyIfDue } from "../../utils/autoVerify.js";
+import { VISIBLE, browseBlock, membershipError } from "../../utils/membership.js";
 import {
   acceptsViewerQuery,
   escapeRegex,
@@ -122,7 +123,7 @@ router.get("/hidden-profiles", auth, async (req, res) => {
 
     const users = await User.find(
       { _id: { $in: orderedIds } },
-      "-basic.password -hideProfiles -skippedProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -astrology -shortlisted -profileViews -__v"
+      "-basic.password -hideProfiles -skippedProfiles -basic.email -basic.alternateMob -basic.mobile -transactions -astrology -shortlisted -profileViews -__v -membershipReminders -marriageNote -hiddenForInactivityAt -dormantWarnedAt -dormantFinalWarnedAt"
     ).lean();
 
     // Deleted accounts leave ids behind; skip them.
@@ -260,6 +261,8 @@ router.post("/fetch-profiles", auth, async (req, res) => {
     if (!currentUser.basic?.gender) {
       return res.status(400).json({ msg: "Current user gender not set" });
     }
+    const blocked = browseBlock(currentUser);
+    if (blocked) return res.status(403).json(membershipError(blocked));
 
     const oppositeGender =
       currentUser.basic.gender.toLowerCase() === "male" ? "female" : "male";
@@ -282,10 +285,12 @@ router.post("/fetch-profiles", auth, async (req, res) => {
 
     /** @type {Record<string, any>[]} */
     const and = [...acceptsViewerQuery(currentUser)];
+    /** @type {Record<string, any>} */
     const query = {
       "basic.gender": { $regex: new RegExp(`^${oppositeGender}$`, "i") },
       _id: { $ne: currentUser._id, $nin: excludedIds },
       isHidden: false,
+      ...VISIBLE,
       isCorrupted: { $ne: true },
       hasCompleteProfile: true,
       hideProfiles: { $ne: currentUser._id },

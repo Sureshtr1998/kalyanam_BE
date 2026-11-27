@@ -10,6 +10,9 @@ import Settings from "../models/Settings.js";
  * stay paid at level 2's prices. Each order stores its amount when it is
  * created, so switching levels never changes a checkout in progress.
  *
+ * Renewal (utils/membership.js) costs the same as registering and gives the
+ * same interests; at level 1 it is free like registration.
+ *
  * Refer & earn: a friend who registers with a member's code pays referralFee
  * (registrationFee minus the discount) and the member who referred them gets
  * memberReferralReward back on one of their own Razorpay payments (see
@@ -20,6 +23,9 @@ export const PRICING_LEVELS = {
     registrationFee: 0,
     registrationFeeOriginal: null,
     registrationInterests: 5,
+    // Membership renewal: 12 more months plus these interests (unused ones carry over).
+    renewalFee: 0,
+    renewalInterests: 5,
     referralFee: 0,
     memberReferralReward: 0,
     brokerCommission: 0,
@@ -34,6 +40,9 @@ export const PRICING_LEVELS = {
     registrationFee: 201,
     registrationFeeOriginal: 599,
     registrationInterests: 21,
+    // Membership renewal: 12 more months plus these interests (unused ones carry over).
+    renewalFee: 201,
+    renewalInterests: 21,
     referralFee: 171,
     memberReferralReward: 41,
     brokerCommission: 51,
@@ -48,6 +57,9 @@ export const PRICING_LEVELS = {
     registrationFee: 351,
     registrationFeeOriginal: 999,
     registrationInterests: 36,
+    // Membership renewal: 12 more months plus these interests (unused ones carry over).
+    renewalFee: 351,
+    renewalInterests: 36,
     referralFee: 301,
     memberReferralReward: 71,
     brokerCommission: 101,
@@ -62,6 +74,9 @@ export const PRICING_LEVELS = {
     registrationFee: 501,
     registrationFeeOriginal: 1499,
     registrationInterests: 51,
+    // Membership renewal: 12 more months plus these interests (unused ones carry over).
+    renewalFee: 501,
+    renewalInterests: 51,
     referralFee: 431,
     memberReferralReward: 101,
     brokerCommission: 151,

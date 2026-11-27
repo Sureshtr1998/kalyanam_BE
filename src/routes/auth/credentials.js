@@ -30,6 +30,7 @@ import { DEFAULT_STRICT } from "../../utils/matching.js";
 import { markCheckoutPaid, markConverted } from "../../utils/abandoned.js";
 import { newMemberReferralCode, payReferralReward } from "../../utils/referrals.js";
 import { acquisitionFrom, sendConversion, trackingFrom } from "../../utils/metaCapi.js";
+import { firstEndDate } from "../../utils/membership.js";
 
 const router = Router();
 
@@ -170,6 +171,7 @@ const newMemberFrom = (reg, uniqueId, totalNoOfInterest, { commission, referrerI
     },
     interests: { totalNoOfInterest },
     commission,
+    membershipEndsAt: firstEndDate(new Date()),
   });
 
 /** The member's details Meta matches a sign-up on (hashed in utils/metaCapi.js). */
@@ -390,8 +392,11 @@ router.post("/login", loginLimiter, async (req, res) => {
       });
     }
 
-    if (user.isHidden) {
+    // Logging in shows a hidden profile again (own choice or 90 days away),
+    // but not one closed after "Marriage fixed": that reopens from Account.
+    if (user.isHidden && !user.marriedAt) {
       user.isHidden = false;
+      user.hiddenForInactivityAt = undefined;
       await user.save();
     }
 

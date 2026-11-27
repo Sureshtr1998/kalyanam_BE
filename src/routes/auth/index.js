@@ -15,6 +15,7 @@ import adSpendRoutes from "./adSpend.js";
 import referralRoutes from "./referrals.js";
 import backupRoutes from "./backups.js";
 import opsRoutes from "./ops.js";
+import membershipRoutes from "./membership.js";
 
 const router = Router();
 
@@ -39,6 +40,8 @@ router.use(socialRoutes);
 router.use(brokerRoutes);
 
 router.use(referralRoutes);
+
+router.use(membershipRoutes);
 
 // Admin panel + broker dashboard (all under /manage).
 router.use(abandonedRoutes);

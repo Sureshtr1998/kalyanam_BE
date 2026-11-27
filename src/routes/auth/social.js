@@ -21,7 +21,7 @@ const toPublic = ({ hideProfiles, ...profile }) => profile;
  */
 const canOpen = (me, other) => {
   if (canView(me, other)) return true;
-  if (other.isHidden || other.isCorrupted || isBlocked(me, other)) return false;
+  if (other.isHidden || other.isCorrupted || other.isPaused || other.marriedAt || isBlocked(me, other)) return false;
   return hasId(me.interests?.sent, other._id) || hasId(me.interests?.received, other._id);
 };
 
@@ -86,7 +86,7 @@ router.post("/profile-view", auth, async (req, res) => {
     }
     // @ts-ignore
     const me = req.user;
-    const target = await User.findById(userId).select("basic.gender partner hideProfiles isHidden isCorrupted");
+    const target = await User.findById(userId).select("basic.gender partner hideProfiles isHidden isCorrupted isPaused marriedAt");
     // Only record views of profiles the member could actually open.
     if (!target || !canOpen(me, target)) return res.json({ ok: true });
 

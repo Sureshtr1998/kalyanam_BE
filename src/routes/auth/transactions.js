@@ -27,7 +27,9 @@ import {
   buildBrokerOrder,
   buildInterestOrder,
   buildRegistrationOrder,
+  buildRenewalOrder,
 } from "../../utils/orderBuilders.js";
+import { applyRenewal } from "../../utils/membership.js";
 
 const router = Router();
 
@@ -37,6 +39,7 @@ const FULFILMENT_ENDPOINT = {
   interest: "buy-interest",
   astro: "astro-data",
   broker: "broker-register",
+  renewal: "renew-membership",
 };
 
 /** Live prices, for display. What is charged is still decided in /create-order. */
@@ -72,13 +75,20 @@ router.post("/create-order", orderLimiter, optionalAuth, async (req, res) => {
         record = await buildInterestOrder(user, req.body.pack);
       } else if (purpose === "astro") {
         record = await buildAstroOrder(user, req.body.astro);
+      } else if (purpose === "renewal") {
+        record = await buildRenewalOrder(user);
       } else {
         throw new HttpError(400, "Unknown payment type");
       }
     }
     // Pricing level 1: registration is free and goes straight to /user-register.
     if (!(record.amount > 0)) {
-      throw new HttpError(400, "Registration is free right now. Please refresh the page and register again.");
+      throw new HttpError(
+        400,
+        record.purpose === "renewal"
+          ? "Renewal is free right now. Please refresh the page and renew again."
+          : "Registration is free right now. Please refresh the page and register again."
+      );
     }
 
     // Admins and test payers are charged ₹1 for anything (live testing).
@@ -231,6 +241,44 @@ router.post("/buy-interest", auth, async (req, res) => {
     return res.json({ profile, alreadyApplied: !result.modifiedCount });
   } catch (err) {
     return sendHttpError(res, err, "Could not apply your purchase");
+  }
+});
+
+/** Fulfils a paid renewal (browser after checkout, or the webhook via QStash). */
+router.post("/renew-membership", auth, async (req, res) => {
+  try {
+    const { record, orderId, paymentId } = await resolvePaidOrder(req, "renewal");
+    // @ts-ignore
+    const user = req.user;
+    if (record.email !== user.basic.email) {
+      throw new HttpError(403, "This payment belongs to a different account");
+    }
+    const endsAt = await applyRenewal(user._id, {
+      orderId,
+      paymentId,
+      amountPaid: record.amountCharged,
+      interests: record.interests,
+      note: record.note,
+    });
+    if (endsAt) {
+      await saveOrder(orderId, { ...record, fulfilled: true, paymentId });
+      notify({
+        to: [{ email: record.email }],
+        template_id: "membership_renewed",
+        variables: {
+          userName: record.name || "",
+          orderId,
+          paymentId,
+          amount: record.amountCharged,
+          numInterests: record.interests,
+          end_date: endsAt.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }),
+        },
+      });
+    }
+    const profile = await User.findById(user._id).select("-basic.password").lean();
+    return res.json({ profile, alreadyApplied: !endsAt });
+  } catch (err) {
+    return sendHttpError(res, err, "Could not apply your renewal");
   }
 });
 
