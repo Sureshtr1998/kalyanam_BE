@@ -4,7 +4,7 @@ import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
 import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory, OpsConfig } from "../../ops/models.js";
 import { cancel, execute, retry, undo } from "../../ops/actions.js";
-import { checkLaunch } from "../../ops/adsCreative.js";
+import { checkAndRecord } from "../../ops/adsCreative.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
 import { adsSettings, unitStates } from "../../ops/ads.js";
 import { IDEAS, loadIdeaLibrary } from "../../ops/adsIdeas.js";
@@ -190,8 +190,8 @@ router.post(
   wrap(async (req, res) => {
     const a = await OpsAction.findById(req.params.id).lean();
     if (!a || a.type !== "ads.creative_launch") return res.status(404).json({ msg: "Only new-ad launches can be checked" });
-    const r = await checkLaunch(a);
-    await OpsAction.updateOne({ _id: a._id }, { $set: { "payload.checkedAt": new Date(), "payload.checkError": r.ok ? null : r.error } });
+    const r = await checkAndRecord(a);
+    if (r.pending) return res.json({ ...r, msg: "The ad images are still being designed; check again once they're ready" });
     return res.status(r.ok ? 200 : 400).json({ ...r, msg: r.ok ? `Ready: ${r.checked} creative(s) made in Meta, no ad changed yet` : r.error });
   })
 );

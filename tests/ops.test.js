@@ -1581,11 +1581,15 @@ describe("new-ad launches that Meta refuses", () => {
     expect(meta.copyAd).not.toHaveBeenCalled();
   });
 
-  it("lets an admin check a launch card by hand", async () => {
+  it("lets an admin check a launch card by hand, which also clears its 'would fail' alert", async () => {
     const { a } = await launchCard(new Date(Date.now() + 40 * 3600000));
+    const { notice } = await import("../src/ops/actions.js");
+    const alert = await notice("ads", { type: "ads.launch_check_failed", priority: "urgent", title: "New ads would fail", payload: { dedupeKey: `launch_check:${a._id}` } });
     const t = await admin();
     const res = await withImages(async () => await api().post(`/api/manage/ops/actions/${a._id}/check`).set("x-auth-token", t));
     expect(res.status).toBe(200);
     expect(res.body.msg).toMatch(/Ready: 1 creative/);
+    expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
+    expect((await OpsAction.findById(a._id)).payload.checkError).toBeNull();
   });
 });

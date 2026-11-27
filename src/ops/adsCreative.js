@@ -477,6 +477,23 @@ export const checkLaunch = async (action) => {
 };
 
 /**
+ * Checks a launch card and records the result on it. A pass marks any
+ * earlier "would fail" alert for the card resolved (whoever ran the check).
+ */
+export const checkAndRecord = async (card) => {
+  const r = await checkLaunch(card);
+  if (r.pending) return r;
+  await OpsAction.updateOne({ _id: card._id }, { $set: { "payload.checkedAt": new Date(), "payload.checkError": r.ok ? null : r.error } });
+  if (r.ok) {
+    await OpsAction.updateMany(
+      { type: "ads.launch_check_failed", "payload.dedupeKey": `launch_check:${card._id}`, status: "info", "payload.resolvedAt": null },
+      { $set: { "payload.resolvedAt": new Date() } }
+    );
+  }
+  return r;
+};
+
+/**
  * New-ad launches due within a day are checked ahead (their creatives made in
  * Meta, no ad touched). If Meta refuses, the owner hears at once (urgent:
  * WhatsApp) while there's time; the check repeats every 3 hours and the alert
@@ -490,17 +507,8 @@ export const preflightLaunches = async ({ now = Date.now() } = {}) => {
     $or: [{ "payload.checkedAt": null }, { "payload.checkError": { $ne: null }, "payload.checkedAt": { $lte: new Date(now - 3 * 3600000) } }],
   }).sort({ runAt: 1 });
   if (!card) return null;
-  const r = await checkLaunch(card);
-  if (r.pending) return r;
-  card.payload = { ...card.payload, checkedAt: new Date(), checkError: r.ok ? null : r.error };
-  card.markModified("payload");
-  await card.save();
-  if (r.ok) {
-    await OpsAction.updateMany(
-      { type: "ads.launch_check_failed", "payload.dedupeKey": `launch_check:${card._id}`, status: "info", "payload.resolvedAt": null },
-      { $set: { "payload.resolvedAt": new Date() } }
-    );
-  } else {
+  const r = await checkAndRecord(card);
+  if (!r.ok && !r.pending) {
     const due = new Date(card.runAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
     await notice("ads", {
       type: "ads.launch_check_failed",
