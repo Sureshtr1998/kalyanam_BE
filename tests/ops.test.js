@@ -1767,3 +1767,17 @@ describe("Ads screen: the agent's ads", () => {
     expect(res.body.creatives[0]._id).toBe(String(soon._id));
   });
 });
+
+describe("cancelling a new-ads card", () => {
+  it("cancels its ads too, and tidies ones cancelled before", async () => {
+    const { cancel, cancelOrphanCreatives } = await import("../src/ops/actions.js");
+    const c = await OpsCreative.create({ language: "Hindi", status: "ready" });
+    const a = await OpsAction.create({ module: "ads", type: "ads.creative_launch", status: "scheduled", title: "1 new ad", runAt: new Date(Date.now() + 3600000), payload: { creativeIds: [String(c._id)] } });
+    await cancel(a._id, "SRK0001");
+    expect((await OpsCreative.findById(c._id)).status).toBe("cancelled");
+    const old = await OpsCreative.create({ language: "Tamil", status: "ready" });
+    await OpsAction.create({ module: "ads", type: "ads.creative_launch", status: "cancelled", title: "old", payload: { creativeIds: [String(old._id)] } });
+    expect(await cancelOrphanCreatives()).toBe(1);
+    expect((await OpsCreative.findById(old._id)).status).toBe("cancelled");
+  });
+});

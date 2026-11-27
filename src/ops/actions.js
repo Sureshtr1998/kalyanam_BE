@@ -283,7 +283,25 @@ export const cancel = async (id, by) => {
     { new: true }
   );
   await ownerActed(a, by);
+  await cancelLaunchCreatives(a);
   return a;
+};
+
+/** A cancelled new-ads card takes its ads (not yet live) with it, so they don't look scheduled. */
+const cancelLaunchCreatives = async (a) => {
+  if (a?.type !== "ads.creative_launch" || !(a.payload?.creativeIds ?? []).length) return 0;
+  const { OpsCreative } = await import("./models.js");
+  const r = await OpsCreative.updateMany({ _id: { $in: a.payload.creativeIds }, status: { $in: ["design", "ready"] } }, { $set: { status: "cancelled" } });
+  return r.modifiedCount ?? 0;
+};
+
+/** Once: ads of new-ads cards cancelled before that rule (still "ready") are marked cancelled. */
+export const cancelOrphanCreatives = async () => {
+  let n = 0;
+  for (const a of await OpsAction.find({ type: "ads.creative_launch", status: "cancelled" }).select("type payload.creativeIds").lean()) {
+    n += await cancelLaunchCreatives(a);
+  }
+  return n;
 };
 
 /**
