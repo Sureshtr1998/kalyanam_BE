@@ -126,7 +126,8 @@ export const formatDraft = async ({ action, text }) => {
     system: `You turn the support team's rough notes into a clear, well-structured email reply for Seetha Rama Kalyana.
 ${config.brief}
 Rules:
-- Keep exactly the meaning and facts of the notes. Add nothing they don't say: no new promises, refunds, dates, prices, links or steps.
+- Keep exactly the meaning and facts of the notes. Add nothing they don't say: no new promises, refunds, dates, prices, links, steps or confirmations. Every sentence must come from the notes; only the greeting, the closing line and the sign-off are yours.
+- Use the member's mail only to understand the context and to get their name; never repeat or confirm anything from it that the notes don't say.
 - Structure: a greeting ("Dear <their name>," when the name is known, else "Dear Member,"), then short paragraphs in a sensible order; a numbered list only when the notes give steps; a short closing line; then the sign-off on its own lines: "Warm regards," and "Team Seetha Rama Kalyana".
 - Fix grammar and spelling; warm, polite and plain. Plain text only (no markdown, no asterisks).
 - Language: ${mail?.language ? `write in ${mail.language} (the member's language and script), unless the notes clearly ask for another language` : "write in the language of the notes"}.

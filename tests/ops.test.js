@@ -1256,6 +1256,7 @@ describe("Format my mail", () => {
     expect(call.task).toBe("support.format");
     expect(call.system).toMatch(/Kannada \(Kannada script\)/);
     expect(call.system).toMatch(/Add nothing they don't say/);
+    expect(call.system).toMatch(/Every sentence must come from the notes/);
     expect(call.prompt).toMatch(/account verified now/);
     // Nothing is saved until the owner presses Save.
     expect((await OpsAction.findById(a._id)).payload.draft).toBe("old draft");
