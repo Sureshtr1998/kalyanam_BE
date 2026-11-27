@@ -32,13 +32,14 @@ export const templateText = (s, max) => {
 };
 
 /**
- * Sends one alert. Throws when MSG91 refuses it.
- * @param {{ to: string, title: string, detail: string }} p
+ * Sends one approved template (any name, language and components such as
+ * body_1 / header_1) to an Indian mobile. Throws when MSG91 refuses it.
+ * @param {{ to: string, name: string, language: string, components?: object }} p
  */
-export const sendWhatsappAlert = async ({ to, title, detail }) => {
+export const sendWhatsappTemplate = async ({ to, name, language, components = {} }) => {
   if (!whatsappConfigured()) throw new Error("MSG91 WhatsApp isn't set up on the server");
   const number = normalizeWhatsapp(to);
-  if (!number) throw new Error("The alert number isn't a 10-digit Indian mobile");
+  if (!number) throw new Error("Not a 10-digit Indian mobile");
   const { data } = await axios.post(
     process.env.MSG91_WHATSAPP_API,
     {
@@ -48,18 +49,10 @@ export const sendWhatsappAlert = async ({ to, title, detail }) => {
         messaging_product: "whatsapp",
         type: "template",
         template: {
-          name: ALERT_TEMPLATE.name,
-          language: { code: ALERT_TEMPLATE.language, policy: "deterministic" },
+          name,
+          language: { code: language, policy: "deterministic" },
           namespace: process.env.MSG91_WHATSAPP_NAMESPACE,
-          to_and_components: [
-            {
-              to: [number],
-              components: {
-                body_1: { type: "text", value: templateText(title, 200) },
-                body_2: { type: "text", value: templateText(detail, 700) },
-              },
-            },
-          ],
+          to_and_components: [{ to: [number], components }],
         },
       },
     },
@@ -70,4 +63,21 @@ export const sendWhatsappAlert = async ({ to, title, detail }) => {
     throw new Error(`MSG91 refused the WhatsApp: ${typeof why === "string" ? why : JSON.stringify(why ?? data)}`.slice(0, 300));
   }
   return data;
+};
+
+/**
+ * Sends one alert. Throws when MSG91 refuses it.
+ * @param {{ to: string, title: string, detail: string }} p
+ */
+export const sendWhatsappAlert = async ({ to, title, detail }) => {
+  if (!normalizeWhatsapp(to)) throw new Error("The alert number isn't a 10-digit Indian mobile");
+  return sendWhatsappTemplate({
+    to,
+    name: ALERT_TEMPLATE.name,
+    language: ALERT_TEMPLATE.language,
+    components: {
+      body_1: { type: "text", value: templateText(title, 200) },
+      body_2: { type: "text", value: templateText(detail, 700) },
+    },
+  });
 };

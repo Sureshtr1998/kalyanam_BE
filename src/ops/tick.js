@@ -5,6 +5,7 @@ import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
 import { refreshOpenRefunds, runSupportCycle } from "./support.js";
+import { runReminders } from "./reminders.js";
 import { runCommentsCycle } from "./comments.js";
 import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
 import { readTools } from "./tools.js";
@@ -117,6 +118,7 @@ const JOB_LABEL = {
   seoWeekly: "The Search Console read",
   ideasAuto: "Planning waiting ideas",
   tools: "Reading the tools' balances",
+  reminders: "Sending reminders to unpaid sign-ups and unverified members",
 };
 
 /**
@@ -187,6 +189,7 @@ export const tick = async ({ only, budgetMs = 50000, source = "other" } = {}) =>
     if (job) done.push(await attempt(job.name, job.run));
     else if (only === "support") done.push(await attempt("support", runSupportCycle));
     else if (only === "comments") done.push(await attempt("comments", runCommentsCycle));
+    else if (only === "reminders") done.push(await attempt("reminders", runReminders));
     return done;
   }
 
@@ -273,6 +276,10 @@ const runTick = async ({ config, t, done, deadline, source }) => {
   if (config.modes.support !== "off" && mailConfigured() && claudeConfigured()) {
     done.push(await attempt("support", runSupportCycle));
   }
+  // Reminders to unpaid sign-ups and unverified members (a few per run, 8 am – 9 pm IST).
+  if (config.modes.support === "live" && Date.now() < deadline - 25000) {
+    done.push(await attempt("reminders", runReminders));
+  }
   if (config.modes.comments !== "off" && pageConfigured() && claudeConfigured() && Date.now() < deadline - 20000) {
     done.push(await attempt("comments", runCommentsCycle));
   }
@@ -300,4 +307,4 @@ const runTick = async ({ config, t, done, deadline, source }) => {
   return done;
 };
 
-export const JOB_NAMES = [...JOBS.map((j) => j.name), "support", "comments"];
+export const JOB_NAMES = [...JOBS.map((j) => j.name), "support", "comments", "reminders"];

@@ -41,6 +41,8 @@ const AbandonedCheckoutSchema = new Schema(
     emailCount: { type: Number, default: 0 },
     lastEmailedAt: { type: Date },
     emails: { type: [EmailLogSchema], default: [] },
+    // Asked for no more reminders (the link in the reminder).
+    remindersOff: { type: Boolean },
     convertedAt: { type: Date },
     convertedAfterEmail: { type: Boolean },
   },

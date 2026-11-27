@@ -174,6 +174,12 @@ const userSchema = new Schema(
       email: { type: String },
       mobile: { type: String },
     },
+    // Automatic "verify your profile" reminders (src/ops/reminders.js): how many, the last, opted out.
+    reminders: {
+      verifyCount: { type: Number },
+      verifyLastAt: { type: Date },
+      off: { type: Boolean },
+    },
     // Set when the admin's auto-verify mode verified this member without OTPs.
     autoVerifiedAt: { type: Date },
     isHidden: { type: Boolean, default: false },

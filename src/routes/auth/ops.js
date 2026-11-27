@@ -15,6 +15,7 @@ import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.j
 import { hinduCalendar } from "../../ops/hinduCalendar.js";
 import { langPath } from "../../ops/links.js";
 import { formatDraft } from "../../ops/support.js";
+import { stopReminders } from "../../ops/reminders.js";
 import razorpay from "../../config/razorpay.js";
 import { ALERT_TEMPLATE, ALERT_TEMPLATE_BODY, normalizeWhatsapp, sendWhatsappAlert, whatsappConfigured } from "../../ops/whatsapp.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
@@ -72,6 +73,14 @@ router.post("/ops/render-done", async (req, res) => {
   } catch (err) {
     return res.status(err.status || 500).json({ msg: err.message });
   }
+});
+
+/** The "don't remind me" link in reminder emails (signed per person). */
+router.get("/reminders/stop", async (req, res) => {
+  const ok = await stopReminders(String(req.query.k || ""), String(req.query.id || ""), String(req.query.s || "")).catch(() => false);
+  res.status(ok ? 200 : 400).type("html").send(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Seetha Rama Kalyana</title><body style="font-family:system-ui,sans-serif;max-width:480px;margin:15vh auto;padding:0 16px;text-align:center"><h2>${ok ? "Done. You won't get more reminders." : "This link isn't valid."}</h2><p><a href="https://www.seetharamakalyana.in">seetharamakalyana.in</a></p></body>`
+  );
 });
 
 /* ------------------------------ admin API ------------------------------- */
