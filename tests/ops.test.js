@@ -1837,7 +1837,7 @@ describe("merged ad set test (owner asked 28 Nov 2026)", () => {
     ],
   };
 
-  it("waits for the owner, then merges with the best ads, pauses the old two, and undoes", async () => {
+  it("schedules itself for the next batch day (Tuesday 10:30 am), then merges with the best ads, pauses the old two, and undoes", async () => {
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live" } }, { upsert: true });
     metaRead.structure = structure;
     metaRead.ads = [
@@ -1846,7 +1846,10 @@ describe("merged ad set test (owner asked 28 Nov 2026)", () => {
     ];
     const { proposeMergeTest, mergeTargeting } = await import("../src/ops/adsGrowth.js");
     const card = await proposeMergeTest();
-    expect(card).toMatchObject({ status: "needs_you", type: "ads.merge_test" });
+    expect(card).toMatchObject({ status: "scheduled", type: "ads.merge_test" });
+    const ist = new Date(card.runAt.getTime() + 5.5 * 3600000);
+    expect([ist.getUTCDay(), ist.getUTCHours(), ist.getUTCMinutes()]).toEqual([2, 10, 30]);
+    expect(card.effect).toMatch(/undoes it by itself/);
     expect(await proposeMergeTest()).toBeNull();
 
     const meta = await import("../src/ops/meta.js");
@@ -1878,6 +1881,23 @@ describe("merged ad set test (owner asked 28 Nov 2026)", () => {
     metaRead.ads = null;
   });
 
+  it("undoes itself 14 days later when the language got dearer", async () => {
+    const { judgeMergeTest } = await import("../src/ops/adsGrowth.js");
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    const ranAt = Date.now() - 15 * 86400000;
+    const t = await OpsAction.create({ module: "ads", type: "ads.merge_test", status: "done", ranAt: new Date(ranAt), title: "Test", payload: { campaignId: "c_hi2", language: "Hindi" }, result: { adsetId: "adset_m2", paused: ["s_a", "s_b"] } });
+    const day = (offset) => new Date(ranAt + offset * 86400000).toISOString().slice(0, 10);
+    await AdSnapshot.insertMany([
+      ...Array.from({ length: 14 }, (_, i) => ({ level: "campaign", entityId: "c_hi2", date: day(-14 + i), spend: 2500, paid: 9 })),
+      ...Array.from({ length: 14 }, (_, i) => ({ level: "campaign", entityId: "c_hi2", date: day(i), spend: 2500, paid: 6 })),
+    ]);
+    metaCalls.setStatus.mockClear();
+    expect(await judgeMergeTest()).toBe("worse");
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("s_a", "ACTIVE");
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("adset_m2", "PAUSED");
+    expect((await OpsAction.findOne({ type: "ads.merge_test_result", "payload.dedupeKey": `merge_result:${t._id}` })).effect).toMatch(/Undone by itself/);
+  });
+
   it("reports the result 14 days later, once", async () => {
     const { judgeMergeTest } = await import("../src/ops/adsGrowth.js");
     const { AdSnapshot } = await import("../src/ops/models.js");
@@ -1893,5 +1913,37 @@ describe("merged ad set test (owner asked 28 Nov 2026)", () => {
     const n = await OpsAction.findOne({ type: "ads.merge_test_result" });
     expect(n.title).toBe("Merge test in Hindi: cheaper");
     expect(await judgeMergeTest()).toBeNull();
+  });
+});
+
+describe("new ads don't freeze a language's budget", () => {
+  it("a language with fresh ads launched today is judged, not 'learning'", async () => {
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    const { unitStates } = await import("../src/ops/ads.js");
+    await AdSnapshot.deleteMany({});
+    const today = new Date().toISOString().slice(0, 10);
+    const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    await AdSnapshot.create({ level: "account", entityId: "acct", date: today, spend: 1000, paid: 5 });
+    await AdSnapshot.create({ level: "campaign", entityId: "c_kn", name: "SRK | Kannada", date: today, dailyBudget: 1700, status: "ACTIVE" });
+    await AdSnapshot.insertMany(Array.from({ length: 14 }, (_, i) => ({ level: "campaign", entityId: "c_kn", name: "SRK | Kannada", date: day(i + 1), spend: 1700, paid: 8, impressions: 10000, clicks: 250 })));
+    await OpsAction.create({ module: "ads", type: "ads.creative_launch", status: "done", ranAt: new Date(), title: "1 new ad", payload: { campaignId: "c_kn", adsetId: "s_kn" } });
+    const [kn] = await unitStates();
+    expect(kn.state).not.toBe("learning");
+    expect(kn.notes.join(" ")).toMatch(/re-learning, so costs may wobble/);
+    // A real budget change still does.
+    await OpsAction.create({ module: "ads", type: "ads.budget", status: "done", ranAt: new Date(), title: "Raise", payload: { entityId: "c_kn", from: 1500, to: 1700 } });
+    const [after] = await unitStates();
+    expect(after.state).toBe("learning");
+  });
+});
+
+describe("the agent's own ideas follow the budget rules", () => {
+  it("knows when a budget changed recently or a change is waiting", async () => {
+    const { recentBudgetChange } = await import("../src/ops/ads.js");
+    expect(await recentBudgetChange("c_x")).toBe(false);
+    await OpsAction.create({ module: "ads", type: "ads.rebalance", status: "done", ranAt: new Date(), title: "Move", payload: { entityId: "c_y", moves: [{ entityId: "c_y" }, { entityId: "c_x" }] } });
+    expect(await recentBudgetChange("c_x")).toBe(true);
+    await OpsAction.create({ module: "ads", type: "ads.budget", status: "scheduled", runAt: new Date(Date.now() + 3600000), title: "Raise", payload: { entityId: "c_z" } });
+    expect(await recentBudgetChange("c_z")).toBe(true);
   });
 });

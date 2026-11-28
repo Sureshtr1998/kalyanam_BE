@@ -6,9 +6,9 @@ import { igConfigured } from "./meta.js";
 import { requestRenders } from "./organic.js";
 import { CLAIM_RULES, adsetResults, pickWinners, proposeIdeaCreatives } from "./adsCreative.js";
 import { proposeIdeaAdset } from "./adsGrowth.js";
-import { RULES, batchGate } from "./adsEngine.js";
+import { RULES, batchGate, languageOf } from "./adsEngine.js";
 import { IDEAS, IDEA_KEYS, ideaFacts, ideaTarget, loadOwnerIdeas } from "./adsIdeas.js";
-import { adsSettings, lastBatchAt } from "./ads.js";
+import { adsSettings, lastBatchAt, recentBudgetChange } from "./ads.js";
 import { calendarNotes } from "./hinduCalendar.js";
 
 /*
@@ -241,6 +241,13 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
         if (to < RULES.minBudget) throw new Error(`Budget would be below ₹${RULES.minBudget}/day (every language keeps running)`);
         if (auto && Math.abs(to - e.dailyBudget) / e.dailyBudget > RULES.maxStepPct / 100) {
           throw new Error(`A change over ${RULES.maxStepPct}% restarts Meta's learning; the agent doesn't make it on its own.`);
+        }
+        if (auto) {
+          // The agent's own ideas never undercut the engine's rules.
+          const ramp = settings.rampUp ?? {};
+          const ramping = (ramp.languages ?? []).includes(languageOf(e.name)) && (!ramp.until || new Date(ramp.until) > new Date());
+          if (ramping && to < e.dailyBudget) throw new Error(`${languageOf(e.name)} is a ramp-up language: its budget isn't cut.`);
+          if (await recentBudgetChange(e.id)) throw new Error("Its budget changed in the last 7 days (or a change is waiting); one step at a time so Meta's learning isn't reset.");
         }
         if (total - e.dailyBudget + to > config.limits.maxDailySpend) throw new Error(`Would pass the ₹${config.limits.maxDailySpend}/day limit`);
         const big = Math.abs(to - e.dailyBudget) / e.dailyBudget > 0.2;

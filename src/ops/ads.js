@@ -34,7 +34,7 @@ const TZ_FALLBACK = "Asia/Kolkata";
 /** The owner's ads settings as a plain object (Ops → Settings → Ads rules). */
 export const adsSettings = (config) => config.toObject?.().ads ?? config.ads ?? {};
 const DAY = 86400000;
-const STRUCTURE_TYPES = ["ads.creative_launch", "ads.pause_ad", "ads.new_adset"];
+const STRUCTURE_TYPES = ["ads.creative_launch", "ads.pause_ad", "ads.new_adset", "ads.merge_test"];
 const BUDGET_TYPES = ["ads.budget", "ads.rebalance"];
 
 const upsertRows = (level, rows, extra = {}) =>
@@ -190,6 +190,7 @@ const lastChanges = async () => {
     const p = a.payload ?? {};
     if (BUDGET_TYPES.includes(a.type)) {
       for (const id of [p.entityId, ...(p.moves ?? []).map((m) => m.entityId)]) mark(id, "budget", a.ranAt);
+      if (p.brake) mark(p.entityId, "brake", a.ranAt);
     } else if (STRUCTURE_TYPES.includes(a.type)) {
       for (const id of [p.campaignId, p.adsetId, a.result?.adsetId]) mark(id, "structure", a.ranAt);
       if (a.type === "ads.creative_launch") for (const id of [p.campaignId, p.adsetId]) mark(id, "launch", a.ranAt);
@@ -254,8 +255,13 @@ const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK, settings = {},
         rows.at(-1).frequency7 = Math.max(0, ...f.map((x) => x.frequency7 ?? 0));
       }
       if (realDays) for (const r of rows) r.real = realDays.get(r.date) ?? 0;
-      const edited = level === "adset" ? [o.updatedAt] : sets.map((s) => s.updatedAt);
       const ids = [o.id, c.id, ...sets.map((s) => s.id)];
+      // Meta stamps an ad set "edited" when ads are added to it. Stamps within 3 hours of the
+      // agent's own ad changes aren't budget changes, so they don't put the language in learning.
+      const structureAt = maxDate(ids.map((id) => changes.get(id)?.structure));
+      const edited = (level === "adset" ? [o.updatedAt] : [c.updatedAt, ...sets.map((s) => s.updatedAt)]).filter(
+        (d) => !(d && structureAt && Math.abs(new Date(d).getTime() - structureAt.getTime()) < 3 * 3600000)
+      );
       units.push({
         id: o.id,
         campaignId: c.id,
@@ -264,10 +270,12 @@ const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK, settings = {},
         name: level === "adset" ? `${c.name} › ${o.name}` : c.name,
         dailyBudget: o.dailyBudget,
         days: rows,
-        lastChangeAt: maxDate([...edited, changes.get(o.id)?.any]),
+        // Budget changes only (the agent's, or edits by hand in Ads Manager); new or paused ads don't count.
+        lastChangeAt: maxDate([...edited, changes.get(o.id)?.budget]),
         lastBudgetChangeAt: changes.get(o.id)?.budget ?? null,
         lastStructureChangeAt: maxDate(ids.map((id) => changes.get(id)?.structure)),
         lastLaunchAt: maxDate(ids.map((id) => changes.get(id)?.launch)),
+        lastBrakeAt: changes.get(o.id)?.brake ?? null,
         rampUp: rampOn && rampLangs.has(language),
       });
     }
@@ -290,6 +298,16 @@ const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK, settings = {},
   return units;
 };
 
+/** Whether a campaign or ad set had a budget change in the last `days` days, or has one waiting. */
+export const recentBudgetChange = async (entityId, days = 7) =>
+  !!(await OpsAction.exists({
+    type: { $in: BUDGET_TYPES },
+    $and: [
+      { $or: [{ "payload.entityId": entityId }, { "payload.moves.entityId": entityId }] },
+      { $or: [{ status: { $in: ["scheduled", "shadow", "running"] } }, { status: "done", ranAt: { $gte: new Date(Date.now() - days * DAY) } }] },
+    ],
+  }));
+
 /** ₹ of daily budget the agent added in the last 7 days (moves add nothing overall). */
 const increasedThisWeek = async () => {
   const done = await OpsAction.find({ type: "ads.budget", status: "done", ranAt: { $gte: new Date(Date.now() - 7 * DAY) } }).lean();
@@ -308,7 +326,7 @@ const increasedThisWeek = async () => {
 const runBrakes = async (snap, settings, config) => {
   const calib = await accountCalibration(snap.yesterday);
   const units = await buildUnits(snap.structure, snap.yesterday, snap.tz, settings, calib);
-  const { decisions, alerts } = brakes({ units, limits: config.limits });
+  const { decisions, alerts } = brakes({ units, limits: config.limits, noticeHours: config.limits.adNoticeHours });
   const week = snap.today.slice(0, 8) + String(Math.ceil(Number(snap.today.slice(8)) / 7));
   let made = 0;
   for (const d of decisions) {
@@ -347,10 +365,10 @@ const checkAttribution = async (today) => {
   if (groups.size <= 1) return 0;
   await notice("ads", {
     type: "ads.attribution_mixed",
-    priority: "normal",
+    priority: "low",
     title: `Ad sets count sign-ups in ${groups.size} different ways`,
     reason: [...groups].map(([k, names]) => `${k}: ${names.join("; ")}`).join(" · ").slice(0, 900),
-    effect: "Comparisons between languages and ads are skewed. Align them to one setting (7-day click, 1-day view) on the next batch day; changing it restarts learning.",
+    effect: "Nothing to do. It only changes Meta's own counts; budget decisions use real sign-ups per language from the ads' link tags (from ~10 Dec). Changing it would restart learning, so it's left alone.",
     payload: { dedupeKey: `attribution:${today.slice(0, 7)}` },
   });
   return groups.size;
@@ -420,7 +438,15 @@ export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {
   const calib = await accountCalibration(snap.yesterday);
   const units = await buildUnits(snap.structure, snap.yesterday, snap.tz, settings, calib);
   if (!midweek) await checkAttribution(snap.today).catch(() => {});
-  const result = decide({ units, limits: config.limits, settings, calib, increasedThisWeek: await increasedThisWeek(), mode: midweek ? "midweek" : "weekly" });
+  const result = decide({
+    units,
+    limits: config.limits,
+    settings,
+    calib,
+    increasedThisWeek: await increasedThisWeek(),
+    mode: midweek ? "midweek" : "weekly",
+    noticeHours: config.limits.adNoticeHours,
+  });
   let made = 0;
   for (const d of result.decisions) {
     await propose(
@@ -476,9 +502,10 @@ export const unitStates = async () => {
 };
 
 /** Batch day: schedules pauses for ads that cost far more than their campaign. Returns the ad sets left thin. */
-export const planAdPauses = async (runAt) => {
+export const planAdPauses = async (runAt, { skipCampaigns = [] } = {}) => {
   const [ads, structure] = await Promise.all([fetchAds(), fetchStructure()]);
-  const activeCampaigns = new Set(structure.campaigns.filter((c) => c.status === "ACTIVE").map((c) => c.id));
+  // A campaign about to be restructured (the merge test) is left alone this batch.
+  const activeCampaigns = new Set(structure.campaigns.filter((c) => c.status === "ACTIVE" && !skipCampaigns.includes(c.id)).map((c) => c.id));
   const activeSets = new Set(structure.adsets.filter((s) => s.status === "ACTIVE").map((s) => s.id));
   const live = ads.filter((a) => a.effective_status === "ACTIVE" && activeCampaigns.has(a.campaign_id) && activeSets.has(a.adset_id));
   const since = new Date(Date.now() - 14 * DAY).toISOString().slice(0, 10);

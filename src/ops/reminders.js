@@ -133,7 +133,8 @@ const remindUnpaid = async (row, now) => {
   const n = claimed.emailCount;
   const result = { kind: "unpaid", refId: String(row._id), n, email: false, whatsapp: false };
   const errors = [];
-  try {
+  if (!sendableEmail(row.email)) errors.push("email: not a valid address");
+  else try {
     const response = await sendEmail({ to: [{ email: row.email, name: row.name }], template_id: "complete_registration_en", variables: { name: row.name } });
     result.email = true;
     await AbandonedCheckout.updateOne({ _id: row._id }, { $push: { emails: { at: new Date(now), byName: "Ops agent (automatic reminder)", ok: true, response } } });
@@ -162,7 +163,15 @@ const remindUnpaid = async (row, now) => {
   return result;
 };
 
+/** A plain, sendable email address (no spaces or odd characters a mail server rejects). */
+export const sendableEmail = (e) => /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(String(e ?? "").trim());
+
 const remindVerify = async (user, now) => {
+  // An address the mail server would reject is never retried: no more email reminders for it.
+  if (!sendableEmail(user.basic?.email)) {
+    await User.updateOne({ _id: user._id }, { $set: { "reminders.bounced": true } });
+    return null;
+  }
   const count = user.reminders?.verifyCount ?? 0;
   const claimed = await User.findOneAndUpdate(
     { _id: user._id, isVerified: { $ne: true }, "reminders.verifyCount": count ? count : { $in: [null, 0] } },

@@ -197,11 +197,25 @@ describe("decide: cuts and raises", () => {
     expect(decisions).toHaveLength(0);
   });
 
-  it("lets a winner step again 3 days after its last budget change (Monday + Thursday), not sooner", () => {
-    const soon = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 2 * DAY) };
-    expect(decide({ units: [soon], limits, settings: {}, now }).decisions).toHaveLength(0);
-    const later = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 3 * DAY) };
-    expect(decide({ units: [later], limits, settings: {}, now, mode: "midweek" }).decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2000 } });
+  it("Monday's step goes live Tuesday; Thursday may plan the next (live Friday, 3 days later), not sooner", () => {
+    const tooSoon = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 1 * DAY) };
+    expect(decide({ units: [tooSoon], limits, settings: {}, now, mode: "midweek" }).decisions).toHaveLength(0);
+    const thursday = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 2 * DAY) };
+    expect(decide({ units: [thursday], limits, settings: {}, now, mode: "midweek" }).decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2000 } });
+  });
+
+  it("keeps one language's growth within +25% a week (moves in and raises together)", () => {
+    const grown = { ...winner(), days: winner().days.map((d, i, all) => ({ ...d, dailyBudget: i === all.length - 7 ? 1700 : 2000 })) };
+    const { decisions, evaluated } = decide({ units: [grown], limits, settings: {}, now });
+    expect(decisions).toHaveLength(0);
+    expect(evaluated[0].notes.join(" ")).toMatch(/Already up 18% this week/);
+  });
+
+  it("doesn't raise a language braked in the last 7 days (no see-saw)", () => {
+    const braked = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 4 * DAY), lastBrakeAt: new Date(now.getTime() - 4 * DAY) };
+    const { decisions, evaluated } = decide({ units: [braked], limits, settings: {}, now });
+    expect(decisions).toHaveLength(0);
+    expect(evaluated[0].notes.join(" ")).toMatch(/Braked in the last 7 days/);
   });
 
   it("only raises on Thursdays: no moves or cuts mid-week", () => {
@@ -356,6 +370,11 @@ describe("the mid-week brake", () => {
     expect(alerts).toHaveLength(0);
     expect(decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2100, to: 1790, brake: true } });
     expect(decisions[0].title).toMatch(/^Brake: lower te/);
+  });
+
+  it("doesn't brake in the 5 days after new or paused ads (normal wobble while Meta learns them)", () => {
+    const u = { ...unit("te", 2100, steady, steady), days: [...days(11, steady), ...days(3, { spend: 1200, paid: 1 })], lastStructureChangeAt: new Date(now.getTime() - 2 * DAY) };
+    expect(brakes({ units: [u], limits: { ...limits, stepDownPct: 15 }, now }).decisions).toHaveLength(0);
   });
 
   it("only alerts for a ramp-up language, and leaves a normal week alone", () => {

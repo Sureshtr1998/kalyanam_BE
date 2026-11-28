@@ -134,12 +134,13 @@ export const fetchAccount = async () => {
 export const fetchStructure = async () => {
   const act = accountId();
   const [campaigns, adsets] = await Promise.all([
-    graphAll(`${act}/campaigns`, { fields: "id,name,daily_budget,effective_status", limit: 200 }),
+    graphAll(`${act}/campaigns`, { fields: "id,name,daily_budget,effective_status,updated_time", limit: 200 }),
     graphAll(`${act}/adsets`, { fields: "id,name,campaign_id,daily_budget,effective_status,updated_time", limit: 200 }),
   ]);
   const rupees = (v) => (v ? Number(v) / 100 : null);
   return {
-    campaigns: campaigns.map((c) => ({ id: c.id, name: c.name, dailyBudget: rupees(c.daily_budget), status: c.effective_status })),
+    // updatedAt: a budget changed by hand in Ads Manager counts as a budget change (no second step right after).
+    campaigns: campaigns.map((c) => ({ id: c.id, name: c.name, dailyBudget: rupees(c.daily_budget), status: c.effective_status, updatedAt: c.updated_time })),
     adsets: adsets.map((s) => ({
       id: s.id,
       name: s.name,

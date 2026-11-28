@@ -20,8 +20,8 @@
 const DAY = 86400000;
 
 export const RULES = {
-  // Days a unit is left alone after a budget change / an ad or ad-set change.
-  learningDays: 3,
+  // A unit isn't judged for this long after a budget change (the first days after a step are noisy).
+  learningDays: 1.5,
   structureLearningDays: 5,
   // Too early to judge below this (7 days).
   minSpend7: 1500,
@@ -69,8 +69,13 @@ export const RULES = {
   taggedMinJoins14: 40,
   unitCalibMin: 0.5,
   unitCalibMax: 2,
-  // Raises: a winner may step again this many days after its last budget change (Monday + Thursday).
+  // Raises: a winner may step again this many days after its last budget change, counted to when the
+  // new step goes live (after the notice period): Monday's step runs Tuesday, Thursday's runs Friday.
   raiseGapDays: 3,
+  // No unit grows more than this in 7 days (moves in + raises together), so learning isn't reset.
+  maxUnitWeekPct: 25,
+  // After a brake, no raise for this many days (no see-saw).
+  brakeCoolDays: 7,
   // Brake (checked every 3 hours): the last 3 days cost ≥ 2× the 14-day average per member with
   // ≥ ₹3,000 spent → one −step. Ramp-up languages get an alert instead.
   brakeRatio: 2,
@@ -211,7 +216,7 @@ export const classify = (unit, limits, now = new Date(), { calib: accountCalib =
   const result = (state, extra = []) => ({ state, flags, metrics, notes: [...extra, ...notes] });
 
   if (since(unit.lastChangeAt, now) < RULES.learningDays * DAY || since(unit.lastBudgetChangeAt, now) < RULES.learningDays * DAY) {
-    return result("learning", [`Changed in the last ${RULES.learningDays} days; judged again after that.`]);
+    return result("learning", [`Budget changed in the last ${RULES.learningDays * 24} hours; judged again after that.`]);
   }
   // New ads restart learning only in their own ad set: the language's budget isn't frozen for them.
   if (since(unit.lastStructureChangeAt, now) < RULES.structureLearningDays * DAY) {
@@ -247,7 +252,14 @@ export const classify = (unit, limits, now = new Date(), { calib: accountCalib =
 };
 
 const budgetFree = (u, now) => since(u.lastBudgetChangeAt, now) >= 7 * DAY;
-const raiseFree = (u, now) => since(u.lastBudgetChangeAt, now) >= RULES.raiseGapDays * DAY;
+const HOUR = 3600000;
+/** True when, by the time a step planned now goes live (after the notice), the last budget change is raiseGapDays old. */
+const raiseFree = (u, now, noticeHours = 24) => since(u.lastBudgetChangeAt, now) + noticeHours * HOUR >= RULES.raiseGapDays * DAY - 2 * HOUR;
+/** How much the unit's daily budget grew over the last 7 days (1 = not at all). */
+const growth7 = (u) => {
+  const then = (u.days ?? []).at(-7)?.dailyBudget;
+  return then && u.dailyBudget ? u.dailyBudget / then : 1;
+};
 /** Average cost per member across units: per real member when every unit has ad-tagged joins, else Meta's. */
 const avgCost = (list, n, real) => {
   const spend = list.reduce((t, e) => t + e.metrics[`spend${n}`], 0);
@@ -270,7 +282,7 @@ const avgCost = (list, n, real) => {
  * @param {number} [p.calib] real members per Meta member
  * @param {Date} [p.now]
  */
-export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, calib = 1, now = new Date(), mode = "weekly" }) => {
+export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, calib = 1, now = new Date(), mode = "weekly", noticeHours = limits.adNoticeHours ?? 24 }) => {
   const evaluated = units.map((u) => ({ unit: u, ...classify(u, limits, now, { calib }) }));
   const decisions = [];
   const used = new Set();
@@ -371,8 +383,12 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
   for (const e of winners) {
     const u = e.unit;
     if (!u.dailyBudget) continue;
-    if (!raiseFree(u, now)) {
-      e.notes.push(`Budget changed in the last ${RULES.raiseGapDays} days; next step after that.`);
+    if (!raiseFree(u, now, noticeHours)) {
+      e.notes.push(`Budget changed recently; the next step can go live ${RULES.raiseGapDays} days after the last one.`);
+      continue;
+    }
+    if (since(u.lastBrakeAt, now) < RULES.brakeCoolDays * DAY) {
+      e.notes.push(`Braked in the last ${RULES.brakeCoolDays} days; not raised again so soon.`);
       continue;
     }
     // A tired audience mostly buys repeat views: raise once fresh ads have landed.
@@ -388,6 +404,11 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
     const step = Math.min(RULES.maxStepPct, strong ? Math.max(limits.stepUpPct, 15) : limits.stepUpPct);
     const next = roundTo(u.dailyBudget * (1 + step / 100), 10);
     const delta = next - u.dailyBudget;
+    // Moves in and raises together stay within +25% a week for one unit.
+    if (growth7(u) * (next / u.dailyBudget) > 1 + RULES.maxUnitWeekPct / 100 + 0.001) {
+      e.notes.push(`Already up ${Math.round((growth7(u) - 1) * 100)}% this week; the next step waits so Meta's learning isn't reset.`);
+      continue;
+    }
     if (delta <= 0 || delta > headroom) {
       e.notes.push("Would scale, but the daily spend or weekly increase limit is reached.");
       continue;
@@ -415,7 +436,7 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
  * @param {{ units: Array, limits: object, now?: Date }} p
  * @returns {{ decisions: Array, alerts: Array<{ unit: object, why: string }> }}
  */
-export const brakes = ({ units, limits, now = new Date() }) => {
+export const brakes = ({ units, limits, now = new Date(), noticeHours = limits.adNoticeHours ?? 24 }) => {
   const decisions = [];
   const alerts = [];
   for (const u of units) {
@@ -425,7 +446,9 @@ export const brakes = ({ units, limits, now = new Date() }) => {
     const w14 = windowStats(days.slice(-14));
     if (last3.spend < RULES.brakeMinSpend3 || w14.paid < RULES.minPaid7 || !Number.isFinite(w14.cpp)) continue;
     if (!(last3.paid === 0 || last3.cpp >= RULES.brakeRatio * w14.cpp)) continue;
-    if (!raiseFree(u, now)) continue;
+    if (!raiseFree(u, now, noticeHours)) continue;
+    // New or paused ads make costs wobble for a few days while Meta learns them: not a reason to brake.
+    if (since(u.lastStructureChangeAt, now) < RULES.structureLearningDays * DAY) continue;
     const why = `Last 3 days: ${money(last3.spend)} for ${last3.paid} member${last3.paid === 1 ? "" : "s"}${last3.paid ? ` (${money(last3.cpp)} each)` : ""}, against ${money(w14.cpp)} per member over 14 days.`;
     if (u.rampUp) {
       alerts.push({ unit: u, why });

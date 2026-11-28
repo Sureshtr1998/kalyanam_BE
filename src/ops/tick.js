@@ -11,7 +11,7 @@ import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settleP
 import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
-import { proposeMergeTest, runAdsPlanning } from "./adsGrowth.js";
+import { proposeMergeTest, runAdsPlanning, scheduleMergeTest } from "./adsGrowth.js";
 import { preflightLaunches, tagIdeaCreatives } from "./adsCreative.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
@@ -277,6 +277,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await proposeMergeTest()
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergeTestCard20261128": new Date() } }))
       .catch((err) => console.error("[ops] merge test card", err.message));
+  }
+  // Once: the merge test card made to wait for approval runs by itself on the next batch day instead.
+  if (!config.migrations?.mergeTestScheduled20261128) {
+    await scheduleMergeTest()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergeTestScheduled20261128": new Date() } }))
+      .catch((err) => console.error("[ops] merge test schedule", err.message));
   }
   // Once: delivery-failure alerts from before bounces were handled are closed.
   if (!config.migrations?.bounceAlerts20261128) {

@@ -1,6 +1,6 @@
 import { AdSnapshot, OpsAction, getConfig } from "./models.js";
 import { ask } from "./claude.js";
-import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
+import { handle, handleUndo, hoursFromNow, notice, propose, undo } from "./actions.js";
 import { adsSettings, lastBatchAt, planAdPauses, unitStates } from "./ads.js";
 import { batchGate, languageOf } from "./adsEngine.js";
 import { CLAIM_RULES, planCreativeRefresh, recreateAd, tiredAdset } from "./adsCreative.js";
@@ -146,10 +146,13 @@ export const runAdsPlanning = async () => {
   const runAt = hoursFromNow(config.limits.adNoticeHours);
   const results = [];
 
+  // The merge test restructures its language: no pauses or fresh ads there in the same batch.
+  const merge = await OpsAction.findOne({ type: "ads.merge_test", status: { $in: ["scheduled", "shadow"] } }).lean();
+  const skipCampaigns = merge ? [merge.payload.campaignId] : [];
   let thin = [];
   if (settings.pauseLosingAds !== false) {
     try {
-      const r = await planAdPauses(runAt);
+      const r = await planAdPauses(runAt, { skipCampaigns });
       thin = r.thin;
       results.push({ pauses: r.paused });
     } catch (err) {
@@ -174,7 +177,7 @@ export const runAdsPlanning = async () => {
       }
     }
   }
-  for (const t of [...targets.values()].slice(0, 2)) {
+  for (const t of [...targets.values()].filter((x) => !skipCampaigns.includes(x.campaignId)).slice(0, 2)) {
     try {
       results.push(await planCreativeRefresh({ ...t, runAt }));
     } catch (err) {
@@ -312,7 +315,25 @@ export const mergeTargeting = (a = {}, b = {}) => {
   return t;
 };
 
-/** The test card (needs the owner's OK), once. */
+/**
+ * When the next batch of ad changes goes live: the first Tuesday 10:30 am IST
+ * on or after the batch gate opens (Monday's batch cards run Tuesday ~10 am).
+ */
+export const nextBatchRunAt = async (now = Date.now()) => {
+  const config = await getConfig();
+  const settings = adsSettings(config);
+  const last = await lastBatchAt();
+  const opens = Math.max(now, last ? new Date(last).getTime() + (settings.batchEveryDays ?? 14) * 86400000 : now, settings.handsOffUntil ? new Date(settings.handsOffUntil).getTime() : 0);
+  const ist = new Date(opens + 5.5 * 3600000);
+  const daysToTue = (2 - ist.getUTCDay() + 7) % 7 || (ist.getUTCHours() * 60 + ist.getUTCMinutes() >= 630 ? 7 : 0);
+  const at = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + daysToTue, 10, 30) - 5.5 * 3600000;
+  return new Date(at);
+};
+
+const mergeEffect = (language, parents, young, runAt) =>
+  `Runs by itself on the next batch day (${runAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}), with that batch, so ${language} re-learns once: makes the merged ad set with the 2 best ads from each, turns it on, and pauses "${parents}" and "${young}". After 14 days: if ${language} got 10%+ dearer, the agent undoes it by itself; otherwise it stays. Cancel to skip the test.`;
+
+/** The test card, once; it runs by itself on the next batch day. */
 export const proposeMergeTest = async ({ language = MERGE_TEST_LANGUAGE } = {}) => {
   if (await OpsAction.exists({ type: "ads.merge_test", status: { $ne: "cancelled" } })) return null;
   const structure = await fetchStructure();
@@ -322,12 +343,13 @@ export const proposeMergeTest = async ({ language = MERGE_TEST_LANGUAGE } = {}) 
   const parents = sets.find((s) => /parent/i.test(s.name));
   const young = sets.find((s) => /young/i.test(s.name));
   if (!parents || !young) return null;
+  const runAt = await nextBatchRunAt();
   return propose("ads", {
     type: "ads.merge_test",
-    status: "needs_you",
+    runAt,
     title: `Test: merge ${language}'s Parents and Young ad sets into one`,
     reason: `Each ad set gets about 25 sign-ups a week, and Meta needs about 50 to finish learning, so none ever does. One merged ad set (ages 24–65, both ad sets' places) gives Meta twice the data. ${language} has the largest budget, so the test reads fastest. After 14 days the agent compares ${language}'s cost per member with the 14 days before and tells you.`,
-    effect: `Waits for you. Approve & run: makes the merged ad set with the 2 best ads from each, turns it on, and pauses "${parents.name}" and "${young.name}". ${language} re-learns for about a week. Best approved on a batch day. Pause / undo puts the two ad sets back.`,
+    effect: mergeEffect(language, parents.name, young.name, runAt),
     payload: { campaignId: campaign.id, campaignName: campaign.name, language, parentsId: parents.id, youngId: young.id, parentsName: parents.name, youngName: young.name },
     ref: { kind: "meta", id: `merge-test:${campaign.id}` },
   });
@@ -377,6 +399,17 @@ handleUndo("ads.merge_test", async (action) => {
   if (action.result?.adsetId) await setStatus(action.result.adsetId, "PAUSED");
 });
 
+/** Once: the card made earlier (waiting for approval) is scheduled for the next batch day instead. */
+export const scheduleMergeTest = async () => {
+  const card = await OpsAction.findOne({ type: "ads.merge_test", status: "needs_you" });
+  if (!card) return null;
+  const runAt = await nextBatchRunAt();
+  card.status = "scheduled";
+  card.runAt = runAt;
+  card.effect = mergeEffect(card.payload.language, card.payload.parentsName, card.payload.youngName, runAt);
+  return card.save();
+};
+
 /** 14 days after the merge: the language's cost per member after vs the 14 days before, once. */
 export const judgeMergeTest = async (now = Date.now()) => {
   const t = await OpsAction.findOne({ type: "ads.merge_test", status: "done", "result.verdictAt": null, ranAt: { $lte: new Date(now - 14 * 86400000) } });
@@ -394,21 +427,25 @@ export const judgeMergeTest = async (now = Date.now()) => {
   const verdict = ratio == null ? "unclear" : ratio <= 0.9 ? "better" : ratio >= 1.1 ? "worse" : "even";
   const rs = (n) => (n == null ? "–" : `₹${Math.round(n)}`);
   const word = { better: "cheaper", worse: "dearer", even: "about the same", unclear: "not enough data" }[verdict];
+  // Dearer: put the two ad sets back by itself. Otherwise the merged one stays.
+  let undone = false;
+  if (verdict === "worse") undone = !!(await undo(t._id, "agent").catch((err) => console.error("[ops] merge undo", err.message)));
   await notice("ads", {
     type: "ads.merge_test_result",
     priority: "normal",
     title: `Merge test in ${t.payload.language}: ${word}`,
     reason: `${rs(after.cpp)} per member in the 14 days after the merge (${after.paid} members) vs ${rs(before.cpp)} in the 14 days before (${before.paid}).`,
     effect:
-      verdict === "better"
-        ? "Keep it. The same merge could be tried in another language."
-        : verdict === "worse"
-          ? "Undo it: Pause / undo on the test card puts the two ad sets back."
-          : "Your call: keep it, or Pause / undo on the test card.",
+      verdict === "worse"
+        ? undone
+          ? "Undone by itself: the two old ad sets are back on and the merged one is paused."
+          : "It couldn't be undone by itself: press Pause / undo on the test card."
+        : "Kept: the merged ad set stays. Nothing to do.",
     payload: { dedupeKey: `merge_result:${t._id}` },
   });
-  t.result = { ...t.result, verdictAt: new Date(), verdict, before, after };
-  t.markModified("result");
-  await t.save();
+  const fresh = await OpsAction.findById(t._id);
+  fresh.result = { ...fresh.result, verdictAt: new Date(), verdict, before, after };
+  fresh.markModified("result");
+  await fresh.save();
   return verdict;
 };

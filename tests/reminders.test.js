@@ -146,3 +146,13 @@ describe("pacing and failures", () => {
     vi.mocked(sendEmail).mockResolvedValue({});
   });
 });
+
+describe("addresses a mail server would reject", () => {
+  it("skips them for good instead of failing every run", async () => {
+    const u = await unverified(NOON - 2 * DAY);
+    await User.updateOne({ _id: u._id }, { $set: { "basic.email": "bad address@example.test" } });
+    await runReminders({ now: NOON });
+    expect(sent).toHaveLength(0);
+    expect((await User.findById(u._id)).reminders.bounced).toBe(true);
+  });
+});
