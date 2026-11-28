@@ -1377,18 +1377,18 @@ describe("WhatsApp alerts to the owner", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it("counts questions the brief can't answer, and starts again after the owner acts", async () => {
+  it("counts questions the agent can't solve, and starts again after the owner acts", async () => {
     await goLive();
     const { ask } = await import("../src/ops/claude.js");
     const original = ask.getMockImplementation();
-    ask.mockImplementation(async (o) => (o.task === "support.reply" ? { reply: "The team will check and reply soon.", answered: false } : original(o)));
+    ask.mockImplementation(async (o) => (o.task === "support.reply" ? { reply: "Could you send a screenshot of what you see?", needsOwner: true } : original(o)));
     try {
       triage.mockReturnValue({ category: "question", language: "English", summary: "Asks about horoscope matching for Nadi dosha", mobile: "", email: "", confidence: 0.9 });
       inbox.push(mail(311, "curious@example.test", "Do you check nadi dosha?"));
       await runSupportCycle();
       const first = await OpsMail.findOne({ uid: 311 });
       expect(first.needsTeam).toBe(true);
-      expect((await OpsAction.findOne({ type: "support.reply", "payload.to": "curious@example.test" })).reason).toMatch(/brief doesn't answer/);
+      expect((await OpsAction.findOne({ type: "support.reply", "payload.to": "curious@example.test" })).reason).toMatch(/asks them for details/);
 
       // The owner answers by hand: earlier mails no longer count.
       await OpsAction.updateMany({ "payload.to": "curious@example.test", type: "support.reply" }, { $set: { status: "done", decidedBy: "SRK0001" } });
@@ -1399,6 +1399,38 @@ describe("WhatsApp alerts to the owner", () => {
       inbox.push(mail(314, "curious@example.test", "hello?"));
       await runSupportCycle();
       expect((await OpsAction.findOne({ type: "support.repeat_mail" })).title).toMatch(/mailed 3 times and needs you/);
+    } finally {
+      ask.mockImplementation(original);
+    }
+  });
+
+  it("replies as the one in charge: no 'team will check', site facts and the sender's account in the prompt", async () => {
+    await goLive();
+    const { ask } = await import("../src/ops/claude.js");
+    await createUser({ basic: { email: "owner.check@example.test" }, rest: { isVerified: false } });
+    triage.mockReturnValue({ category: "question", language: "English", summary: "Asks if the referral ID is needed", mobile: "", email: "", confidence: 0.9 });
+    inbox.push(mail(341, "owner.check@example.test", "what is referral id, I don't have one"));
+    await runSupportCycle();
+    const call = ask.mock.calls.map((c) => c[0]).filter((o) => o.task === "support.reply").at(-1);
+    expect(call.system).toMatch(/no separate team/);
+    expect(call.system).toMatch(/Never write that a team will check/);
+    expect(call.system).toMatch(/referral code field is optional/);
+    expect(call.system).toMatch(/screenshot/);
+    expect(call.prompt).toMatch(/Their account: Account .* Not verified yet/);
+  });
+
+  it("re-drafts waiting replies that pass the problem to a team", async () => {
+    const { ask } = await import("../src/ops/claude.js");
+    const { redraftPassedReplies } = await import("../src/ops/support.js");
+    const original = ask.getMockImplementation();
+    ask.mockImplementation(async (o) => (o.task === "support.reply" ? { reply: "The referral ID is optional, just leave it empty.", needsOwner: false } : original(o)));
+    try {
+      const m = await OpsMail.create({ uid: 351, messageId: "<r351@x>", from: { email: "manoj@example.test", name: "Manoj" }, subject: "referral", text: "referral id?", language: "English", summary: "Asks about the referral ID" });
+      const old = await OpsAction.create({ module: "support", type: "support.reply", status: "scheduled", runAt: new Date(Date.now() + 3600000), title: "Reply to Manoj", ref: { kind: "mail", id: String(m._id) }, payload: { to: "manoj@example.test", draft: "Thank you. Our team will check and get back to you soon." } });
+      const fine = await OpsAction.create({ module: "support", type: "support.reply", status: "scheduled", runAt: new Date(Date.now() + 3600000), title: "Reply to Ravi", ref: { kind: "mail", id: String(m._id) }, payload: { to: "ravi@example.test", draft: "Use Forgot password on the login page." } });
+      expect(await redraftPassedReplies()).toBe(1);
+      expect((await OpsAction.findById(old._id)).payload.draft).toMatch(/optional/);
+      expect((await OpsAction.findById(fine._id)).payload.draft).toMatch(/Forgot password/);
     } finally {
       ask.mockImplementation(original);
     }

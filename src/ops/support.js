@@ -183,10 +183,42 @@ export const findRazorpayPayments = async ({ emails = [], mobile = "", days = 60
 
 const day = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short" }) : "");
 
-const replySystem = (brief) => `You write email replies for the support team of Seetha Rama Kalyana.
+/**
+ * How the site works, for replies (checked against the site on 28 Nov 2026).
+ * The owner's brief adds to these; neither may be contradicted.
+ */
+export const SITE_FACTS = `How the site works:
+- Registering: fill the form, confirm email and mobile with the OTPs, then pay. The referral code field is optional: leave it empty if no one gave you a code. A wrong code stops the payment, so remove it (the x next to it) and pay the normal price. A valid code gives a lower price.
+- Logging in: with the registered email and password. Forgot password: use "Forgot password" on the login page.
+- OTP not received: wait a minute and use resend; check the number/email typed is correct and check the spam folder for the email OTP.
+- Matches, interests and contact details are on the Home and Matches pages after logging in. Interest credits are used to send interests and unlock contacts; more can be bought from the site.
+- A member can hide their profile from Account; logging in again shows it again.
+- Prices: https://www.seetharamakalyana.in/pricing`;
+
+const replySystem = (brief) => `You are the person in charge of support at Seetha Rama Kalyana and you reply to members' emails yourself. There is no separate team behind you: you own every problem.
 ${brief}
+${SITE_FACTS}
+How to reply:
+- Work out exactly what they are asking or what is going wrong, using their mail, the facts above and their account details when given, and answer it fully and directly.
+- Never write that a team will check, that someone will get back to them, or that you are looking into it. Either solve it now, or say exactly what you need from them to solve it.
+- If the mail is unclear, makes no sense, or is too vague to act on, ask them politely to send a screenshot of the page or error, or to describe what they were doing and what happened.
+- Never invent a fact, price, date, promise or feature that is not written above.
 Write the reply in exactly the language and script given. Be warm, short (under 120 words) and specific.
 Sign off as "Team Seetha Rama Kalyana". Output only the reply body, no subject line.`;
+
+/** What the agent can see about the sender's account (never passwords). */
+const accountFacts = async (email) => {
+  const u = email ? await User.findOne({ "basic.email": String(email).toLowerCase() }).select("basic.uniqueId basic.fullName isVerified isHidden membershipEndsAt marriedAt createdAt transactions.amountPaid").lean().catch(() => null) : null;
+  if (!u) return "No account is registered with the sender's email (they may have used another email, or not registered yet).";
+  const paid = (u.transactions ?? []).some((x) => x.amountPaid > 0);
+  return [
+    `Account ${u.basic?.uniqueId ?? ""} (${u.basic?.fullName ?? ""}), joined ${day(u.createdAt)}.`,
+    u.isVerified ? "Verified." : "Not verified yet (email and mobile OTP not completed).",
+    paid ? "Has paid." : "No payment recorded.",
+    u.isHidden ? (u.marriedAt ? "Profile closed after 'Marriage fixed'." : "Profile is hidden; logging in shows it again.") : "Profile is visible.",
+    u.membershipEndsAt ? `Membership until ${new Date(u.membershipEndsAt).toLocaleDateString("en-IN")}.` : "",
+  ].filter(Boolean).join(" ");
+};
 
 const draftReply = (config, mail, instruction, tier = "sort") =>
   ask({
@@ -204,31 +236,38 @@ What to say: ${instruction}`,
 const ANSWER_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["reply", "answered"],
+  required: ["reply", "needsOwner"],
   properties: {
     reply: { type: "string", description: "The reply body" },
-    answered: { type: "boolean", description: "false when the facts didn't answer what they asked, so the reply only says the team will check" },
+    needsOwner: {
+      type: "boolean",
+      description: "true only when you could not solve it from the facts and their account (a bug you can't explain, a decision about money, something only the owner knows). The reply still never says a team will check: it asks them for the details or screenshot needed.",
+    },
   },
 };
 
-/** Drafts the reply to a question or complaint, and says whether the brief answered it. */
-const draftAnswer = async (config, mail, tier) => {
+/** Drafts the reply to a question or complaint, and says whether the owner may be needed. */
+export const draftAnswer = async (config, mail, tier) => {
   const out = await ask({
     task: "support.reply",
     tier,
     system: `${replySystem(config.brief)}
-Also say whether the facts above answered what they asked ("answered": false when the reply can only say the team will check).`,
+Also say whether this may need the owner ("needsOwner").`,
     prompt: `Language and script to reply in: ${mail.language}
+Their account: ${await accountFacts(mail.from?.email)}
 Their mail (subject "${mail.subject}"):
 """${mail.text.slice(0, 3000)}"""
 
-What to say: Answer their question using only the facts in the brief. If the brief doesn't cover it, say the team will check and reply soon.`,
+What to say: Solve what they asked. If you can't tell what they mean, ask for a screenshot or the exact details.`,
     schema: ANSWER_SCHEMA,
     maxTokens: 700,
   });
   if (typeof out === "string") return { reply: out, answered: true };
-  return { reply: String(out?.reply ?? ""), answered: out?.answered !== false };
+  return { reply: String(out?.reply ?? ""), answered: out?.needsOwner !== true };
 };
+
+/** Old drafts that pass the problem to a "team" instead of solving it. */
+export const PASSES_THE_BUCK = /\b(team (will|is going to|shall) (check|look|review|get back)|get back to you|looking into (it|this|your)|will (check|look into) (and|this|it))\b/i;
 
 /** From this many mails, a member the agent couldn't help goes to the owner's WhatsApp. */
 export const REPEAT_ALERT_AT = 3;
@@ -307,6 +346,30 @@ Output only the email body, no subject line.`,
   const body = String(out || "").trim();
   if (!body) throw new Error("Couldn't format the mail; try again");
   return body.slice(0, 5000);
+};
+
+/**
+ * Re-drafts waiting question/complaint replies whose draft passes the problem
+ * to "the team" (written before the agent owned replies, 28 Nov 2026).
+ * Returns how many drafts changed.
+ */
+export const redraftPassedReplies = async () => {
+  const config = await getConfig();
+  const cards = await OpsAction.find({ module: "support", type: "support.reply", status: "scheduled", "ref.kind": "mail" });
+  let n = 0;
+  for (const a of cards) {
+    if (!PASSES_THE_BUCK.test(String(a.payload?.draft ?? ""))) continue;
+    const m = await OpsMail.findById(a.ref.id).lean();
+    if (!m) continue;
+    const { reply, answered } = await draftAnswer(config, { ...m, language: m.language || "English" }, "sort");
+    if (!reply.trim()) continue;
+    a.payload = { ...a.payload, draft: reply };
+    a.reason = answered ? m.summary || a.reason : `${m.summary ?? ""} Not clear enough to solve yet, so the reply asks them for details.`.trim();
+    await a.save();
+    await OpsMail.updateOne({ _id: m._id }, { $set: { draft: reply, needsTeam: !answered } });
+    n += 1;
+  }
+  return n;
 };
 
 /** Reads new mail and turns each into actions. Returns how many were read. */
@@ -561,7 +624,7 @@ const handleMail = async (config, m, delay) => {
   const urgent = t.category === "urgent" || earlier.some((a) => a.priority === "urgent");
   const tier = t.category === "complaint" || urgent || t.confidence < 0.6 ? "write" : "sort";
   if (urgent) {
-    doc.draft = await draftReply(config, mail, "Acknowledge with care, say the team is looking into it personally today. Promise nothing else.", tier);
+    doc.draft = await draftReply(config, mail, "Acknowledge with care and say you are handling it personally today. Promise nothing else.", tier);
     doc.needsTeam = true;
   } else {
     const { reply, answered } = await draftAnswer(config, mail, tier);
@@ -573,7 +636,7 @@ const handleMail = async (config, m, delay) => {
     status: urgent ? "needs_you" : "scheduled",
     priority: urgent ? "urgent" : "normal",
     title: urgent ? `Urgent: ${who}` : `Reply to ${who}`,
-    reason: doc.needsTeam && !urgent ? `${t.summary} The brief doesn't answer this, so the reply says the team will check.` : t.summary,
+    reason: doc.needsTeam && !urgent ? `${t.summary} Not clear enough to solve yet, so the reply asks them for details. You get a WhatsApp only if they write ${REPEAT_ALERT_AT}+ times.` : t.summary,
     effect: urgent ? "Waits for you. Read the mail before replying." : `Sends the drafted reply in ${t.language}.`,
     payload: { to: m.from.email, subject: m.subject, inReplyTo: m.messageId, draft: doc.draft },
     ref,
@@ -646,7 +709,7 @@ const handleProfileChange = async (config, doc, mail, t, ref, who, delay) => {
   }
   const member = `${user.basic.fullName} (${user.basic.uniqueId ?? user.basic.email})`;
   if (auto.length) {
-    doc.draft = await draftReply(config, mail, `Confirm we have updated their profile: ${auto.map((a) => `${a.label} is now ${a.value}`).join("; ")}.${manual.length ? " Say the other change they asked for will be done by the team shortly." : ""}`);
+    doc.draft = await draftReply(config, mail, `Confirm we have updated their profile: ${auto.map((a) => `${a.label} is now ${a.value}`).join("; ")}.${manual.length ? " Say the other change they asked for will be updated shortly." : ""}`);
     await propose("support", {
       type: "support.profile_change",
       title: `Update ${member}: ${auto.map((a) => `${a.label} → ${a.value}`).join(", ")}`,

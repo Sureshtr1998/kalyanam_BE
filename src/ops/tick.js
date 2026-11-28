@@ -4,7 +4,7 @@ import { metaConfigured, pageConfigured, resolvePage, igConfigured } from "./met
 import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
-import { refreshOpenRefunds, runSupportCycle } from "./support.js";
+import { redraftPassedReplies, refreshOpenRefunds, runSupportCycle } from "./support.js";
 import { runReminders } from "./reminders.js";
 import { setRampBases } from "./ads.js";
 import { runAlgorithmCycle, startAlgorithm } from "./algorithm.js";
@@ -271,6 +271,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await showInactivityHidden()
       .then((n) => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.unhideInactive20261128": new Date(), "migrations.unhideInactiveCount": n } }))
       .catch((err) => console.error("[ops] unhide inactive", err.message));
+  }
+  // Once: waiting replies that said "the team will check" are re-drafted to solve the problem (owner, 28 Nov 2026).
+  if (!config.migrations?.ownReplies20261128) {
+    await redraftPassedReplies()
+      .then((n) => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.ownReplies20261128": new Date(), "migrations.ownRepliesCount": n } }))
+      .catch((err) => console.error("[ops] redraft replies", err.message));
   }
   // Once: alerts that no longer apply leave Today.
   if (!config.migrations?.staleAlerts20261127) {
