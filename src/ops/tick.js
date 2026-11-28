@@ -285,6 +285,17 @@ const runTick = async ({ config, t, done, deadline, source }) => {
       .then((n) => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.ownReplies20261128b": new Date(), "migrations.ownReplies20261128c": new Date(), "migrations.ownRepliesCountB": n } }))
       .catch((err) => console.error("[ops] redraft replies", err.message));
   }
+  // Once: MSG91 auto-recharge refills below ₹100 (owner, 28 Nov 2026), so the old ₹500 alert line goes.
+  if (!config.migrations?.msg91Recharge20261128) {
+    await OpsConfig.updateOne(
+      { _id: "ops" },
+      { ...(config.tools?.msg91?.limit === 500 ? { $unset: { "tools.msg91.limit": 1 } } : {}), $set: { "migrations.msg91Recharge20261128": new Date() } }
+    ).catch((err) => console.error("[ops] msg91 limit", err.message));
+    await OpsAction.updateMany(
+      { type: "tools.msg91_low", status: "info", "payload.resolvedAt": null, createdAt: { $lt: new Date() } },
+      { $set: { "payload.resolvedAt": new Date() } }
+    ).catch(() => {});
+  }
   // Once: alerts that no longer apply leave Today.
   if (!config.migrations?.staleAlerts20261127) {
     await tidyStaleAlerts()

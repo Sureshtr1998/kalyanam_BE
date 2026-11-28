@@ -179,18 +179,27 @@ describe("idea tags and resolved alerts", () => {
     process.env.MSG91_AUTHKEY ||= "test-key";
     process.env.MSG91_WHATSAPP_SENDER_ID ||= "919999999999";
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { tools: {} } }, { upsert: true });
-    let balance = 405;
+    await OpsAction.deleteMany({ type: "tools.msg91_low" });
+    // Auto-recharge refills below ₹100, so ₹250 is normal: no alert.
+    let balance = 250.79;
     const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) =>
       String(url).includes("msg91")
         ? new Response(JSON.stringify({ status: "success", prepaid_balance: balance }), { status: 200 })
         : new Response("{}", { status: 500 })
     );
     await readTools();
+    expect(await OpsAction.exists({ type: "tools.msg91_low" })).toBeNull();
+
+    // Still under ₹100 at a reading: the recharge failed (empty wallet).
+    balance = 80;
+    await readTools();
     const alert = await OpsAction.findOne({ type: "tools.msg91_low" });
     expect(alert.priority).toBe("urgent");
+    expect(alert.title).toMatch(/auto-recharge didn't refill WhatsApp: ₹80 left/);
+    expect(alert.effect).toMatch(/Add Funds/);
     expect(alert.payload.resolvedAt ?? null).toBeNull();
 
-    balance = 704;
+    balance = 180;
     await readTools();
     expect((await OpsAction.findById(alert._id)).payload.resolvedAt).toBeTruthy();
     expect(await OpsAction.countDocuments({ type: "tools.msg91_low" })).toBe(1);

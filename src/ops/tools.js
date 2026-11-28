@@ -11,13 +11,16 @@ import razorpay from "../config/razorpay.js";
  * tab can project when a limit will be hit at the current growth rate.
  */
 
+/** MSG91 auto-recharge (owner, 28 Nov 2026): below this, the WhatsApp balance refills from the wallet. */
+export const MSG91_AUTO_RECHARGE_BELOW = 100;
+
 export const TOOLS = [
   { id: "vercel", name: "Vercel", purpose: "Hosts the website and backend, daily backup cron", metric: "Plan & bandwidth", unit: "GB", source: "manual", hint: "The free Hobby plan is for non-commercial use; a business site belongs on Pro." },
   { id: "mongodb", name: "MongoDB Atlas", purpose: "Database", metric: "Storage used", unit: "MB", source: "auto", defaultLimit: 512, hint: "Free M0 cluster: 512 MB, shared. Upgrade at ~80%." },
   { id: "upstash-redis", name: "Upstash Redis", purpose: "Rate limits and caching", metric: "Commands per day", unit: "commands", source: "manual" },
   { id: "qstash", name: "Upstash QStash", purpose: "Payment fulfilment queue, delayed jobs, the ops tick", metric: "Messages per day", unit: "messages", source: "manual", hint: "The ops tick adds ~96 messages a day (every 15 min)." },
   { id: "imagekit", name: "ImageKit", purpose: "Member photos and post images", metric: "Bandwidth this month", unit: "GB", source: "auto", defaultLimit: 20 },
-  { id: "msg91", name: "MSG91", purpose: "WhatsApp OTP and all transactional email", metric: "WhatsApp prepaid balance", unit: "₹", source: "auto", lowIsBad: true, defaultLimit: 500, hint: "Prepaid: OTPs stop when it is empty. Read daily; an urgent alert below the limit (default ₹500)." },
+  { id: "msg91", name: "MSG91", purpose: "WhatsApp OTP and all transactional email", metric: "WhatsApp prepaid balance", unit: "₹", source: "auto", lowIsBad: true, defaultLimit: MSG91_AUTO_RECHARGE_BELOW, hint: "Auto-recharge refills it from the MSG91 wallet whenever it drops below ₹100, so it only stays below that when the wallet is empty. Read daily; a Today card (no WhatsApp) if it does." },
   { id: "razorpay", name: "Razorpay", purpose: "Payments", metric: "Fees this month", unit: "₹", source: "auto", hint: "Razorpay's fee incl. GST on this month's captured payments (IST), read daily." },
   { id: "openai", name: "OpenAI (gpt-4.1)", purpose: "Astrology insights", metric: "Spend this month", unit: "$", source: "manual" },
   { id: "claude", name: "Claude API", purpose: "This Ops agent", metric: "Spend this month", unit: "$", source: "auto" },
@@ -116,16 +119,17 @@ export const readTools = async () => {
   config.markModified("tools");
   await config.save();
 
-  // OTPs (and so sign-ups) stop when the MSG91 wallet is empty: say so before it is.
+  // OTPs (and so sign-ups) stop when the balance runs out. Auto-recharge refills it below ₹100,
+  // so a reading under that line means the recharge failed: the wallet is empty.
   const m = tools.msg91;
-  const floor = m?.limit ?? 500;
+  const floor = m?.limit ?? MSG91_AUTO_RECHARGE_BELOW;
   if (m?.current != null && m.readAt && Date.now() - new Date(m.readAt).getTime() < 3600000 && m.current < floor) {
     await notice("tools", {
       type: "tools.msg91_low",
       priority: "urgent",
-      title: `MSG91 balance is low: ₹${Math.round(m.current)}`,
-      reason: `Below your ₹${floor} alert level. WhatsApp OTPs stop when it runs out, and families can't sign up.`,
-      effect: "Top up the MSG91 wallet (msg91.com → Wallet). Alert only.",
+      title: `MSG91 auto-recharge didn't refill WhatsApp: ₹${Math.round(m.current)} left`,
+      reason: `Auto-recharge tops the WhatsApp balance up whenever it drops below ₹${floor}, so it staying below means the MSG91 wallet is probably empty. WhatsApp OTPs stop when it runs out, and families can't sign up.`,
+      effect: "Add funds to the MSG91 wallet (MSG91 → WhatsApp → Billing → Add Funds); auto-recharge then refills the balance. Alert only.",
       payload: { dedupeKey: `msg91_low:${today()}` },
     }).catch(() => {});
   } else if (m?.current != null && m.current >= floor) {
