@@ -1417,6 +1417,7 @@ describe("WhatsApp alerts to the owner", () => {
     expect(call.system).toMatch(/referral code field is optional/);
     expect(call.system).toMatch(/screenshot/);
     expect(call.system).toMatch(/Never state how many profiles/);
+    expect(call.system).toMatch(/new site.*1 March 2027.*email them whenever someone sends them an interest/s);
     expect(call.prompt).toMatch(/Their account: Account .* Not verified yet/);
   });
 

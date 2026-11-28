@@ -193,6 +193,7 @@ export const SITE_FACTS = `How the site works:
 - OTP not received: wait a minute and use resend; check the number/email typed is correct and check the spam folder for the email OTP.
 - Matches, interests and contact details are on the Home and Matches pages after logging in. Interest credits are used to send interests and unlock contacts; more can be bought from the site.
 - A member can hide their profile from Account; logging in again shows it again.
+- Few or no matching profiles: we are a new site and new families join every day. The paid year only starts on 1 March 2027 (everyone who joins before then is covered until 29 February 2028), so nothing is lost by waiting. We email them whenever someone sends them an interest or accepts theirs, so they don't need to keep checking.
 - Prices: https://www.seetharamakalyana.in/pricing`;
 
 const replySystem = (brief) => `You are the person in charge of support at Seetha Rama Kalyana and you reply to members' emails yourself. There is no separate team behind you: you own every problem.
