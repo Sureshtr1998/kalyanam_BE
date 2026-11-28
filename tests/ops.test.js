@@ -2050,9 +2050,71 @@ describe("the monthly algorithm review (owner asked 28 Nov 2026)", () => {
     const page = await api().get("/api/manage/ops/algorithm").set("x-auth-token", t);
     expect(page.status).toBe(200);
     expect(page.body.rules.find((r) => r.key === "brakeRatio")).toMatchObject({ value: 2, min: 1.6, max: 2.5, group: "Mid-week brake" });
-    expect(page.body.fixed.join(" ")).toMatch(/all times/);
+    expect(page.body.ownerRules.join(" ")).toMatch(/all times/);
+    expect(page.body.ownerRules.join(" ")).toMatch(/Daily budget ceiling: ₹10,000 .*raises itself by 25%/);
+    expect(page.body.safetyDefaults.join(" ")).toMatch(/₹500 a day/);
+    expect(page.body.rules.some((r) => r.key === "losingCostPerMember")).toBe(false);
     expect((await api().post("/api/manage/ops/algorithm").set("x-auth-token", t).send({ everyDays: 7 })).status).toBe(400);
     const ok = await api().post("/api/manage/ops/algorithm").set("x-auth-token", t).send({ everyDays: 14 });
     expect(ok.body.everyDays).toBe(14);
+  });
+});
+
+describe("no top limit: the ceiling raises itself (owner, 28 Nov 2026)", () => {
+  const seed = async (spend, paid) => {
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    await AdSnapshot.deleteMany({ level: "account" });
+    await AdSnapshot.insertMany(Array.from({ length: 14 }, (_, i) => ({ level: "account", entityId: "acct", date: new Date(Date.now() - (i + 1) * 86400000).toISOString().slice(0, 10), spend, paid })));
+  };
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+
+  it("raises the ceiling 25% when budgets are near it and the account earns its target, once in 14 days", async () => {
+    const { raiseCeiling } = await import("../src/ops/ads.js");
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "limits.maxDailySpend": 14000 } }, { upsert: true });
+    await seed(10000, 50); // 50 × 1.2 × 285 / 10000 = 1.71x
+    const { getConfig } = await import("../src/ops/models.js");
+    let config = await getConfig();
+    expect(await raiseCeiling({ config, settings: config.ads, totalBudget: 13000, calib: 1.2, yesterday })).toBe(17500);
+    expect((await OpsConfig.findById("ops").lean()).limits.maxDailySpend).toBe(17500);
+    const n = await OpsAction.findOne({ type: "ads.ceiling_raised" });
+    expect(n.title).toMatch(/₹14,000 → ₹17,500/);
+    expect(n.payload.whatsapp).toBe(true);
+    config = await getConfig();
+    expect(await raiseCeiling({ config, settings: config.ads, totalBudget: 17000, calib: 1.2, yesterday })).toBeNull();
+  });
+
+  it("doesn't raise it far from the ceiling, below the target return, or when switched off", async () => {
+    const { raiseCeiling } = await import("../src/ops/ads.js");
+    const { getConfig } = await import("../src/ops/models.js");
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "limits.maxDailySpend": 14000, "ads.ceilingRaisedAt": null } }, { upsert: true });
+    const config = await getConfig();
+    await seed(10000, 50);
+    expect(await raiseCeiling({ config, settings: config.ads, totalBudget: 8000, calib: 1.2, yesterday })).toBeNull();
+    expect(await raiseCeiling({ config, settings: { ...config.ads, autoCeiling: false }, totalBudget: 13500, calib: 1.2, yesterday })).toBeNull();
+    await seed(10000, 30); // 1.03x
+    expect(await raiseCeiling({ config, settings: config.ads, totalBudget: 13500, calib: 1.2, yesterday })).toBeNull();
+  });
+});
+
+describe("ramp-up languages have no end date", () => {
+  it("WhatsApps the owner when one still costs > 1.5x the others for 4 weeks (nothing is cut)", async () => {
+    const { rampUpCheck } = await import("../src/ops/ads.js");
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    await AdSnapshot.deleteMany({ level: "campaign" });
+    const rows = [];
+    for (let i = 1; i <= 28; i++) {
+      const date = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      rows.push({ level: "campaign", entityId: "c_kn", date, spend: 1700, paid: 8 }, { level: "campaign", entityId: "c_hi", date, spend: 2500, paid: 5 }, { level: "campaign", entityId: "c_ta", date, spend: 1700, paid: 6 });
+    }
+    await AdSnapshot.insertMany(rows);
+    const units = [
+      { id: "c_kn", level: "campaign", language: "Kannada", rampUp: false },
+      { id: "c_hi", level: "campaign", language: "Hindi", rampUp: true },
+      { id: "c_ta", level: "campaign", language: "Tamil", rampUp: true },
+    ];
+    expect(await rampUpCheck({ units })).toBe(1);
+    const n = await OpsAction.findOne({ type: "ads.rampup_check" });
+    expect(n.title).toMatch(/^Hindi still costs 2\.4× the other languages after 4 weeks/);
+    expect(n.payload.whatsapp).toBe(true);
   });
 });

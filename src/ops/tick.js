@@ -299,6 +299,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.algorithmStart20261128": new Date() } }))
       .catch((err) => console.error("[ops] algorithm start", err.message));
   }
+  // Once: ramp-up languages have no end date (owner, 28 Nov 2026; 31 Jan 2027 was the agent's guess).
+  if (!config.migrations?.rampUpNoEnd20261128) {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "ads.rampUp.until": null, "migrations.rampUpNoEnd20261128": new Date() } }).catch((err) =>
+      console.error("[ops] ramp-up end", err.message)
+    );
+  }
   // Once: delivery-failure alerts from before bounces were handled are closed.
   if (!config.migrations?.bounceAlerts20261128) {
     await closeBounceAlerts()

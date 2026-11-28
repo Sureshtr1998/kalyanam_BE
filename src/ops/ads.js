@@ -1,6 +1,6 @@
 import User from "../models/User.js";
 import Broker from "../models/Broker.js";
-import { AdSnapshot, OpsAction, getConfig } from "./models.js";
+import { AdSnapshot, OpsAction, OpsConfig, getConfig } from "./models.js";
 import { RULES, adDecisions, applyTuning, brakes, calibration, decide, emergencies, languageCalibration, languageCoverage, languageOf, tagLanguage } from "./adsEngine.js";
 import { IDEAS, judgeNewAds } from "./adsIdeas.js";
 import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
@@ -374,6 +374,76 @@ const checkAttribution = async (today) => {
   return groups.size;
 };
 
+/**
+ * The daily budget ceiling raises itself (owner, 28 Nov 2026: no top limit,
+ * grow gradually): when active budgets reach 90% of it and the account earns
+ * the target return over 14 days, +25% (rounded up to ₹500), at most once in
+ * 14 days, with a WhatsApp. Raises themselves stay +10–15% and +25% a week.
+ */
+export const raiseCeiling = async ({ config, settings, totalBudget, calib, yesterday, now = Date.now() }) => {
+  if (settings.autoCeiling === false) return null;
+  const ceiling = Number(config.limits.maxDailySpend) || 0;
+  if (!ceiling || totalBudget < 0.9 * ceiling) return null;
+  if (settings.ceilingRaisedAt && now - new Date(settings.ceilingRaisedAt).getTime() < 14 * DAY) return null;
+  const rows = await AdSnapshot.find({ level: "account", date: { $lte: yesterday } }).sort({ date: -1 }).limit(14).lean();
+  const spend = rows.reduce((t, r) => t + (r.spend || 0), 0);
+  const paid = rows.reduce((t, r) => t + (r.paid || 0), 0);
+  const ret = spend ? (paid * calib * config.limits.netRevenuePerMember) / spend : 0;
+  if (rows.length < 14 || ret < config.limits.scaleRoas) return null;
+  const next = Math.ceil((ceiling * 1.25) / 500) * 500;
+  await OpsConfig.updateOne({ _id: "ops" }, { $set: { "limits.maxDailySpend": next, "ads.ceilingRaisedAt": new Date(now) } });
+  config.limits.maxDailySpend = next;
+  await notice("ads", {
+    type: "ads.ceiling_raised",
+    priority: "normal",
+    title: `Daily budget ceiling raised: ₹${ceiling.toLocaleString("en-IN")} → ₹${next.toLocaleString("en-IN")}`,
+    reason: `Budgets reached ${Math.round((totalBudget / ceiling) * 100)}% of the ceiling and the account earned ${ret.toFixed(2)}x over 14 days (target ${config.limits.scaleRoas}x).`,
+    effect: "Raises still go +10–15% at a time and at most +25% a week. To stop at a number, set it in Settings → Limits and turn off \"Raise the ceiling by itself\".",
+    payload: { dedupeKey: `ceiling:${next}`, whatsapp: true },
+  });
+  return next;
+};
+
+/**
+ * Ramp-up languages have no end date. A ramp-up language still costing more
+ * than 1.5× the other languages per member for 4 weeks in a row gets a
+ * WhatsApp to the owner, once a month. Nothing is cut.
+ */
+export const rampUpCheck = async ({ units, now = Date.now() }) => {
+  const camps = units.filter((u) => u.level === "campaign");
+  const ramp = camps.filter((u) => u.rampUp);
+  const others = camps.filter((u) => !u.rampUp);
+  if (!ramp.length || !others.length) return 0;
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const rows = await AdSnapshot.find({ level: "campaign", entityId: { $in: camps.map((u) => u.id) }, date: { $gte: day(now - 28 * DAY), $lt: day(now) } }).lean();
+  const cost = (ids, from, to) => {
+    const r = rows.filter((x) => ids.includes(x.entityId) && x.date >= day(from) && x.date < day(to));
+    const spend = r.reduce((t, x) => t + (x.spend || 0), 0);
+    const paid = r.reduce((t, x) => t + (x.paid || 0), 0);
+    return paid ? spend / paid : null;
+  };
+  const weeks = [0, 1, 2, 3].map((w) => [now - (w + 1) * 7 * DAY, now - w * 7 * DAY]);
+  let sent = 0;
+  for (const u of ramp) {
+    const ratios = weeks.map(([f, t]) => {
+      const mine = cost([u.id], f, t);
+      const ref = cost(others.map((o) => o.id), f, t);
+      return mine && ref ? mine / ref : null;
+    });
+    if (!ratios.every((r) => r != null && r > 1.5)) continue;
+    await notice("ads", {
+      type: "ads.rampup_check",
+      priority: "normal",
+      title: `${u.language} still costs ${ratios[0].toFixed(1)}× the other languages after 4 weeks`,
+      reason: `Cost per member vs the other languages, last 4 weeks (newest first): ${ratios.map((r) => `${r.toFixed(1)}×`).join(", ")}. It's a ramp-up language, so the agent doesn't cut it.`,
+      effect: "Your call: keep investing, or untick it under Ramp-up languages (Settings → Ads rules) so the normal rules apply.",
+      payload: { dedupeKey: `rampup_check:${u.id}:${day(now).slice(0, 7)}`, whatsapp: true },
+    });
+    sent++;
+  }
+  return sent;
+};
+
 export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {
   const config = await getConfig();
   applyTuning(config.algorithm?.tuning);
@@ -438,7 +508,12 @@ export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {
   if (midweek && settings.midweekRaises === false) return { snapshot: snap.today, decisions: 0, skipped: "Mid-week raises are switched off" };
   const calib = await accountCalibration(snap.yesterday);
   const units = await buildUnits(snap.structure, snap.yesterday, snap.tz, settings, calib);
-  if (!midweek) await checkAttribution(snap.today).catch(() => {});
+  if (!midweek) {
+    await checkAttribution(snap.today).catch(() => {});
+    await rampUpCheck({ units }).catch((err) => console.error("[ops] ramp-up check", err.message));
+    const total = units.reduce((t, u) => t + (u.dailyBudget || 0), 0);
+    await raiseCeiling({ config, settings, totalBudget: total, calib, yesterday: snap.yesterday }).catch((err) => console.error("[ops] ceiling", err.message));
+  }
   const result = decide({
     units,
     limits: config.limits,

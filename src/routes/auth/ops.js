@@ -729,7 +729,7 @@ router.post(
     }
     if (typeof brief === "string") config.brief = brief.slice(0, 8000);
     if (ads && typeof ads === "object") {
-      for (const k of ["rebalance", "pauseLosingAds", "newAdsets", "midweekRaises", "brake"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
+      for (const k of ["rebalance", "pauseLosingAds", "newAdsets", "midweekRaises", "brake", "autoCeiling"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
       if (ads.rampUp && typeof ads.rampUp === "object") {
         if (Array.isArray(ads.rampUp.languages)) {
           config.set("ads.rampUp.languages", ads.rampUp.languages.filter((l) => ["Kannada", "Telugu", "Tamil", "Hindi"].includes(l)));

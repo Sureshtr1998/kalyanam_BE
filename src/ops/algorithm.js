@@ -21,15 +21,35 @@ export const MAX_CHANGES = 3;
 /** Undone by itself if the cost per real member got this much worse in the 14 days after. */
 export const WORSE_RATIO = 1.15;
 
-/** The owner's rules, shown on the page, never tuned. */
-export const FIXED_RULES = [
-  "Ads run in Kannada, Telugu, Tamil and Hindi at all times; no language goes below ₹500/day or 2 running ads.",
-  "The total daily budget never goes above the cap in Settings → Limits.",
-  "Ramp-up languages (Settings → Ads rules) never give budget away and are never cut.",
-  "Every change gets 24 hours' notice with Cancel and Undo.",
-  "Budget steps stay under 20% so Meta's learning isn't reset.",
-  "Prepaid funds never decide anything.",
-  "Refunds and billing are never touched.",
+const inr = (n) => `₹${Math.round(Number(n) || 0).toLocaleString("en-IN")}`;
+
+/** The owner's own rules (what they said, and what they set in Settings), with today's figures. Never tuned. */
+export const ownerRules = (config) => {
+  const ads = adsSettings(config);
+  const ramp = ads.rampUp ?? {};
+  const until = ramp.until ? ` until ${new Date(ramp.until).toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", year: "numeric" })}` : "";
+  return [
+    "Ads run in Kannada, Telugu, Tamil and Hindi at all times.",
+    (ramp.languages ?? []).length
+      ? `${ramp.languages.join(", ")} are ramp-up languages${until}: never cut or moved away for costing more than the others.`
+      : "No ramp-up languages are set.",
+    "Prepaid funds never decide anything (Meta tops itself up).",
+    "The agent never refunds money.",
+    "Organic posts are never boosted or turned into ads.",
+    "One campaign per language, with Parents and Young as its ad sets; no NRI, outside-state or new-language ad sets unless you ask.",
+    "The Women safety campaign stays paused.",
+    "Campaigns that work don't get changes that restart Meta's learning.",
+    `Daily budget ceiling: ${inr(config.limits?.maxDailySpend)} (Settings → Limits)${ads.autoCeiling !== false ? ". It raises itself by 25% when budgets reach 90% of it and the account earns its target return; you get a WhatsApp." : "."}`,
+    `Losing line: ${inr(config.limits?.losingCostPerMember)} per real member (Settings → Limits).`,
+  ];
+};
+
+/** Safety defaults the agent added; not tuned by the review either. */
+export const SAFETY_DEFAULTS = [
+  "Every language keeps at least ₹500 a day and 2 running ads.",
+  "24 hours' notice before every change, with Cancel and Undo (new ads are checked with Meta in that time).",
+  "Budget steps stay under 20%, and the total grows at most +25% a week, so Meta's learning isn't reset.",
+  "Billing and payment settings are never touched.",
 ];
 
 const istDay = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -197,7 +217,7 @@ export const runAlgorithmReview = async ({ force = false, now = Date.now() } = {
     tier: "ads",
     system: `You review the rules of the Meta ads budget engine of Seetha Rama Kalyana, a Hindu matrimony site (one campaign per language: Kannada, Telugu, Tamil, Hindi; ₹351 a year per member; about ₹285 net per member).
 You may change only the numbers listed, inside their allowed range, at most ${MAX_CHANGES}, and only when the evidence clearly supports it: cite the numbers. Prefer no change: every change makes Meta re-learn and makes results harder to read. Look for decisions that didn't work (cost per member worse after a move or raise), rules that never fired or fired too often, decisions the owner cancelled, and languages stuck in the same state.
-Never propose anything about the owner's own rules: ${FIXED_RULES.join(" ")}
+Never propose anything about the owner's own rules or the safety defaults: ${[...ownerRules(config), ...SAFETY_DEFAULTS].join(" ")}
 Hindi, Telugu and Tamil started later and are expected to cost more for now; don't tune rules to cut them.`,
     prompt: `Current numbers:\n${current}\n\nEvidence:\n${evidence.text}`.slice(0, 14000),
     schema: SCHEMA,
@@ -351,7 +371,8 @@ export const algorithmState = async () => {
       max: s.max,
       changedIn: lastTouched(key),
     })),
-    fixed: FIXED_RULES,
+    ownerRules: ownerRules(config),
+    safetyDefaults: SAFETY_DEFAULTS,
     history: [...history].reverse().slice(0, 20),
     pending,
   };

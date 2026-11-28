@@ -98,7 +98,6 @@ export const TUNABLE = {
   stepUpPct: { where: "limits", group: "Winning and raises", label: "Size of one raise", unit: "%", def: 10, min: 5, max: 15, step: 1 },
   slipRatio: { where: "rules", group: "Winning and raises", label: "Hold a winner whose last 3 days fall below this share of the 4 before", unit: "×", min: 0.6, max: 0.9, step: 0.05 },
   maxUnitWeekPct: { where: "rules", group: "Winning and raises", label: "Most one language may grow in 7 days", unit: "%", min: 15, max: 30, step: 1 },
-  losingCostPerMember: { where: "limits", group: "Losing and cuts", label: "Real cost per member that counts as losing", unit: "₹", def: 420, min: 350, max: 500, step: 10 },
   loseHold14: { where: "rules", group: "Losing and cuts", label: "14-day confirmation of losing, as a share of that cost", unit: "×", min: 0.8, max: 1, step: 0.05 },
   stepDownPct: { where: "limits", group: "Losing and cuts", label: "Size of one cut", unit: "%", def: 15, min: 10, max: 20, step: 1 },
   donorRatio7: { where: "rules", group: "Moving money between languages", label: "A giver costs at least this × the average (7 days)", unit: "×", min: 1.1, max: 1.4, step: 0.05 },

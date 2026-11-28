@@ -73,8 +73,13 @@ const ConfigSchema = new Schema(
       // Ramp-up languages (owner, 28 Nov 2026): never give budget away or get cut; judged on their own trend.
       rampUp: {
         languages: { type: [String], default: ["Hindi", "Telugu", "Tamil"] },
-        until: { type: Date, default: () => new Date("2027-01-31T18:29:59Z") },
+        // No end date unless the owner sets one (owner, 28 Nov 2026).
+        until: { type: Date, default: null },
       },
+      // The daily budget ceiling raises itself (+25%) when budgets reach 90% of it and the account
+      // earns its target return (owner, 28 Nov 2026: no top limit, grow gradually).
+      autoCeiling: { type: Boolean, default: true },
+      ceilingRaisedAt: { type: Date, default: null },
       // A second raise on Thursdays for winners (3+ days after their last budget change).
       midweekRaises: { type: Boolean, default: true },
       // The mid-week brake (a −step when the last 3 days cost twice the usual).
