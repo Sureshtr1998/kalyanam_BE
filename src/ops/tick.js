@@ -6,6 +6,7 @@ import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
 import { refreshOpenRefunds, runSupportCycle } from "./support.js";
 import { runReminders } from "./reminders.js";
+import { runAlgorithmCycle, startAlgorithm } from "./algorithm.js";
 import { runCommentsCycle } from "./comments.js";
 import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
 import { readTools } from "./tools.js";
@@ -70,6 +71,13 @@ const JOBS = [
     run: () => runAdsPlanning(),
   },
   {
+    // Mondays 11:30: the 14-day check of the last algorithm update, then the monthly review when due.
+    name: "algorithmReview",
+    ready: (c) => c.modes.ads !== "off" && metaConfigured() && claudeConfigured(),
+    due: (last, t) => t.day === 1 && t.hour >= 11.5 && last?.date !== t.date,
+    run: () => runAlgorithmCycle(),
+  },
+  {
     name: "weeklyReview",
     ready: () => claudeConfigured(),
     due: (last, t) => t.day === 1 && t.hour >= 10.5 && last?.date !== t.date,
@@ -127,6 +135,7 @@ const JOB_LABEL = {
   adsSnapshot: "Reading Meta ads",
   adsWeekly: "Monday ad budgets",
   adsMidweek: "Thursday raises for winning languages",
+  algorithmReview: "The monthly algorithm review",
   adsPlan: "The ads batch (new and paused ads)",
   weeklyReview: "The weekly review",
   organicPlan: "Planning next week's posts",
@@ -143,7 +152,7 @@ const JOB_LABEL = {
  * run again for a week, so one failure is enough; jobs that run every 15 minutes
  * get 3 tries (45 min) so a passing hiccup stays quiet.
  */
-const ALERT_AFTER = { adsWeekly: 1, adsMidweek: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
+const ALERT_AFTER = { adsWeekly: 1, adsMidweek: 1, algorithmReview: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
 
 /** Alerts once when a job keeps failing; marks the alert resolved when it works again. */
 const watchFailures = async (name, prev, failed, error) => {
@@ -283,6 +292,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await scheduleMergeTest()
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergeTestScheduled20261128": new Date() } }))
       .catch((err) => console.error("[ops] merge test schedule", err.message));
+  }
+  // Once: the monthly algorithm review starts (first review 30 days from now, on a Monday).
+  if (!config.migrations?.algorithmStart20261128) {
+    await startAlgorithm()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.algorithmStart20261128": new Date() } }))
+      .catch((err) => console.error("[ops] algorithm start", err.message));
   }
   // Once: delivery-failure alerts from before bounces were handled are closed.
   if (!config.migrations?.bounceAlerts20261128) {

@@ -35,7 +35,7 @@ const recipients = async () => {
 
 /** Whether this action goes to the owner's WhatsApp. */
 export const wantsWhatsapp = (action) =>
-  action.priority === "urgent" && action.payload?.whatsapp !== false && !FUNDS_TYPES.has(action.type);
+  (action.priority === "urgent" || action.payload?.whatsapp === true) && action.payload?.whatsapp !== false && !FUNDS_TYPES.has(action.type);
 
 /** Repeats of one thing share a key: one member's mails, one failing job, one kind of failure. */
 export const whatsappKey = (action) =>

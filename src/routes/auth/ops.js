@@ -16,6 +16,7 @@ import { hinduCalendar } from "../../ops/hinduCalendar.js";
 import { langPath } from "../../ops/links.js";
 import { formatDraft } from "../../ops/support.js";
 import { reminderStats, stopReminders } from "../../ops/reminders.js";
+import { algorithmState, runAlgorithmReview, setReviewEvery } from "../../ops/algorithm.js";
 import razorpay from "../../config/razorpay.js";
 import { ALERT_TEMPLATE, ALERT_TEMPLATE_BODY, normalizeWhatsapp, sendWhatsappAlert, whatsappConfigured } from "../../ops/whatsapp.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
@@ -217,6 +218,30 @@ router.post(
     a.markModified("payload");
     await a.save();
     return res.json({ msg: `Refunded ₹${refund.amount != null ? refund.amount / 100 : list[i].amount} · ${refund.id}` });
+  })
+);
+
+/** Ops → Algorithm: the current rules, their bounds, history, and the next review. */
+router.get(
+  "/manage/ops/algorithm",
+  wrap(async (_req, res) => res.json(await algorithmState()))
+);
+
+router.post(
+  "/manage/ops/algorithm",
+  wrap(async (req, res) => {
+    await setReviewEvery(req.body?.everyDays);
+    return res.json({ ...(await algorithmState()), msg: "Saved" });
+  })
+);
+
+/** "Review now": runs the review today instead of waiting for its date. */
+router.post(
+  "/manage/ops/algorithm/review",
+  wrap(async (_req, res) => {
+    const r = await runAlgorithmReview({ force: true });
+    const msg = r.skipped ? r.skipped : r.changes ? `Update v${r.version} proposed: ${r.changes} change(s), applies by itself in 2 days` : "Reviewed: no change needed";
+    return res.json({ ...r, msg });
   })
 );
 

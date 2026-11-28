@@ -54,7 +54,7 @@ export const propose = async (module, fields, { dedupeKey } = {}) => {
     payload: { ...(fields.payload ?? {}), ...(key ? { dedupeKey: key } : {}), mode },
   });
   // Urgent alerts and urgent cards also go to the owner's email and WhatsApp (imported lazily: alerts.js reads models and mail).
-  if (fields.priority === "urgent") {
+  if (fields.priority === "urgent" || fields.payload?.whatsapp === true) {
     const { alertOwner } = await import("./alerts.js");
     await alertOwner(doc);
   }

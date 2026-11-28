@@ -2,7 +2,7 @@ import { AdSnapshot, OpsAction, getConfig } from "./models.js";
 import { ask } from "./claude.js";
 import { handle, handleUndo, hoursFromNow, notice, propose, undo } from "./actions.js";
 import { adsSettings, lastBatchAt, planAdPauses, unitStates } from "./ads.js";
-import { batchGate, languageOf } from "./adsEngine.js";
+import { applyTuning, batchGate, languageOf } from "./adsEngine.js";
 import { CLAIM_RULES, planCreativeRefresh, recreateAd, tiredAdset } from "./adsCreative.js";
 import {
   copyAdset,
@@ -137,6 +137,7 @@ Room under the daily cap: ₹${headroom}.`,
 /** Monday job: one batch of ad and ad-set changes, when the batch rules allow it. */
 export const runAdsPlanning = async () => {
   const config = await getConfig();
+  applyTuning(config.algorithm?.tuning);
   const settings = adsSettings(config);
   // The merge test's 14-day result, whether or not this is a batch week.
   await judgeMergeTest().catch((err) => console.error("[ops] merge test", err.message));

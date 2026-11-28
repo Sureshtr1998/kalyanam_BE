@@ -82,6 +82,57 @@ export const RULES = {
   brakeMinSpend3: 3000,
 };
 
+/** The engine's numbers as shipped; the monthly review's changes are applied on top (applyTuning). */
+export const DEFAULT_RULES = Object.freeze({ ...RULES });
+
+/**
+ * The numbers the monthly algorithm review may tune, with hard bounds it can
+ * never cross. `where`: RULES (rules), OpsConfig.limits (limits) or
+ * OpsConfig.ads (ads). The owner's own rules (all four languages, the daily
+ * cap, the ₹500 floor, ramp-up languages, notice periods, funds) are not here.
+ */
+export const TUNABLE = {
+  scaleRoas: { where: "limits", group: "Winning and raises", label: "Return needed before a language is raised", unit: "x", def: 1.5, min: 1.3, max: 2, step: 0.05 },
+  minPaidToWin: { where: "rules", group: "Winning and raises", label: "Members in 7 days needed to call a language winning", unit: "", min: 6, max: 15, step: 1 },
+  winHold14: { where: "rules", group: "Winning and raises", label: "14-day return needed, as a share of the target", unit: "×", min: 0.8, max: 1, step: 0.05 },
+  stepUpPct: { where: "limits", group: "Winning and raises", label: "Size of one raise", unit: "%", def: 10, min: 5, max: 15, step: 1 },
+  slipRatio: { where: "rules", group: "Winning and raises", label: "Hold a winner whose last 3 days fall below this share of the 4 before", unit: "×", min: 0.6, max: 0.9, step: 0.05 },
+  maxUnitWeekPct: { where: "rules", group: "Winning and raises", label: "Most one language may grow in 7 days", unit: "%", min: 15, max: 30, step: 1 },
+  losingCostPerMember: { where: "limits", group: "Losing and cuts", label: "Real cost per member that counts as losing", unit: "₹", def: 420, min: 350, max: 500, step: 10 },
+  loseHold14: { where: "rules", group: "Losing and cuts", label: "14-day confirmation of losing, as a share of that cost", unit: "×", min: 0.8, max: 1, step: 0.05 },
+  stepDownPct: { where: "limits", group: "Losing and cuts", label: "Size of one cut", unit: "%", def: 15, min: 10, max: 20, step: 1 },
+  donorRatio7: { where: "rules", group: "Moving money between languages", label: "A giver costs at least this × the average (7 days)", unit: "×", min: 1.1, max: 1.4, step: 0.05 },
+  donorRatio14: { where: "rules", group: "Moving money between languages", label: "…and at least this × the average (14 days)", unit: "×", min: 1.05, max: 1.25, step: 0.05 },
+  receiverRatio7: { where: "rules", group: "Moving money between languages", label: "A taker costs at most this × the average (7 days)", unit: "×", min: 0.75, max: 0.95, step: 0.05 },
+  receiverRatio14: { where: "rules", group: "Moving money between languages", label: "…and at most this × the average (14 days)", unit: "×", min: 0.8, max: 0.95, step: 0.05 },
+  moveShareDonor: { where: "rules", group: "Moving money between languages", label: "Most a giver gives in one move (share of its budget)", unit: "×", min: 0.1, max: 0.2, step: 0.01 },
+  moveShareReceiver: { where: "rules", group: "Moving money between languages", label: "Most a taker gets in one move (share of its budget)", unit: "×", min: 0.1, max: 0.2, step: 0.01 },
+  maxMoves: { where: "rules", group: "Moving money between languages", label: "Moves per week", unit: "", min: 1, max: 3, step: 1 },
+  frequencyTired: { where: "rules", group: "Tired ads", label: "Times people saw the ads in 7 days that counts as tired", unit: "", min: 2, max: 3, step: 0.1 },
+  ctrDrop: { where: "rules", group: "Tired ads", label: "…or click rate fell to this share of last week's", unit: "×", min: 0.7, max: 0.9, step: 0.05 },
+  cppRise: { where: "rules", group: "Tired ads", label: "…while cost per member rose to this × last week's", unit: "×", min: 1.1, max: 1.3, step: 0.05 },
+  brakeRatio: { where: "rules", group: "Mid-week brake", label: "Brake when the last 3 days cost this × the 14-day average", unit: "×", min: 1.6, max: 2.5, step: 0.1 },
+  brakeMinSpend3: { where: "rules", group: "Mid-week brake", label: "…with at least this much spent in those 3 days", unit: "₹", min: 2000, max: 5000, step: 250 },
+  adBadRatio: { where: "rules", group: "Pausing ads", label: "Pause an ad costing this × its campaign per member", unit: "×", min: 1.5, max: 2.5, step: 0.1 },
+  adMinSpend14: { where: "rules", group: "Pausing ads", label: "…once it has spent at least this in 14 days", unit: "₹", min: 1000, max: 3000, step: 250 },
+  batchEveryDays: { where: "ads", group: "Batches of ad changes", label: "Days between batches of new / paused ads", unit: "days", def: 14, min: 10, max: 21, step: 1 },
+};
+
+/** A value moved into its bounds and onto its step. */
+export const tuneValue = (key, v) => {
+  const s = TUNABLE[key];
+  const n = Math.min(s.max, Math.max(s.min, Number(v)));
+  return Number((Math.round(n / s.step) * s.step).toFixed(4));
+};
+
+/** Puts the reviewed numbers into RULES (back to the shipped values first). Called at the start of every ads run. */
+export const applyTuning = (tuning = {}) => {
+  for (const [k, v] of Object.entries(DEFAULT_RULES)) RULES[k] = v;
+  for (const [k, v] of Object.entries(tuning ?? {})) {
+    if (TUNABLE[k]?.where === "rules" && Number.isFinite(Number(v))) RULES[k] = tuneValue(k, v);
+  }
+};
+
 const LANGS = ["Kannada", "Telugu", "Tamil", "Hindi", "Marathi", "English"];
 
 /**

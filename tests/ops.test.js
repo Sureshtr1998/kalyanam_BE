@@ -1947,3 +1947,112 @@ describe("the agent's own ideas follow the budget rules", () => {
     expect(await recentBudgetChange("c_z")).toBe(true);
   });
 });
+
+describe("the monthly algorithm review (owner asked 28 Nov 2026)", () => {
+  const withReview = async (out, fn) => {
+    const { ask } = await import("../src/ops/claude.js");
+    const original = ask.getMockImplementation();
+    ask.mockImplementation(async (o) => (o.task === "ads.algorithm" ? out : original(o)));
+    try {
+      return await fn();
+    } finally {
+      ask.mockImplementation(original);
+    }
+  };
+
+  it("tunes only listed numbers, inside their bounds, at most half the range at once, at most 3", async () => {
+    const { applyTuning, RULES, DEFAULT_RULES } = await import("../src/ops/adsEngine.js");
+    const { validateChanges } = await import("../src/ops/algorithm.js");
+    const config = { limits: { stepUpPct: 10, scaleRoas: 1.5, losingCostPerMember: 420, stepDownPct: 15 }, ads: {}, algorithm: {} };
+    const out = validateChanges(config, [
+      { key: "maxDailySpend", to: 50000, reason: "x" },
+      { key: "brakeRatio", to: 9, reason: "too strict" },
+      { key: "stepUpPct", to: 10, reason: "same" },
+      { key: "donorRatio7", to: 1.3, reason: "a" },
+      { key: "adBadRatio", to: 2.2, reason: "b" },
+      { key: "frequencyTired", to: 2.8, reason: "c" },
+    ]);
+    expect(out.map((c) => c.key)).toEqual(["brakeRatio", "donorRatio7", "adBadRatio"]);
+    expect(out[0]).toMatchObject({ from: 2, to: 2.5 });
+    applyTuning({ brakeRatio: 2.3, maxDailySpend: 99999, minBudget: 1 });
+    expect(RULES.brakeRatio).toBe(2.3);
+    expect(RULES.minBudget).toBe(DEFAULT_RULES.minBudget);
+    applyTuning({});
+    expect(RULES.brakeRatio).toBe(DEFAULT_RULES.brakeRatio);
+  });
+
+  it("proposes an update with 2 days' notice, applies it, and Undo puts the old numbers back", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live" } }, { upsert: true });
+    const { runAlgorithmReview } = await import("../src/ops/algorithm.js");
+    const { applyTuning, RULES } = await import("../src/ops/adsEngine.js");
+    const r = await withReview(
+      { summary: "Raises fired once; brakes never. Two numbers are too strict.", changes: [{ key: "stepUpPct", to: 12, reason: "Kannada won 3 weeks running at +10%.", expected: "More members at the same cost." }, { key: "brakeRatio", to: 1.8, reason: "Telugu doubled once and wasn't braked.", expected: "Less waste." }] },
+      () => runAlgorithmReview({ force: true })
+    );
+    expect(r).toMatchObject({ changes: 2, version: 2 });
+    const card = await OpsAction.findOne({ type: "ads.algorithm_update" });
+    expect(card.status).toBe("scheduled");
+    expect((card.runAt.getTime() - Date.now()) / 3600000).toBeGreaterThan(47.9);
+    expect(card.payload.whatsapp).toBe(true);
+    expect(card.reason).toMatch(/Size of one raise: 10% → 12%/);
+    expect((await runAlgorithmReview({ force: true })).skipped).toMatch(/already waiting/);
+
+    await execute(card._id);
+    let cfg = (await OpsConfig.findById("ops").lean());
+    expect(cfg.limits.stepUpPct).toBe(12);
+    expect(cfg.algorithm).toMatchObject({ version: 2, tuning: { brakeRatio: 1.8 } });
+    applyTuning(cfg.algorithm.tuning);
+    expect(RULES.brakeRatio).toBe(1.8);
+
+    const res = await api().post(`/api/manage/ops/actions/${card._id}/undo`).set("x-auth-token", tokenFor(await createUser({ rest: { isAdmin: true } })));
+    expect(res.status).toBe(200);
+    cfg = (await OpsConfig.findById("ops").lean());
+    expect(cfg.limits.stepUpPct).toBe(10);
+    expect(cfg.algorithm.tuning.brakeRatio).toBe(2);
+    expect(cfg.algorithm.version).toBe(3);
+    expect(cfg.algorithm.history.find((h) => h.kind === "update").reverted).toBe(true);
+    applyTuning({});
+  });
+
+  it("says 'no change' when the evidence doesn't support one, and waits for its date otherwise", async () => {
+    const { runAlgorithmReview } = await import("../src/ops/algorithm.js");
+    await withReview({ summary: "Everything worked as intended.", changes: [] }, () => runAlgorithmReview({ force: true }));
+    expect((await OpsAction.findOne({ type: "ads.algorithm_review" })).title).toBe("Algorithm review: no change needed");
+    const cfg = await OpsConfig.findById("ops").lean();
+    const next = new Date(cfg.algorithm.nextReviewAt);
+    const ist = new Date(next.getTime() + 5.5 * 3600000);
+    expect([ist.getUTCDay(), ist.getUTCHours(), ist.getUTCMinutes()]).toEqual([1, 11, 30]);
+    expect((await runAlgorithmReview()).skipped).toMatch(/Next review on/);
+  });
+
+  it("undoes its own update 14 days later if the cost per real member rose 15%+", async () => {
+    const { judgeAlgorithmUpdate } = await import("../src/ops/algorithm.js");
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    const at = Date.now() - 15 * 86400000;
+    const card = await OpsAction.create({ module: "ads", type: "ads.algorithm_update", status: "done", ranAt: new Date(at), title: "v2", payload: { changes: [{ key: "stepUpPct", from: 10, to: 12 }] } });
+    await OpsConfig.updateOne(
+      { _id: "ops" },
+      { $set: { "limits.stepUpPct": 12, algorithm: { version: 2, tuning: {}, history: [{ version: 2, kind: "update", at: new Date(at), actionId: String(card._id), changes: [{ key: "stepUpPct", from: 10, to: 12 }], baseline: { realCpp: 200, joined: 100 } }] } } },
+      { upsert: true }
+    );
+    await AdSnapshot.deleteMany({ level: "account" });
+    const day = (n) => new Date(at + n * 86400000).toISOString().slice(0, 10);
+    await AdSnapshot.insertMany(Array.from({ length: 14 }, (_, i) => ({ level: "account", entityId: "acct", date: day(i), spend: 2600, joined: 10 })));
+    expect(await judgeAlgorithmUpdate()).toBe("undone");
+    const cfg = await OpsConfig.findById("ops").lean();
+    expect(cfg.limits.stepUpPct).toBe(10);
+    expect((await OpsAction.findOne({ type: "ads.algorithm_result" })).title).toMatch(/v2 undone: cost per real member rose 30%/);
+    expect(await judgeAlgorithmUpdate()).toBeNull();
+  });
+
+  it("shows the page and switches between 14 and 30 days", async () => {
+    const t = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    const page = await api().get("/api/manage/ops/algorithm").set("x-auth-token", t);
+    expect(page.status).toBe(200);
+    expect(page.body.rules.find((r) => r.key === "brakeRatio")).toMatchObject({ value: 2, min: 1.6, max: 2.5, group: "Mid-week brake" });
+    expect(page.body.fixed.join(" ")).toMatch(/all times/);
+    expect((await api().post("/api/manage/ops/algorithm").set("x-auth-token", t).send({ everyDays: 7 })).status).toBe(400);
+    const ok = await api().post("/api/manage/ops/algorithm").set("x-auth-token", t).send({ everyDays: 14 });
+    expect(ok.body.everyDays).toBe(14);
+  });
+});

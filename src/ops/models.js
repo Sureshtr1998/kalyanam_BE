@@ -90,6 +90,9 @@ const ConfigSchema = new Schema(
       lastError: { type: String, default: "" },
       lastErrorAt: { type: Date, default: null },
     },
+    // The monthly algorithm review (src/ops/algorithm.js): { version, everyDays, nextReviewAt,
+    // lastReviewAt, lastSummary, tuning: { RULES key: value }, history: [...] }.
+    algorithm: { type: Schema.Types.Mixed, default: {} },
     // Vital flows (e.g. registration OTPs): consecutive failures, so a breakage is noticed.
     health: { type: Schema.Types.Mixed, default: {} },
     // Monthly targets, e.g. [{ month: "2026-12", members: 600, revenue: 210000, spend: 200000 }].

@@ -1,7 +1,7 @@
 import User from "../models/User.js";
 import Broker from "../models/Broker.js";
 import { AdSnapshot, OpsAction, getConfig } from "./models.js";
-import { RULES, adDecisions, brakes, calibration, decide, emergencies, languageCalibration, languageCoverage, languageOf, tagLanguage } from "./adsEngine.js";
+import { RULES, adDecisions, applyTuning, brakes, calibration, decide, emergencies, languageCalibration, languageCoverage, languageOf, tagLanguage } from "./adsEngine.js";
 import { IDEAS, judgeNewAds } from "./adsIdeas.js";
 import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
 import {
@@ -376,6 +376,7 @@ const checkAttribution = async (today) => {
 
 export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {
   const config = await getConfig();
+  applyTuning(config.algorithm?.tuning);
   const settings = adsSettings(config);
   const snap = await takeSnapshot();
   const activeCampaigns = snap.structure.campaigns.filter((c) => c.status === "ACTIVE");
@@ -476,6 +477,7 @@ export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {
 /** Current state of every unit, for the Ads screen and the planners (no Meta call). */
 export const unitStates = async () => {
   const config = await getConfig();
+  applyTuning(config.algorithm?.tuning);
   const latest = await AdSnapshot.findOne({ level: "account" }).sort({ date: -1 }).lean();
   if (!latest) return [];
   const yesterday = new Date(Date.parse(latest.date) - DAY).toISOString().slice(0, 10);
