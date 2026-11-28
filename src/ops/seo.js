@@ -168,7 +168,14 @@ const inspectAll = async (urls, n = 6) => {
 export const runSeoIndex = async () => {
   const urls = Object.keys(await liveSitemap()).filter((u) => /\/blog(\/|$)/.test(u));
   const results = await inspectAll(urls);
-  if (results.length && results.every((r) => r.indexed === null)) throw new Error(`URL inspection failed: ${results[0].state}`);
+  if (results.length && results.every((r) => r.indexed === null)) {
+    const why = results[0].state;
+    throw new Error(
+      /permission|forbidden|403|not authorized/i.test(why)
+        ? `Google refused the indexing check (${why}). Fix: Search Console → Settings → Users and permissions → ops-agent → change Restricted to Full.`
+        : `Google's indexing check failed: ${why}`
+    );
+  }
   await OpsConfig.updateOne({ _id: "ops" }, { $set: { seoIndex: { at: new Date(), results } } });
   return { checked: results.length, indexed: results.filter((r) => r.indexed).length };
 };
