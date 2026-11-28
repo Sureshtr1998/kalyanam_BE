@@ -22,8 +22,12 @@ const HOUR = 3600000;
 const WHATSAPP_REPEAT_MS = 12 * HOUR;
 /** A flood (something looping) stops at this many WhatsApps a day; email still goes. */
 export const WHATSAPP_PER_DAY = 20;
-/** Low-balance alerts: the owner tops these up on their own. */
-const FUNDS_TYPES = new Set(["tools.msg91_low", "ads.funds_low"]);
+/**
+ * Low-balance alerts the owner watches on their own (no WhatsApp). MSG91 is not
+ * one: its alerts fire only when auto-recharge failed or sends are refused,
+ * and go to WhatsApp at once (owner, 28 Nov 2026).
+ */
+const FUNDS_TYPES = new Set(["ads.funds_low"]);
 
 const recipients = async () => {
   const config = await getConfig();

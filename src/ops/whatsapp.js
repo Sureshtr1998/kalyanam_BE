@@ -1,4 +1,5 @@
 import axios from "axios";
+import { watchMsg91Failure } from "./sendHealth.js";
 
 /*
  * WhatsApp alerts to the owner's own phone, sent through the same MSG91
@@ -36,10 +37,20 @@ export const templateText = (s, max) => {
  * body_1 / header_1) to an Indian mobile. Throws when MSG91 refuses it.
  * @param {{ to: string, name: string, language: string, components?: object }} p
  */
-export const sendWhatsappTemplate = async ({ to, name, language, components = {} }) => {
+export const sendWhatsappTemplate = async ({ to, name, language, components = {}, watch = true }) => {
   if (!whatsappConfigured()) throw new Error("MSG91 WhatsApp isn't set up on the server");
   const number = normalizeWhatsapp(to);
   if (!number) throw new Error("Not a 10-digit Indian mobile");
+  try {
+    return await postTemplate({ number, name, language, components });
+  } catch (err) {
+    // Out of WhatsApp balance: the owner hears at once. Not for the owner's own alerts (no loop).
+    if (watch) await watchMsg91Failure("whatsapp", err);
+    throw err;
+  }
+};
+
+const postTemplate = async ({ number, name, language, components }) => {
   const { data } = await axios.post(
     process.env.MSG91_WHATSAPP_API,
     {
@@ -75,6 +86,7 @@ export const sendWhatsappAlert = async ({ to, title, detail }) => {
     to,
     name: ALERT_TEMPLATE.name,
     language: ALERT_TEMPLATE.language,
+    watch: false,
     components: {
       body_1: { type: "text", value: templateText(title, 200) },
       body_2: { type: "text", value: templateText(detail, 700) },

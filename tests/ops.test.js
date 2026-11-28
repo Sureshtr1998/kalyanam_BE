@@ -1319,12 +1319,61 @@ describe("WhatsApp alerts to the owner", () => {
     expect(components.body_2.value).toMatch(/KN-09: Personal attributes Alert only\./);
     expect((await OpsAction.findOne({ type: "ads.disapproved" })).payload.whatsappAt).toBeTruthy();
 
-    // Not urgent, a low balance, a funds-caused alert, or the same thing again within 12 h: no WhatsApp.
+    // Not urgent, Meta prepaid funds, a funds-caused alert, or the same thing again within 12 h: no WhatsApp.
     await notice("ads", { type: "ads.issues", priority: "normal", title: "1 ad has delivery issues", payload: { dedupeKey: "i1" } });
-    await notice("tools", { type: "tools.msg91_low", priority: "urgent", title: "MSG91 balance is ₹300", payload: { dedupeKey: "m1" } });
+    await notice("ads", { type: "ads.funds_low", priority: "urgent", title: "Meta funds ₹300", payload: { dedupeKey: "m1" } });
     await notice("ads", { type: "ads.account_status", priority: "urgent", title: "Meta ad account is unsettled", payload: { dedupeKey: "a1", whatsapp: false } });
     await notice("ads", { type: "ads.disapproved", priority: "urgent", title: "2 ads disapproved by Meta", reason: "again", payload: { dedupeKey: "d2", whatsappKey: "d1" } });
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("MSG91 refusing a send for balance reaches WhatsApp at once; other refusals and the alert's own send don't", async () => {
+    const { default: axios } = await import("axios");
+    const { isBalanceError, watchMsg91Failure } = await import("../src/ops/sendHealth.js");
+    const { sendWhatsappTemplate } = await import("../src/ops/whatsapp.js");
+    expect(isBalanceError({ response: { data: { message: "Insufficient balance in your wallet" } } })).toBe(true);
+    expect(isBalanceError({ response: { status: 402, data: {} } })).toBe(true);
+    expect(isBalanceError(new Error("Not a 10-digit Indian mobile"))).toBe(false);
+    expect(isBalanceError({ response: { data: { message: "Template not found" } } })).toBe(false);
+
+    // A reminder WhatsApp refused for balance: urgent card, WhatsApp to the owner at once.
+    send.mockReset();
+    send.mockImplementation(async (url, body) => {
+      if (body?.payload?.template?.name === "registration_link") return { data: { hasError: true, errors: "Insufficient balance, please recharge" } };
+      return { data: { status: "success", hasError: false } };
+    });
+    await expect(sendWhatsappTemplate({ to: "9876500002", name: "registration_link", language: "en" })).rejects.toThrow(/Insufficient balance/);
+    const card = await OpsAction.findOne({ type: "tools.msg91_failing" });
+    expect(card.priority).toBe("urgent");
+    expect(card.title).toMatch(/refusing WhatsApp/);
+    expect(card.payload.whatsappAt).toBeTruthy();
+    expect(send.mock.calls.at(-1)[1].payload.template.to_and_components[0].components.body_1.value).toMatch(/refusing WhatsApp/);
+
+    // A second refusal the same day: no second card or WhatsApp.
+    const calls = send.mock.calls.length;
+    await watchMsg91Failure("whatsapp", new Error("Insufficient balance"));
+    expect(await OpsAction.countDocuments({ type: "tools.msg91_failing" })).toBe(1);
+    expect(send.mock.calls.length).toBe(calls);
+
+    // Email credits out: its own card. A wrong-template refusal: nothing.
+    await watchMsg91Failure("email", { response: { data: { message: "Email credits exhausted" } } });
+    expect((await OpsAction.findOne({ type: "tools.msg91_failing", title: /emails/ })).payload.whatsappAt).toBeTruthy();
+    await watchMsg91Failure("whatsapp", new Error("Template not found"));
+    expect(await OpsAction.countDocuments({ type: "tools.msg91_failing" })).toBe(2);
+
+    // The owner's own alert failing doesn't raise another card (no loop).
+    send.mockImplementation(async () => ({ data: { hasError: true, errors: "Insufficient balance" } }));
+    await OpsAction.deleteMany({ type: "tools.msg91_failing" });
+    const { sendWhatsappAlert } = await import("../src/ops/whatsapp.js");
+    await expect(sendWhatsappAlert({ to: OWNER, title: "x", detail: "y" })).rejects.toThrow();
+    expect(await OpsAction.exists({ type: "tools.msg91_failing" })).toBeNull();
+    void axios;
+  });
+
+  it("the MSG91 auto-recharge alert goes to WhatsApp too", async () => {
+    const { notice } = await import("../src/ops/actions.js");
+    await notice("tools", { type: "tools.msg91_low", priority: "urgent", title: "MSG91 auto-recharge didn't refill WhatsApp: ₹80 left", payload: { dedupeKey: "low-1" } });
+    expect(sentTitles()).toEqual(["MSG91 auto-recharge didn't refill WhatsApp: ₹80 left"]);
   });
 
   it("keeps Meta payment problems and prepaid-funds stalls off WhatsApp", async () => {

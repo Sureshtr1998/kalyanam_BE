@@ -1,5 +1,6 @@
 import axios from "axios";
 import { SUPPORT_EMAIL } from "../utils/constants.js";
+import { watchMsg91Failure } from "../ops/sendHealth.js";
 /**
  * Send email using MSG91 template
  * @param {Object} options
@@ -37,12 +38,17 @@ const sendEmail = async ({ to, template_id, variables = {} }) => {
       }
     );
 
+    // MSG91 can refuse inside a 200 reply; a balance refusal still reaches the owner.
+    const d = response.data;
+    if (d?.hasError || d?.status === "fail" || d?.type === "error") await watchMsg91Failure("email", new Error(JSON.stringify(d).slice(0, 300)));
     return response.data;
   } catch (error) {
     console.error(
       "❌ MSG91 Email error:",
       error.response?.data || error.message
     );
+    // Out of email credits: the owner hears at once (Ops → sendHealth.js).
+    await watchMsg91Failure("email", error);
     throw error;
   }
 };

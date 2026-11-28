@@ -1,4 +1,5 @@
 import axios from "axios";
+import { watchMsg91Failure } from "../ops/sendHealth.js";
 
 const sendWhatsappOTP = async (mobile, mobileOtp) => {
   try {
@@ -41,12 +42,17 @@ const sendWhatsappOTP = async (mobile, mobileOtp) => {
       },
     });
 
+    // MSG91 can refuse inside a 200 reply; a balance refusal still reaches the owner.
+    const d = response.data;
+    if (d?.hasError || d?.status === "fail" || d?.type === "error") await watchMsg91Failure("whatsapp", new Error(JSON.stringify(d).slice(0, 300)));
     return response.data;
   } catch (error) {
     console.error(
       "Error sending WhatsApp OTP:",
       error.response?.data || error.message
     );
+    // Out of WhatsApp balance: the owner hears at once (Ops → sendHealth.js).
+    await watchMsg91Failure("whatsapp", error);
     throw error;
   }
 };
