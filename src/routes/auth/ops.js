@@ -704,7 +704,17 @@ router.post(
     }
     if (typeof brief === "string") config.brief = brief.slice(0, 8000);
     if (ads && typeof ads === "object") {
-      for (const k of ["rebalance", "pauseLosingAds", "newAdsets"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
+      for (const k of ["rebalance", "pauseLosingAds", "newAdsets", "midweekRaises", "brake"]) if (typeof ads[k] === "boolean") config.set(`ads.${k}`, ads[k]);
+      if (ads.rampUp && typeof ads.rampUp === "object") {
+        if (Array.isArray(ads.rampUp.languages)) {
+          config.set("ads.rampUp.languages", ads.rampUp.languages.filter((l) => ["Kannada", "Telugu", "Tamil", "Hindi"].includes(l)));
+        }
+        if ("until" in ads.rampUp) {
+          const d = ads.rampUp.until ? new Date(ads.rampUp.until) : null;
+          if (d && Number.isNaN(d.getTime())) return res.status(400).json({ msg: "Ramp-up date isn't a date" });
+          config.set("ads.rampUp.until", d);
+        }
+      }
       for (const k of ["batchEveryDays"]) {
         if (ads[k] != null && Number.isFinite(Number(ads[k])) && Number(ads[k]) >= 0) config.set(`ads.${k}`, Number(ads[k]));
       }

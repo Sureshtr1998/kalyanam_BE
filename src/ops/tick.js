@@ -11,7 +11,7 @@ import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settleP
 import { readTools } from "./tools.js";
 import { runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
-import { runAdsPlanning } from "./adsGrowth.js";
+import { proposeMergeTest, runAdsPlanning } from "./adsGrowth.js";
 import { preflightLaunches, tagIdeaCreatives } from "./adsCreative.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
@@ -48,6 +48,13 @@ const JOBS = [
     ready: (c) => c.modes.ads !== "off" && metaConfigured(),
     due: (last, t) => t.day === 1 && t.hour >= 9.5 && last?.date !== t.date,
     run: () => runAdsCycle({ weekly: true }),
+  },
+  {
+    // Thursday: a second raise for winners (3+ days after Monday's step). No moves or cuts.
+    name: "adsMidweek",
+    ready: (c) => c.modes.ads !== "off" && metaConfigured(),
+    due: (last, t) => t.day === 4 && t.hour >= 9.5 && last?.date !== t.date,
+    run: () => runAdsCycle({ weekly: true, midweek: true }),
   },
   {
     name: "adsSnapshot",
@@ -119,6 +126,7 @@ const JOB_LABEL = {
   comments: "Reading Facebook and Instagram comments",
   adsSnapshot: "Reading Meta ads",
   adsWeekly: "Monday ad budgets",
+  adsMidweek: "Thursday raises for winning languages",
   adsPlan: "The ads batch (new and paused ads)",
   weeklyReview: "The weekly review",
   organicPlan: "Planning next week's posts",
@@ -135,7 +143,7 @@ const JOB_LABEL = {
  * run again for a week, so one failure is enough; jobs that run every 15 minutes
  * get 3 tries (45 min) so a passing hiccup stays quiet.
  */
-const ALERT_AFTER = { adsWeekly: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
+const ALERT_AFTER = { adsWeekly: 1, adsMidweek: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
 
 /** Alerts once when a job keeps failing; marks the alert resolved when it works again. */
 const watchFailures = async (name, prev, failed, error) => {
@@ -263,6 +271,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await refreshOpenRefunds()
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.refundCards20261127": new Date() } }))
       .catch((err) => console.error("[ops] refund cards", err.message));
+  }
+  // Once: the merged ad set test card (owner asked 28 Nov 2026); it waits for the owner's OK.
+  if (!config.migrations?.mergeTestCard20261128 && config.modes.ads === "live" && metaConfigured()) {
+    await proposeMergeTest()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.mergeTestCard20261128": new Date() } }))
+      .catch((err) => console.error("[ops] merge test card", err.message));
   }
   // Once: delivery-failure alerts from before bounces were handled are closed.
   if (!config.migrations?.bounceAlerts20261128) {

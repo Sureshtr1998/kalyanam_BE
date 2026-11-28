@@ -52,6 +52,13 @@ vi.mock("../src/ops/meta.js", async (orig) => ({
   deleteFacebookPost: metaCalls.deleteFacebookPost,
   graphDelete: metaCalls.graphDelete,
   graphGet: metaCalls.graphGet,
+  copyAdset: vi.fn(async () => "adset_merged"),
+  fetchAdset: vi.fn(async (id) => ({
+    id,
+    targeting: id === "s_hi_young"
+      ? { age_min: 24, age_max: 34, geo_locations: { regions: [{ key: "UP" }], cities: [{ key: "Delhi" }] } }
+      : { age_min: 45, age_max: 65, geo_locations: { regions: [{ key: "UP" }, { key: "MP" }] }, targeting_automation: { advantage_audience: 1 } },
+  })),
   fetchPostPerformance: vi.fn(async () => metaRead.performance),
   fetchAds: vi.fn(async () => metaRead.ads ?? [{ id: "ad_kn1", name: "KN-09 Why351", adset_id: "s_kn", campaign_id: "c_kn", effective_status: "ACTIVE" }]),
   fetchStructure: vi.fn(async () => metaRead.structure),
@@ -1819,4 +1826,72 @@ describe("bounces and closing alerts", () => {
     expect((await OpsAction.findById(old._id)).payload.resolvedAt).toBeTruthy();
   });
 
+});
+
+describe("merged ad set test (owner asked 28 Nov 2026)", () => {
+  const structure = {
+    campaigns: [{ id: "c_hi", name: "SRK | Hindi", status: "ACTIVE", dailyBudget: 2500 }],
+    adsets: [
+      { id: "s_hi_parents", campaignId: "c_hi", name: "Hindi | North India | Parents 45-65", status: "ACTIVE" },
+      { id: "s_hi_young", campaignId: "c_hi", name: "Hindi | North India + 4 cities | Young 24-34", status: "ACTIVE" },
+    ],
+  };
+
+  it("waits for the owner, then merges with the best ads, pauses the old two, and undoes", async () => {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.ads": "live" } }, { upsert: true });
+    metaRead.structure = structure;
+    metaRead.ads = [
+      { id: "ad_p1", name: "HI-07", adset_id: "s_hi_parents", campaign_id: "c_hi", effective_status: "ACTIVE" },
+      { id: "ad_y1", name: "HI-08", adset_id: "s_hi_young", campaign_id: "c_hi", effective_status: "ACTIVE" },
+    ];
+    const { proposeMergeTest, mergeTargeting } = await import("../src/ops/adsGrowth.js");
+    const card = await proposeMergeTest();
+    expect(card).toMatchObject({ status: "needs_you", type: "ads.merge_test" });
+    expect(await proposeMergeTest()).toBeNull();
+
+    const meta = await import("../src/ops/meta.js");
+    metaCalls.setStatus.mockClear();
+    const before = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(Buffer.from("jpeg")));
+    try {
+      await execute(card._id, "SRK0001");
+    } finally {
+      globalThis.fetch = before;
+    }
+    const done = await OpsAction.findById(card._id);
+    expect(done.status).toBe("done");
+    expect(meta.copyAdset).toHaveBeenCalledWith("s_hi_parents");
+    const targeting = meta.graphPost.mock.calls.find(([id]) => id === "adset_merged")[1].targeting;
+    expect(targeting).toMatchObject({ age_min: 24, age_max: 65 });
+    expect(targeting.geo_locations.regions.map((r) => r.key)).toEqual(["UP", "MP"]);
+    expect(targeting.geo_locations.cities.map((r) => r.key)).toEqual(["Delhi"]);
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("adset_merged", "ACTIVE");
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("s_hi_parents", "PAUSED");
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("s_hi_young", "PAUSED");
+    expect(mergeTargeting({ age_min: 30 }, { age_min: 24 }).age_min).toBe(24);
+
+    metaCalls.setStatus.mockClear();
+    const res = await api().post(`/api/manage/ops/actions/${card._id}/undo`).set("x-auth-token", tokenFor(await createUser({ rest: { isAdmin: true } })));
+    expect(res.status).toBe(200);
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("s_hi_parents", "ACTIVE");
+    expect(metaCalls.setStatus).toHaveBeenCalledWith("adset_merged", "PAUSED");
+    metaRead.ads = null;
+  });
+
+  it("reports the result 14 days later, once", async () => {
+    const { judgeMergeTest } = await import("../src/ops/adsGrowth.js");
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    const ranAt = Date.now() - 15 * 86400000;
+    await OpsAction.create({ module: "ads", type: "ads.merge_test", status: "done", ranAt: new Date(ranAt), title: "Test", payload: { campaignId: "c_hi", language: "Hindi" }, result: { adsetId: "adset_merged" } });
+    const day = (offset) => new Date(ranAt + offset * 86400000).toISOString().slice(0, 10);
+    await AdSnapshot.deleteMany({ entityId: "c_hi" });
+    await AdSnapshot.insertMany([
+      ...Array.from({ length: 14 }, (_, i) => ({ level: "campaign", entityId: "c_hi", date: day(-14 + i), spend: 2500, paid: 6 })),
+      ...Array.from({ length: 14 }, (_, i) => ({ level: "campaign", entityId: "c_hi", date: day(i), spend: 2500, paid: 9 })),
+    ]);
+    expect(await judgeMergeTest()).toBe("better");
+    const n = await OpsAction.findOne({ type: "ads.merge_test_result" });
+    expect(n.title).toBe("Merge test in Hindi: cheaper");
+    expect(await judgeMergeTest()).toBeNull();
+  });
 });

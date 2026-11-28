@@ -64,6 +64,17 @@ export const RULES = {
   calibMinPaid: 20,
   calibMin: 1,
   calibMax: 1.3,
+  // Per-language real joins from the tags on each ad's link (utm_content), used once tagged
+  // sign-ups cover 14 days and number this many; each language's correction is clamped.
+  taggedMinJoins14: 40,
+  unitCalibMin: 0.5,
+  unitCalibMax: 2,
+  // Raises: a winner may step again this many days after its last budget change (Monday + Thursday).
+  raiseGapDays: 3,
+  // Brake (checked every 3 hours): the last 3 days cost ≥ 2× the 14-day average per member with
+  // ≥ ₹3,000 spent → one −step. Ramp-up languages get an alert instead.
+  brakeRatio: 2,
+  brakeMinSpend3: 3000,
 };
 
 const LANGS = ["Kannada", "Telugu", "Tamil", "Hindi", "Marathi", "English"];
@@ -145,7 +156,9 @@ export const roas = (stats, netRevenue, calib = 1) => (stats.spend ? (stats.paid
  * @param {Date} now
  * @param {{ calib?: number }} ctx
  */
-export const classify = (unit, limits, now = new Date(), { calib = 1 } = {}) => {
+export const classify = (unit, limits, now = new Date(), { calib: accountCalib = 1 } = {}) => {
+  // A language's own correction (from its ad-tagged joins) when there's enough data; else the account's.
+  const calib = unit.calib ?? accountCalib;
   const days = unit.days ?? [];
   const w7 = windowStats(days.slice(-7));
   const w14 = windowStats(days.slice(-14));
@@ -176,6 +189,8 @@ export const classify = (unit, limits, now = new Date(), { calib = 1 } = {}) => 
     real7: w7.real,
     real14: w14.real,
     calib,
+    calibSource: unit.calibSource ?? "account",
+    tagged14: unit.tagged14 ?? null,
   };
   const notes = [];
   const flags = {};
@@ -198,8 +213,16 @@ export const classify = (unit, limits, now = new Date(), { calib = 1 } = {}) => 
   if (since(unit.lastChangeAt, now) < RULES.learningDays * DAY || since(unit.lastBudgetChangeAt, now) < RULES.learningDays * DAY) {
     return result("learning", [`Changed in the last ${RULES.learningDays} days; judged again after that.`]);
   }
+  // New ads restart learning only in their own ad set: the language's budget isn't frozen for them.
   if (since(unit.lastStructureChangeAt, now) < RULES.structureLearningDays * DAY) {
-    return result("learning", [`Ads changed in the last ${RULES.structureLearningDays} days; Meta is still learning.`]);
+    notes.push(`New or paused ads in the last ${RULES.structureLearningDays} days: those ad sets are re-learning, so costs may wobble.`);
+  }
+  // Ramp-up languages (owner's rule): judged on their own trend, never against the others.
+  if (unit.rampUp) {
+    const trend = prior7.paid && w7.paid ? w7.cpp / prior7.cpp : null;
+    notes.push(
+      `Ramp-up language: ${money(w7.cpp)} per member this week vs ${money(prior7.cpp)} the week before${trend ? ` (${trend <= 1 ? "cheaper" : "dearer"} by ${pct(trend)})` : ""}. It never gives budget away and is never cut.`
+    );
   }
 
   const losingLine = limits.losingCostPerMember;
@@ -209,6 +232,7 @@ export const classify = (unit, limits, now = new Date(), { calib = 1 } = {}) => 
   }
 
   if (metrics.realCpp7 > losingLine && metrics.realCpp14 > losingLine * RULES.loseHold14) {
+    if (unit.rampUp) return result("ramping", [`Above the losing line (${money(metrics.realCpp7)} per real member), but it's ramping up: left alone.`]);
     return result("losing", [
       `Real cost per member ${money(metrics.realCpp7)} over 7 days and ${money(metrics.realCpp14)} over 14 (losing above ${money(losingLine)}).`,
     ]);
@@ -223,10 +247,12 @@ export const classify = (unit, limits, now = new Date(), { calib = 1 } = {}) => 
 };
 
 const budgetFree = (u, now) => since(u.lastBudgetChangeAt, now) >= 7 * DAY;
-const avgCpp = (list, key) => {
-  const spend = list.reduce((t, e) => t + e.metrics[key === "cpp7" ? "spend7" : "spend14"], 0);
-  const paid = list.reduce((t, e) => t + e.metrics[key === "cpp7" ? "paid7" : "paid14"], 0);
-  return paid ? spend / paid : null;
+const raiseFree = (u, now) => since(u.lastBudgetChangeAt, now) >= RULES.raiseGapDays * DAY;
+/** Average cost per member across units: per real member when every unit has ad-tagged joins, else Meta's. */
+const avgCost = (list, n, real) => {
+  const spend = list.reduce((t, e) => t + e.metrics[`spend${n}`], 0);
+  const members = list.reduce((t, e) => t + e.metrics[`paid${n}`] * (real ? e.metrics.calib : 1), 0);
+  return members ? spend / members : null;
 };
 
 /**
@@ -244,38 +270,43 @@ const avgCpp = (list, key) => {
  * @param {number} [p.calib] real members per Meta member
  * @param {Date} [p.now]
  */
-export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, calib = 1, now = new Date() }) => {
+export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, calib = 1, now = new Date(), mode = "weekly" }) => {
   const evaluated = units.map((u) => ({ unit: u, ...classify(u, limits, now, { calib }) }));
   const decisions = [];
   const used = new Set();
   const totalBudget = units.reduce((t, u) => t + (u.dailyBudget || 0), 0);
   const judged = evaluated.filter((e) => e.state !== "learning" && e.state !== "low_data" && e.metrics.paid7 > 0);
-  const avg7 = avgCpp(judged, "cpp7");
-  const avg14 = avgCpp(judged, "cpp14");
+  // Compare languages per real member (ad-tagged joins) once every language has them; Meta's count until then.
+  const real = judged.length > 0 && judged.every((e) => e.metrics.calibSource === "tagged");
+  const cost = (e, n) => (real ? e.metrics[`realCpp${n}`] : e.metrics[`cpp${n}`]);
+  const avg7 = avgCost(judged, 7, real);
+  const avg14 = avgCost(judged, 14, real);
+  const weekly = mode === "weekly";
 
-  // 1. Moves between units.
-  if (settings.rebalance !== false && avg7 && avg14) {
+  // 1. Moves between units (Mondays only). Ramp-up languages never give budget away.
+  if (weekly && settings.rebalance !== false && avg7 && avg14) {
     const movable = (e) => e.state !== "learning" && e.state !== "low_data" && e.unit.dailyBudget > 0 && budgetFree(e.unit, now);
     const donors = evaluated
       .filter(
         (e) =>
           movable(e) &&
-          e.metrics.cpp7 >= RULES.donorRatio7 * avg7 &&
-          e.metrics.cpp14 >= RULES.donorRatio14 * avg14 &&
+          !e.unit.rampUp &&
+          cost(e, 7) >= RULES.donorRatio7 * avg7 &&
+          cost(e, 14) >= RULES.donorRatio14 * avg14 &&
           e.unit.dailyBudget - RULES.minMove >= RULES.minBudget
       )
-      .sort((a, b) => b.metrics.cpp7 - a.metrics.cpp7);
+      .sort((a, b) => cost(b, 7) - cost(a, 7));
     const receivers = evaluated
       .filter(
         (e) =>
           movable(e) &&
           e.state !== "losing" &&
-          e.metrics.cpp7 <= RULES.receiverRatio7 * avg7 &&
-          e.metrics.cpp14 <= RULES.receiverRatio14 * avg14 &&
+          cost(e, 7) <= RULES.receiverRatio7 * avg7 &&
+          cost(e, 14) <= RULES.receiverRatio14 * avg14 &&
           (e.metrics.spendRate7 == null || e.metrics.spendRate7 >= RULES.minSpendRate) &&
           e.metrics.frequency7 < RULES.frequencyTired
       )
-      .sort((a, b) => a.metrics.cpp7 - b.metrics.cpp7);
+      .sort((a, b) => cost(a, 7) - cost(b, 7));
 
     for (const d of donors) {
       if (decisions.filter((x) => x.type === "ads.rebalance").length >= RULES.maxMoves) break;
@@ -299,8 +330,8 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
         unitId: d.unit.id,
         title: `Move ₹${amount}/day from ${d.unit.name} to ${r.unit.name}`,
         reason:
-          `${d.unit.name} costs ${money(d.metrics.cpp7)} per member over 7 days (${money(d.metrics.cpp14)} over 14); ` +
-          `${r.unit.name} costs ${money(r.metrics.cpp7)} (${money(r.metrics.cpp14)}). Average ${money(avg7)}. ` +
+          `${d.unit.name} costs ${money(cost(d, 7))} per ${real ? "real " : ""}member over 7 days (${money(cost(d, 14))} over 14); ` +
+          `${r.unit.name} costs ${money(cost(r, 7))} (${money(cost(r, 14))}). Average ${money(avg7)}. ` +
           `${r.unit.name} spends ${Math.round((r.metrics.spendRate7 ?? 1) * 100)}% of its budget, so it can use more. ` +
           `Total daily budget stays the same; both steps are under 20%, so Meta's learning isn't reset.`,
         effect: `${d.unit.name} ₹${dFrom} → ₹${dFrom - amount}/day; ${r.unit.name} ₹${rFrom} → ₹${rFrom + amount}/day.`,
@@ -315,8 +346,8 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
     }
   }
 
-  // 2. Cuts for losing units whose money nobody took.
-  for (const e of evaluated.filter((x) => x.state === "losing" && !used.has(x.unit.id))) {
+  // 2. Cuts for losing units whose money nobody took (Mondays only; ramp-up languages are never "losing").
+  for (const e of evaluated.filter((x) => weekly && x.state === "losing" && !x.unit.rampUp && !used.has(x.unit.id))) {
     const u = e.unit;
     if (!u.dailyBudget || !budgetFree(u, now)) continue;
     const next = Math.max(RULES.minBudget, roundTo(u.dailyBudget * (1 - limits.stepDownPct / 100), 10));
@@ -340,8 +371,13 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
   for (const e of winners) {
     const u = e.unit;
     if (!u.dailyBudget) continue;
-    if (!budgetFree(u, now)) {
-      e.notes.push("Budget already changed this week; next step after 7 days.");
+    if (!raiseFree(u, now)) {
+      e.notes.push(`Budget changed in the last ${RULES.raiseGapDays} days; next step after that.`);
+      continue;
+    }
+    // A tired audience mostly buys repeat views: raise once fresh ads have landed.
+    if (e.metrics.frequency7 >= RULES.frequencyTired && !(since(u.lastLaunchAt, now) < 7 * DAY)) {
+      e.notes.push(`Would scale, but people already see these ads ${e.metrics.frequency7.toFixed(1)} times a week; it scales after fresh ads go live.`);
       continue;
     }
     if (e.metrics.spendRate7 != null && e.metrics.spendRate7 < RULES.minSpendRate) {
@@ -368,7 +404,78 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
     });
   }
 
-  return { evaluated, decisions, totalBudget, average: { cpp7: avg7, cpp14: avg14 }, calib };
+  return { evaluated, decisions, totalBudget, average: { cpp7: avg7, cpp14: avg14, real }, calib };
+};
+
+/**
+ * The mid-week brake, checked every 3 hours: a unit whose last 3 complete days
+ * cost at least RULES.brakeRatio × its 14-day average per member (or brought no
+ * members) with at least RULES.brakeMinSpend3 spent gets one −step, without
+ * waiting for Monday. Ramp-up languages get an urgent alert instead of a cut.
+ * @param {{ units: Array, limits: object, now?: Date }} p
+ * @returns {{ decisions: Array, alerts: Array<{ unit: object, why: string }> }}
+ */
+export const brakes = ({ units, limits, now = new Date() }) => {
+  const decisions = [];
+  const alerts = [];
+  for (const u of units) {
+    if (!u.dailyBudget) continue;
+    const days = u.days ?? [];
+    const last3 = windowStats(days.slice(-3));
+    const w14 = windowStats(days.slice(-14));
+    if (last3.spend < RULES.brakeMinSpend3 || w14.paid < RULES.minPaid7 || !Number.isFinite(w14.cpp)) continue;
+    if (!(last3.paid === 0 || last3.cpp >= RULES.brakeRatio * w14.cpp)) continue;
+    if (!raiseFree(u, now)) continue;
+    const why = `Last 3 days: ${money(last3.spend)} for ${last3.paid} member${last3.paid === 1 ? "" : "s"}${last3.paid ? ` (${money(last3.cpp)} each)` : ""}, against ${money(w14.cpp)} per member over 14 days.`;
+    if (u.rampUp) {
+      alerts.push({ unit: u, why });
+      continue;
+    }
+    const next = Math.max(RULES.minBudget, roundTo(u.dailyBudget * (1 - limits.stepDownPct / 100), 10));
+    if (next >= u.dailyBudget) continue;
+    decisions.push({
+      type: "ads.budget",
+      unitId: u.id,
+      title: `Brake: lower ${u.name} to ₹${next}/day`,
+      reason: `${why} A −${limits.stepDownPct}% step limits the loss while it's checked; Monday's review decides the rest.`,
+      effect: `Daily budget ₹${u.dailyBudget} → ₹${next}.`,
+      payload: { entityId: u.id, level: u.level, from: u.dailyBudget, to: next, brake: true },
+    });
+  }
+  return { decisions, alerts };
+};
+
+/** Which language an ad-tagged sign-up came from: the tag on the ad's link (kn_…, ta_…, telugu_brand…). */
+export const tagLanguage = ({ utmContent = "", utmCampaign = "" } = {}) => {
+  const c = String(utmContent || "").toLowerCase();
+  if (/^(kn|kannada)[_-]/.test(c)) return "Kannada";
+  if (/^(te|telugu)[_-]/.test(c)) return "Telugu";
+  if (/^(ta|tamil)[_-]/.test(c)) return "Tamil";
+  if (/^(hi|hindi)[_-]/.test(c)) return "Hindi";
+  const camp = String(utmCampaign || "").toLowerCase();
+  if (/(_hi$|hindi)/.test(camp)) return "Hindi";
+  if (/(nov26|kannada|_kn$)/.test(camp)) return "Kannada";
+  return null;
+};
+
+/**
+ * Each language's own real-joins correction from ad-tagged sign-ups: the
+ * account's real ad members (Meta's total × the account correction) shared out
+ * by each language's share of tagged sign-ups, over its Meta-counted members.
+ * @param {{ metaPaid: Record<string, number>, tagged: Record<string, number>, accountCalib: number }} p
+ * @returns {Record<string, number> | null} null when there are too few tagged sign-ups
+ */
+export const languageCalibration = ({ metaPaid, tagged, accountCalib = 1 }) => {
+  const taggedTotal = Object.values(tagged).reduce((t, n) => t + n, 0);
+  const metaTotal = Object.values(metaPaid).reduce((t, n) => t + n, 0);
+  if (taggedTotal < RULES.taggedMinJoins14 || !metaTotal) return null;
+  const out = {};
+  for (const [lang, paid] of Object.entries(metaPaid)) {
+    if (!paid) continue;
+    const realMembers = metaTotal * accountCalib * ((tagged[lang] ?? 0) / taggedTotal);
+    out[lang] = Math.min(RULES.unitCalibMax, Math.max(RULES.unitCalibMin, realMembers / paid));
+  }
+  return out;
 };
 
 /**

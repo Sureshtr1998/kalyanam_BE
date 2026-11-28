@@ -1,8 +1,8 @@
 import { AdSnapshot, OpsAction, getConfig } from "./models.js";
 import { ask } from "./claude.js";
-import { handle, handleUndo, hoursFromNow, propose } from "./actions.js";
+import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
 import { adsSettings, lastBatchAt, planAdPauses, unitStates } from "./ads.js";
-import { batchGate } from "./adsEngine.js";
+import { batchGate, languageOf } from "./adsEngine.js";
 import { CLAIM_RULES, planCreativeRefresh, recreateAd, tiredAdset } from "./adsCreative.js";
 import {
   copyAdset,
@@ -138,6 +138,8 @@ Room under the daily cap: ₹${headroom}.`,
 export const runAdsPlanning = async () => {
   const config = await getConfig();
   const settings = adsSettings(config);
+  // The merge test's 14-day result, whether or not this is a batch week.
+  await judgeMergeTest().catch((err) => console.error("[ops] merge test", err.message));
   const gate = batchGate({ settings, lastBatchAt: await lastBatchAt() });
   if (!gate.open) return { skipped: gate.reason };
   // Everything in a batch goes live at the same moment, after the notice period.
@@ -283,4 +285,130 @@ export const proposeIdeaAdset = async (plan, { runAt, reason, ideaId }) => {
     ref: { kind: "meta", id: `idea-adset:${ideaId}:${plan.name}` },
     runAt,
   });
+};
+
+/*
+ * Structure test (owner asked 28 Nov 2026): one language's two ad sets merged
+ * into one, so Meta gets about twice the sign-ups per ad set to learn from
+ * (each gets ~25 a week; Meta wants ~50). Waits for the owner's approval;
+ * judged after 14 days against the 14 days before; Undo restores the two.
+ */
+export const MERGE_TEST_LANGUAGE = "Hindi";
+
+/** Both ad sets' places and ages in one targeting (the first ad set's other settings). */
+export const mergeTargeting = (a = {}, b = {}) => {
+  const t = { ...a };
+  t.age_min = Math.min(a.age_min ?? 18, b.age_min ?? 18);
+  t.age_max = Math.max(a.age_max ?? 65, b.age_max ?? 65);
+  const geo = { ...(a.geo_locations ?? {}) };
+  const keyOf = (x) => (typeof x === "string" ? x : x?.key ?? JSON.stringify(x));
+  for (const [k, v] of Object.entries(b.geo_locations ?? {})) {
+    if (!Array.isArray(v)) continue;
+    const current = Array.isArray(geo[k]) ? geo[k] : [];
+    const seen = new Set(current.map(keyOf));
+    geo[k] = [...current, ...v.filter((x) => !seen.has(keyOf(x)))];
+  }
+  t.geo_locations = geo;
+  return t;
+};
+
+/** The test card (needs the owner's OK), once. */
+export const proposeMergeTest = async ({ language = MERGE_TEST_LANGUAGE } = {}) => {
+  if (await OpsAction.exists({ type: "ads.merge_test", status: { $ne: "cancelled" } })) return null;
+  const structure = await fetchStructure();
+  const campaign = structure.campaigns.find((c) => c.status === "ACTIVE" && languageOf(c.name) === language);
+  if (!campaign) return null;
+  const sets = structure.adsets.filter((s) => s.campaignId === campaign.id && s.status === "ACTIVE");
+  const parents = sets.find((s) => /parent/i.test(s.name));
+  const young = sets.find((s) => /young/i.test(s.name));
+  if (!parents || !young) return null;
+  return propose("ads", {
+    type: "ads.merge_test",
+    status: "needs_you",
+    title: `Test: merge ${language}'s Parents and Young ad sets into one`,
+    reason: `Each ad set gets about 25 sign-ups a week, and Meta needs about 50 to finish learning, so none ever does. One merged ad set (ages 24–65, both ad sets' places) gives Meta twice the data. ${language} has the largest budget, so the test reads fastest. After 14 days the agent compares ${language}'s cost per member with the 14 days before and tells you.`,
+    effect: `Waits for you. Approve & run: makes the merged ad set with the 2 best ads from each, turns it on, and pauses "${parents.name}" and "${young.name}". ${language} re-learns for about a week. Best approved on a batch day. Pause / undo puts the two ad sets back.`,
+    payload: { campaignId: campaign.id, campaignName: campaign.name, language, parentsId: parents.id, youngId: young.id, parentsName: parents.name, youngName: young.name },
+    ref: { kind: "meta", id: `merge-test:${campaign.id}` },
+  });
+};
+
+/** The 2 cheapest running ads per ad set over 14 days. */
+const bestAds = async (adsetIds, n = 2) => {
+  const since = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 10);
+  const rows = await AdSnapshot.aggregate([
+    { $match: { level: "ad", adsetId: { $in: adsetIds }, date: { $gte: since } } },
+    { $group: { _id: "$entityId", spend: { $sum: "$spend" }, paid: { $sum: "$paid" } } },
+  ]);
+  const stat = new Map(rows.map((r) => [r._id, r]));
+  const cpp = (id) => (stat.get(id)?.paid ? stat.get(id).spend / stat.get(id).paid : Infinity);
+  const live = (await fetchAds()).filter((a) => adsetIds.includes(a.adset_id) && a.effective_status === "ACTIVE");
+  return adsetIds.flatMap((id) => live.filter((a) => a.adset_id === id).sort((a, b) => cpp(a.id) - cpp(b.id)).slice(0, n));
+};
+
+handle("ads.merge_test", async (action) => {
+  const p = action.payload;
+  const [parents, young] = await Promise.all([fetchAdset(p.parentsId), fetchAdset(p.youngId)]);
+  const best = await bestAds([p.parentsId, p.youngId]);
+  if (!best.length) throw new Error("No running ads in those ad sets to carry over");
+  const newId = await copyAdset(p.parentsId);
+  if (!newId) throw new Error("Meta didn't return the copied ad set");
+  const adIds = [];
+  try {
+    await graphPost(newId, { name: `${p.language} | Parents + Young | 24-65 (merge test)`, targeting: mergeTargeting(parents.targeting, young.targeting) });
+    for (const a of best) {
+      const id = await recreateAd(a.id, newId, a.name);
+      await setStatus(id, "ACTIVE");
+      adIds.push(id);
+    }
+    await setStatus(newId, "ACTIVE");
+  } catch (err) {
+    // Nothing half-made stays on: the old ad sets keep running.
+    await setStatus(newId, "PAUSED").catch(() => {});
+    throw err;
+  }
+  await setStatus(p.parentsId, "PAUSED");
+  await setStatus(p.youngId, "PAUSED");
+  return { adsetId: newId, adIds, paused: [p.parentsId, p.youngId], entityId: newId };
+});
+
+handleUndo("ads.merge_test", async (action) => {
+  for (const id of action.result?.paused ?? []) await setStatus(id, "ACTIVE");
+  if (action.result?.adsetId) await setStatus(action.result.adsetId, "PAUSED");
+});
+
+/** 14 days after the merge: the language's cost per member after vs the 14 days before, once. */
+export const judgeMergeTest = async (now = Date.now()) => {
+  const t = await OpsAction.findOne({ type: "ads.merge_test", status: "done", "result.verdictAt": null, ranAt: { $lte: new Date(now - 14 * 86400000) } });
+  if (!t) return null;
+  const day = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const ran = new Date(t.ranAt).getTime();
+  const window = async (from, to) => {
+    const rows = await AdSnapshot.find({ level: "campaign", entityId: t.payload.campaignId, date: { $gte: day(from), $lt: day(to) } }).lean();
+    const spend = rows.reduce((s, r) => s + (r.spend || 0), 0);
+    const paid = rows.reduce((s, r) => s + (r.paid || 0), 0);
+    return { spend, paid, cpp: paid ? spend / paid : null };
+  };
+  const [before, after] = await Promise.all([window(ran - 14 * 86400000, ran), window(ran, ran + 14 * 86400000)]);
+  const ratio = before.cpp && after.cpp ? after.cpp / before.cpp : null;
+  const verdict = ratio == null ? "unclear" : ratio <= 0.9 ? "better" : ratio >= 1.1 ? "worse" : "even";
+  const rs = (n) => (n == null ? "–" : `₹${Math.round(n)}`);
+  const word = { better: "cheaper", worse: "dearer", even: "about the same", unclear: "not enough data" }[verdict];
+  await notice("ads", {
+    type: "ads.merge_test_result",
+    priority: "normal",
+    title: `Merge test in ${t.payload.language}: ${word}`,
+    reason: `${rs(after.cpp)} per member in the 14 days after the merge (${after.paid} members) vs ${rs(before.cpp)} in the 14 days before (${before.paid}).`,
+    effect:
+      verdict === "better"
+        ? "Keep it. The same merge could be tried in another language."
+        : verdict === "worse"
+          ? "Undo it: Pause / undo on the test card puts the two ad sets back."
+          : "Your call: keep it, or Pause / undo on the test card.",
+    payload: { dedupeKey: `merge_result:${t._id}` },
+  });
+  t.result = { ...t.result, verdictAt: new Date(), verdict, before, after };
+  t.markModified("result");
+  await t.save();
+  return verdict;
 };

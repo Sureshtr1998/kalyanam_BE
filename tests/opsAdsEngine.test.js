@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adDecisions, batchGate, calibration, classify, decide, emergencies, languageCoverage, languageOf, windowStats } from "../src/ops/adsEngine.js";
+import { adDecisions, batchGate, brakes, calibration, classify, decide, emergencies, languageCalibration, languageCoverage, languageOf, tagLanguage, windowStats } from "../src/ops/adsEngine.js";
 
 const limits = {
   maxDailySpend: 10000,
@@ -57,9 +57,10 @@ describe("classify", () => {
     expect(r.state).toBe("learning");
   });
 
-  it("waits 5 days after new or paused ads", () => {
+  it("doesn't freeze a language's budget for new or paused ads (only those ad sets re-learn)", () => {
     const r = classify({ days: days(14, { spend: 1000, paid: 8 }), lastStructureChangeAt: new Date(now.getTime() - 4 * DAY) }, limits, now);
-    expect(r.state).toBe("learning");
+    expect(r.state).toBe("winning");
+    expect(r.notes.join(" ")).toMatch(/re-learning, so costs may wobble/);
   });
 
   it("doesn't judge on too little spend", () => {
@@ -196,10 +197,28 @@ describe("decide: cuts and raises", () => {
     expect(decisions).toHaveLength(0);
   });
 
-  it("waits 7 days between budget steps", () => {
-    const u = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 4 * DAY) };
-    const { decisions } = decide({ units: [u], limits, settings: {}, now });
-    expect(decisions).toHaveLength(0);
+  it("lets a winner step again 3 days after its last budget change (Monday + Thursday), not sooner", () => {
+    const soon = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 2 * DAY) };
+    expect(decide({ units: [soon], limits, settings: {}, now }).decisions).toHaveLength(0);
+    const later = { ...winner(), lastBudgetChangeAt: new Date(now.getTime() - 3 * DAY) };
+    expect(decide({ units: [later], limits, settings: {}, now, mode: "midweek" }).decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2000 } });
+  });
+
+  it("only raises on Thursdays: no moves or cuts mid-week", () => {
+    const cheap = unit("cheap", 2000, { spend: 2000, paid: 16 }, { spend: 2000, paid: 16 });
+    const dear = unit("dear", 2000, { spend: 2000, paid: 3 }, { spend: 2000, paid: 3 });
+    const { decisions } = decide({ units: [cheap, dear], limits, settings: {}, now, mode: "midweek" });
+    expect(decisions.map((d) => d.type)).toEqual(["ads.budget"]);
+    expect(decisions[0].payload.to).toBeGreaterThan(2000);
+  });
+
+  it("doesn't raise a tired audience until fresh ads have gone live", () => {
+    const tired = unit("w", 2000, { spend: 2000, paid: 16 }, { spend: 2000, paid: 16, frequency7: 2.7 });
+    const none = decide({ units: [tired], limits, settings: {}, now });
+    expect(none.decisions).toHaveLength(0);
+    expect(none.evaluated[0].notes.join(" ")).toMatch(/scales after fresh ads go live/);
+    const fresh = { ...tired, lastLaunchAt: new Date(now.getTime() - 2 * DAY) };
+    expect(decide({ units: [fresh], limits, settings: {}, now }).decisions).toHaveLength(1);
   });
 
   it("cuts a losing unit by 15% when no cheaper unit can take the money", () => {
@@ -308,5 +327,69 @@ describe("all four languages, always", () => {
     expect(at550.decisions[0].payload).toMatchObject({ from: 550, to: 500 });
     const at500 = decide({ units: [unit("l", 500, { spend: 2000, paid: 2 }, { spend: 2000, paid: 2 })], limits, settings: {}, now });
     expect(at500.decisions).toHaveLength(0);
+  });
+});
+
+describe("ramp-up languages (owner's rule, 28 Nov 2026)", () => {
+  it("never gives budget away and is never cut, and is judged on its own trend", () => {
+    const kn = unit("kn", 1700, { spend: 1700, paid: 8 }, { spend: 1700, paid: 8 });
+    const hi = unit("hi", 2500, { spend: 2500, paid: 3 }, { spend: 2500, paid: 2 }, { rampUp: true });
+    const { decisions, evaluated } = decide({ units: [kn, hi], limits, settings: {}, now });
+    expect(decisions.filter((d) => d.unitId === "hi")).toHaveLength(0);
+    expect(decisions.some((d) => d.type === "ads.rebalance")).toBe(false);
+    const e = evaluated.find((x) => x.unit.id === "hi");
+    expect(e.state).toBe("ramping");
+    expect(e.notes.join(" ")).toMatch(/Ramp-up language: .* per member this week vs/);
+  });
+
+  it("can still receive money and be raised when it wins", () => {
+    const hi = unit("hi", 2000, { spend: 2000, paid: 16 }, { spend: 2000, paid: 16 }, { rampUp: true });
+    expect(decide({ units: [hi], limits, settings: {}, now }).decisions[0]).toMatchObject({ type: "ads.budget" });
+  });
+});
+
+describe("the mid-week brake", () => {
+  const steady = { spend: 1000, paid: 4 };
+  it("steps a language down when its last 3 days cost twice its usual, with ₹3,000+ spent", () => {
+    const u = { ...unit("te", 2100, steady, steady), days: [...days(11, steady), ...days(3, { spend: 1200, paid: 1 })] };
+    const { decisions, alerts } = brakes({ units: [u], limits: { ...limits, stepDownPct: 15 }, now });
+    expect(alerts).toHaveLength(0);
+    expect(decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2100, to: 1790, brake: true } });
+    expect(decisions[0].title).toMatch(/^Brake: lower te/);
+  });
+
+  it("only alerts for a ramp-up language, and leaves a normal week alone", () => {
+    const bad = { ...unit("hi", 2500, steady, steady, { rampUp: true }), days: [...days(11, steady), ...days(3, { spend: 1200, paid: 0 })] };
+    const ok = unit("kn", 1700, steady, steady);
+    const r = brakes({ units: [bad, ok], limits: { ...limits, stepDownPct: 15 }, now });
+    expect(r.decisions).toHaveLength(0);
+    expect(r.alerts.map((a) => a.unit.id)).toEqual(["hi"]);
+  });
+});
+
+describe("per-language real joins from ad tags", () => {
+  it("reads the language from each ad's link tag", () => {
+    expect(tagLanguage({ utmContent: "kn_why351" })).toBe("Kannada");
+    expect(tagLanguage({ utmContent: "tamil_brand" })).toBe("Tamil");
+    expect(tagLanguage({ utmContent: "te_ops_parents_1126a" })).toBe("Telugu");
+    expect(tagLanguage({ utmContent: "hi_communities_v2_young" })).toBe("Hindi");
+    expect(tagLanguage({ utmCampaign: "srk_sales_nov26" })).toBe("Kannada");
+    expect(tagLanguage({ utmCampaign: "srk_sales_te_ta" })).toBeNull();
+  });
+
+  it("shares the real members out by tagged sign-ups (Meta said Hindi 44 / Telugu 38; tags say 32 / 58)", () => {
+    const c = languageCalibration({ metaPaid: { Hindi: 44, Telugu: 38 }, tagged: { Hindi: 32, Telugu: 58 }, accountCalib: 1.2 });
+    expect(c.Telugu).toBeGreaterThan(1.5);
+    expect(c.Hindi).toBeLessThan(0.8);
+    expect(languageCalibration({ metaPaid: { Hindi: 44 }, tagged: { Hindi: 10 }, accountCalib: 1.2 })).toBeNull();
+  });
+
+  it("compares languages per real member once every language has tagged joins", () => {
+    // Meta says te is dearer, but its tagged joins say it's the cheaper one: no move away from it.
+    const kn = unit("kn", 2000, { spend: 2000, paid: 8 }, { spend: 2000, paid: 8 }, { calib: 1, calibSource: "tagged" });
+    const te = unit("te", 2000, { spend: 2000, paid: 5 }, { spend: 2000, paid: 5 }, { calib: 2, calibSource: "tagged" });
+    const { decisions, average } = decide({ units: [kn, te], limits, settings: {}, now });
+    expect(average.real).toBe(true);
+    expect(decisions.some((d) => d.type === "ads.rebalance" && d.payload.moves[0].entityId === "te")).toBe(false);
   });
 });

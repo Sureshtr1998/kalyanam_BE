@@ -1,7 +1,7 @@
 import User from "../models/User.js";
 import Broker from "../models/Broker.js";
 import { AdSnapshot, OpsAction, getConfig } from "./models.js";
-import { RULES, adDecisions, calibration, decide, emergencies, languageCoverage, languageOf } from "./adsEngine.js";
+import { RULES, adDecisions, brakes, calibration, decide, emergencies, languageCalibration, languageCoverage, languageOf, tagLanguage } from "./adsEngine.js";
 import { IDEAS, judgeNewAds } from "./adsIdeas.js";
 import { handle, handleUndo, hoursFromNow, notice, propose } from "./actions.js";
 import {
@@ -12,6 +12,7 @@ import {
   fetchInsights,
   fetchStructure,
   graphAll,
+  graphGet,
   accountId,
   setDailyBudget,
   setStatus,
@@ -191,6 +192,7 @@ const lastChanges = async () => {
       for (const id of [p.entityId, ...(p.moves ?? []).map((m) => m.entityId)]) mark(id, "budget", a.ranAt);
     } else if (STRUCTURE_TYPES.includes(a.type)) {
       for (const id of [p.campaignId, p.adsetId, a.result?.adsetId]) mark(id, "structure", a.ranAt);
+      if (a.type === "ads.creative_launch") for (const id of [p.campaignId, p.adsetId]) mark(id, "launch", a.ranAt);
     }
   }
   return out;
@@ -204,9 +206,32 @@ export const lastBatchAt = async () => {
   return last?.createdAt ?? null;
 };
 
+/**
+ * Members who signed up from an ad, per language, over the 14 days to
+ * yesterday, from the tags on the ad's link (stored on each member since
+ * 26 Nov 2026). null until tagged sign-ups cover the whole 14 days.
+ */
+export const taggedJoinsByLanguage = async (yesterday, tz = TZ_FALLBACK) => {
+  const from = new Date(`${new Date(Date.parse(yesterday) - 13 * DAY).toISOString().slice(0, 10)}T00:00:00+05:30`);
+  const to = new Date(`${yesterday}T23:59:59+05:30`);
+  const first = await User.findOne({ "acquisition.utmSource": { $exists: true, $nin: [null, ""] } }).sort({ createdAt: 1 }).select("createdAt").lean();
+  if (!first || first.createdAt > from) return null;
+  const rows = await User.find({ createdAt: { $gte: from, $lte: to }, "acquisition.utmMedium": { $regex: /paid/i } })
+    .select("acquisition.utmContent acquisition.utmCampaign")
+    .lean();
+  const out = {};
+  for (const r of rows) {
+    const lang = tagLanguage(r.acquisition ?? {});
+    if (lang) out[lang] = (out[lang] ?? 0) + 1;
+  }
+  return out;
+};
+
 /** Builds the budget-owning units from stored snapshots (completed days only), with real joins per language. */
-const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK) => {
+const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK, settings = {}, accountCalib = 1) => {
   const since = new Date(Date.parse(yesterday) - 13 * DAY).toISOString().slice(0, 10);
+  const rampLangs = new Set(settings.rampUp?.languages ?? []);
+  const rampOn = !settings.rampUp?.until || new Date(settings.rampUp.until) > new Date();
   const active = (s) => s === "ACTIVE";
   const units = [];
   const changes = await lastChanges();
@@ -242,7 +267,24 @@ const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK) => {
         lastChangeAt: maxDate([...edited, changes.get(o.id)?.any]),
         lastBudgetChangeAt: changes.get(o.id)?.budget ?? null,
         lastStructureChangeAt: maxDate(ids.map((id) => changes.get(id)?.structure)),
+        lastLaunchAt: maxDate(ids.map((id) => changes.get(id)?.launch)),
+        rampUp: rampOn && rampLangs.has(language),
       });
+    }
+  }
+  // Each language's own real-joins correction, once ad-tagged sign-ups cover 14 days.
+  const tagged = await taggedJoinsByLanguage(yesterday, tz).catch(() => null);
+  if (tagged) {
+    const metaPaid = {};
+    for (const u of units.filter((x) => x.level === "campaign")) metaPaid[u.language] = (metaPaid[u.language] ?? 0) + u.days.reduce((t, r) => t + (r.paid || 0), 0);
+    const perLang = languageCalibration({ metaPaid, tagged, accountCalib });
+    if (perLang) {
+      for (const u of units) {
+        if (u.level !== "campaign" || perLang[u.language] == null) continue;
+        u.calib = perLang[u.language];
+        u.calibSource = "tagged";
+        u.tagged14 = tagged[u.language] ?? 0;
+      }
     }
   }
   return units;
@@ -258,7 +300,63 @@ const increasedThisWeek = async () => {
  * Every 3 hours: snapshot + alarms. Weekly (or when forced): budget
  * decisions, each with the configured notice period.
  */
-export const runAdsCycle = async ({ weekly = false } = {}) => {
+/**
+ * The mid-week brake on every 3-hour run: a −step for a language whose last 3
+ * days cost twice its usual (ramp-up languages: an urgent alert instead).
+ * At most one brake per language a week.
+ */
+const runBrakes = async (snap, settings, config) => {
+  const calib = await accountCalibration(snap.yesterday);
+  const units = await buildUnits(snap.structure, snap.yesterday, snap.tz, settings, calib);
+  const { decisions, alerts } = brakes({ units, limits: config.limits });
+  const week = snap.today.slice(0, 8) + String(Math.ceil(Number(snap.today.slice(8)) / 7));
+  let made = 0;
+  for (const d of decisions) {
+    const a = await propose(
+      "ads",
+      { type: d.type, title: d.title, reason: d.reason, effect: d.effect, payload: d.payload, ref: { kind: "meta", id: d.unitId }, runAt: hoursFromNow(config.limits.adNoticeHours) },
+      { dedupeKey: `brake:${d.unitId}:${week}` }
+    );
+    if (a) made++;
+  }
+  for (const { unit, why } of alerts) {
+    await notice("ads", {
+      type: "ads.brake_alert",
+      priority: "urgent",
+      title: `${unit.name} cost twice its usual in the last 3 days`,
+      reason: `${why} It's a ramp-up language, so the agent doesn't cut it; check for a disapproved ad, a broken link or a tracking problem.`,
+      effect: "Alert only.",
+      payload: { dedupeKey: `brake_alert:${unit.id}:${week}` },
+    });
+  }
+  return { decisions: made, alerts: alerts.length };
+};
+
+/**
+ * Every ad set should count sign-ups the same way (attribution setting);
+ * mixed settings make languages and ads look better or worse than they are.
+ * Flagged once a week; aligning it is done on a batch day, as it restarts learning.
+ */
+const checkAttribution = async (today) => {
+  const r = await graphGet(`${accountId()}/adsets`, { fields: "name,effective_status,attribution_spec", limit: 100 });
+  const live = (r.data ?? []).filter((s) => s.effective_status === "ACTIVE");
+  const label = (spec = []) =>
+    spec.map((x) => `${x.window_days}-day ${String(x.event_type).toLowerCase().replace("click_through", "click").replace("view_through", "view").replace("engaged_video_view", "engagement")}`).sort().join(", ") || "Meta's default";
+  const groups = new Map();
+  for (const s of live) groups.set(label(s.attribution_spec), [...(groups.get(label(s.attribution_spec)) ?? []), s.name]);
+  if (groups.size <= 1) return 0;
+  await notice("ads", {
+    type: "ads.attribution_mixed",
+    priority: "normal",
+    title: `Ad sets count sign-ups in ${groups.size} different ways`,
+    reason: [...groups].map(([k, names]) => `${k}: ${names.join("; ")}`).join(" · ").slice(0, 900),
+    effect: "Comparisons between languages and ads are skewed. Align them to one setting (7-day click, 1-day view) on the next batch day; changing it restarts learning.",
+    payload: { dedupeKey: `attribution:${today.slice(0, 7)}` },
+  });
+  return groups.size;
+};
+
+export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {
   const config = await getConfig();
   const settings = adsSettings(config);
   const snap = await takeSnapshot();
@@ -313,11 +411,16 @@ export const runAdsCycle = async ({ weekly = false } = {}) => {
       payload: { dedupeKey: `verdict:${list.map((j) => j.creative._id).join(",")}` },
     });
   }
-  if (!weekly) return { snapshot: snap.today, alarms: alarms.length, judged: judged.length, decisions: 0 };
+  if (!weekly) {
+    const braked = settings.brake !== false && config.modes.ads !== "off" ? await runBrakes(snap, settings, config).catch((err) => ({ error: err.message })) : null;
+    return { snapshot: snap.today, alarms: alarms.length, judged: judged.length, decisions: 0, braked };
+  }
 
-  const units = await buildUnits(snap.structure, snap.yesterday, snap.tz);
+  if (midweek && settings.midweekRaises === false) return { snapshot: snap.today, decisions: 0, skipped: "Mid-week raises are switched off" };
   const calib = await accountCalibration(snap.yesterday);
-  const result = decide({ units, limits: config.limits, settings, calib, increasedThisWeek: await increasedThisWeek() });
+  const units = await buildUnits(snap.structure, snap.yesterday, snap.tz, settings, calib);
+  if (!midweek) await checkAttribution(snap.today).catch(() => {});
+  const result = decide({ units, limits: config.limits, settings, calib, increasedThisWeek: await increasedThisWeek(), mode: midweek ? "midweek" : "weekly" });
   let made = 0;
   for (const d of result.decisions) {
     await propose(
@@ -355,8 +458,8 @@ export const unitStates = async () => {
     campaigns: todays.filter((r) => r.level === "campaign").map((r) => ({ id: r.entityId, name: r.name, dailyBudget: r.dailyBudget, status: r.status ?? "ACTIVE" })),
     adsets: todays.filter((r) => r.level === "adset").map((r) => ({ id: r.entityId, name: r.name, campaignId: r.campaignId, dailyBudget: r.dailyBudget, status: r.status ?? "ACTIVE" })),
   };
-  const units = await buildUnits(structure, yesterday);
   const calib = await accountCalibration(yesterday);
+  const units = await buildUnits(structure, yesterday, TZ_FALLBACK, adsSettings(config), calib);
   const result = decide({ units, limits: config.limits, settings: { ...adsSettings(config), rebalance: false }, calib });
   return result.evaluated.map((e) => ({
     id: e.unit.id,

@@ -70,6 +70,15 @@ const ConfigSchema = new Schema(
       pauseLosingAds: { type: Boolean, default: true },
       // New ad sets: off until each ad set gets close to Meta's ~50 sign-ups a week.
       newAdsets: { type: Boolean, default: false },
+      // Ramp-up languages (owner, 28 Nov 2026): never give budget away or get cut; judged on their own trend.
+      rampUp: {
+        languages: { type: [String], default: ["Hindi", "Telugu", "Tamil"] },
+        until: { type: Date, default: () => new Date("2027-01-31T18:29:59Z") },
+      },
+      // A second raise on Thursdays for winners (3+ days after their last budget change).
+      midweekRaises: { type: Boolean, default: true },
+      // The mid-week brake (a −step when the last 3 days cost twice the usual).
+      brake: { type: Boolean, default: true },
       // Who gets urgent alerts by email (blank = every admin's account email).
       alertEmail: { type: String, default: "" },
       preferences: { type: String, default: DEFAULT_ADS_PREFERENCES },
