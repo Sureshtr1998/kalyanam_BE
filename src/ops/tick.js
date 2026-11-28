@@ -278,6 +278,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
       .then((n) => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.ownReplies20261128": new Date(), "migrations.ownRepliesCount": n } }))
       .catch((err) => console.error("[ops] redraft replies", err.message));
   }
+  // Once: every waiting reply is re-drafted under the rule against stating profile counts (28 Nov 2026).
+  if (!config.migrations?.ownReplies20261128b) {
+    await redraftPassedReplies({ all: true })
+      .then((n) => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.ownReplies20261128b": new Date(), "migrations.ownRepliesCountB": n } }))
+      .catch((err) => console.error("[ops] redraft replies", err.message));
+  }
   // Once: alerts that no longer apply leave Today.
   if (!config.migrations?.staleAlerts20261127) {
     await tidyStaleAlerts()

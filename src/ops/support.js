@@ -203,6 +203,8 @@ How to reply:
 - Never write that a team will check, that someone will get back to them, or that you are looking into it. Either solve it now, or say exactly what you need from them to solve it.
 - If the mail is unclear, makes no sense, or is too vague to act on, ask them politely to send a screenshot of the page or error, or to describe what they were doing and what happened.
 - Never invent a fact, price, date, promise or feature that is not written above.
+- Never state how many profiles, members, brides, grooms or matches there are, or who is on the site from which city, caste or community: you don't have those numbers. For such questions, say they can see the matching profiles on the Home and Matches pages after registering and logging in, and use the filters there.
+- Copy names of people, places and things exactly as they wrote them; if you can't read one, leave it out.
 Write the reply in exactly the language and script given. Be warm, short (under 120 words) and specific.
 Sign off as "Team Seetha Rama Kalyana". Output only the reply body, no subject line.`;
 
@@ -353,12 +355,12 @@ Output only the email body, no subject line.`,
  * to "the team" (written before the agent owned replies, 28 Nov 2026).
  * Returns how many drafts changed.
  */
-export const redraftPassedReplies = async () => {
+export const redraftPassedReplies = async ({ all = false } = {}) => {
   const config = await getConfig();
   const cards = await OpsAction.find({ module: "support", type: "support.reply", status: "scheduled", "ref.kind": "mail" });
   let n = 0;
   for (const a of cards) {
-    if (!PASSES_THE_BUCK.test(String(a.payload?.draft ?? ""))) continue;
+    if (!all && !PASSES_THE_BUCK.test(String(a.payload?.draft ?? ""))) continue;
     const m = await OpsMail.findById(a.ref.id).lean();
     if (!m) continue;
     const { reply, answered } = await draftAnswer(config, { ...m, language: m.language || "English" }, "sort");
