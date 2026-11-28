@@ -1781,3 +1781,42 @@ describe("cancelling a new-ads card", () => {
     expect((await OpsCreative.findById(old._id)).status).toBe("cancelled");
   });
 });
+
+describe("bounces and closing alerts", () => {
+  const bounce = (uid, rcpt, subject) =>
+    mail(uid, "mailer-daemon@secureserver.net", `This is an automatically generated Delivery Status Notification. Delivery to the following recipients failed permanently: * ${rcpt} Subject: "${subject}" To: "${rcpt}".`, {
+      subject: "Message Delivery Failure",
+      from: { email: "mailer-daemon@secureserver.net", name: "Mail Delivery System" },
+    });
+
+  it("a bounced verify reminder stops that member's email reminders, with no urgent alert", async () => {
+    const u = await createUser({ rest: { isVerified: false } });
+    inbox.push(bounce(501, u.basic.email, "One last step: verify your profile"));
+    await runSupportCycle();
+    expect((await User.findById(u._id)).reminders).toMatchObject({ off: true, bounced: true });
+    expect(await OpsAction.exists({ priority: "urgent" })).toBeNull();
+    expect(triage).not.toHaveBeenCalled();
+  });
+
+  it("a bounced reply is only a normal note", async () => {
+    inbox.push(bounce(502, "wrong.address@example.test", "Re: OTP not received"));
+    await runSupportCycle();
+    const n = await OpsAction.findOne({ type: "support.bounce" });
+    expect(n).toMatchObject({ priority: "normal" });
+    expect(n.title).toMatch(/wrong\.address@example\.test/);
+    expect(await OpsAction.exists({ type: "support.vendor_alert" })).toBeNull();
+  });
+
+  it("lets the owner mark an alert as done, and closes old delivery-failure alerts once", async () => {
+    const { notice, closeBounceAlerts } = await import("../src/ops/actions.js");
+    const a = await notice("tools", { type: "tools.msg91_low", priority: "urgent", title: "MSG91 balance is low: ₹300", payload: { dedupeKey: "m-low" } });
+    const t = tokenFor(await createUser({ rest: { isAdmin: true } }));
+    expect((await api().post(`/api/manage/ops/actions/${a._id}/dismiss`).set("x-auth-token", t)).status).toBe(200);
+    expect((await OpsAction.findById(a._id)).payload.resolvedAt).toBeTruthy();
+    expect((await api().post(`/api/manage/ops/actions/${a._id}/dismiss`).set("x-auth-token", t)).status).toBe(409);
+    const old = await OpsAction.create({ module: "support", type: "support.vendor_alert", status: "info", priority: "urgent", title: "mailer-daemon@secureserver.net: Message Delivery Failure", payload: {} });
+    expect(await closeBounceAlerts()).toBe(1);
+    expect((await OpsAction.findById(old._id)).payload.resolvedAt).toBeTruthy();
+  });
+
+});

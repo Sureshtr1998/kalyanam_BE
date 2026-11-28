@@ -3,7 +3,7 @@ import { Router } from "express";
 import { adminOnly, staffAuth } from "../../middleware/auth.js";
 import { isInternalRequest } from "../../utils/payments.js";
 import { MODES, MODULES, AdSnapshot, OpsAction, OpsComment, OpsCreative, OpsMail, OpsPost, OpsReport, getConfig, OpsStory, OpsConfig } from "../../ops/models.js";
-import { cancel, execute, retry, undo } from "../../ops/actions.js";
+import { cancel, dismissAlert, execute, retry, undo } from "../../ops/actions.js";
 import { checkAndRecord, rehearseLaunch } from "../../ops/adsCreative.js";
 import { tick, JOB_NAMES } from "../../ops/tick.js";
 import { adsSettings, unitStates } from "../../ops/ads.js";
@@ -15,7 +15,7 @@ import { planIdea, addStandingIdea, removeStandingIdea } from "../../ops/ideas.j
 import { hinduCalendar } from "../../ops/hinduCalendar.js";
 import { langPath } from "../../ops/links.js";
 import { formatDraft } from "../../ops/support.js";
-import { stopReminders } from "../../ops/reminders.js";
+import { reminderStats, stopReminders } from "../../ops/reminders.js";
 import razorpay from "../../config/razorpay.js";
 import { ALERT_TEMPLATE, ALERT_TEMPLATE_BODY, normalizeWhatsapp, sendWhatsappAlert, whatsappConfigured } from "../../ops/whatsapp.js";
 import { automationStatus, ensureAutomation, tickSource } from "../../ops/automation.js";
@@ -141,6 +141,7 @@ router.get(
       limits: config.limits,
       ads: adsSettings(config),
       alerts: alertSettings(config),
+      reminders: await reminderStats().catch(() => null),
       organic: { planEvenings: !!config.organic?.planEvenings, ownerUntil: config.organic?.ownerUntil ?? null },
       targets: config.targets,
       brief: config.brief,
@@ -216,6 +217,16 @@ router.post(
     a.markModified("payload");
     await a.save();
     return res.json({ msg: `Refunded ₹${refund.amount != null ? refund.amount / 100 : list[i].amount} · ${refund.id}` });
+  })
+);
+
+/** "Mark as done" on an alert: it leaves Today (kept in Activity). */
+router.post(
+  "/manage/ops/actions/:id/dismiss",
+  wrap(async (req, res) => {
+    const a = await dismissAlert(req.params.id, by(req));
+    if (!a) return res.status(409).json({ msg: "This alert is already closed" });
+    return res.json({ action: a, msg: "Closed" });
   })
 );
 

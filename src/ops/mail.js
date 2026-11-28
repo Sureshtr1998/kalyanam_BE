@@ -113,7 +113,8 @@ const send = async (transport, { to, subject, text, inReplyTo }) => {
   const message = {
     from: { name: "Seetha Rama Kalyana Support", address: USER() },
     to,
-    subject: /^(re:|\[srk ops\])/i.test(subject || "") ? subject : `Re: ${subject || "your message"}`,
+    // "Re:" only on a reply to their mail; alerts and reminders keep their own subject.
+    subject: !inReplyTo || /^re:/i.test(subject || "") ? subject || "Seetha Rama Kalyana" : `Re: ${subject || "your message"}`,
     text,
     date: new Date(),
     ...(inReplyTo ? { inReplyTo, references: inReplyTo } : {}),

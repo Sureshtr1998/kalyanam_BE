@@ -96,6 +96,45 @@ export const fundsMail = (mail) =>
 
 const normalizeMobile = (s) => String(s || "").replace(/\D/g, "").slice(-10);
 
+/** A "Delivery failed" mail about something we sent. */
+export const isBounce = (mail) =>
+  /^(mailer-daemon|postmaster)@/i.test(mail.from.email) ||
+  /(delivery (status notification|failure|has failed)|undeliver|returned mail|message delivery failure|failure notice)/i.test(mail.subject || "");
+
+const OUR_DOMAIN = /@seetharamakalyana\.in$/i;
+/** The addresses that bounced (ours left out), and whether it was one of our reminders. */
+export const bounceDetails = (mail) => {
+  const text = `${mail.subject || ""}\n${mail.text || ""}`;
+  const recipients = [...new Set((text.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g) ?? []).map((e) => e.toLowerCase()))].filter(
+    (e) => !OUR_DOMAIN.test(e) && !/^(mailer-daemon|postmaster)@/i.test(e) && !/secureserver\.net$/i.test(e)
+  );
+  const reminder = /(verify your profile|still waiting to be verified)/i.test(text);
+  return { recipients: recipients.slice(0, 5), reminder };
+};
+
+/**
+ * Bounced mail: a reminder that bounced stops that member's email reminders
+ * (the address is wrong); a bounced reply is a normal note (never WhatsApp).
+ */
+const handleBounce = async (mail, doc) => {
+  const { recipients, reminder } = bounceDetails(mail);
+  if (reminder) {
+    if (recipients.length) {
+      await User.updateMany({ "basic.email": { $in: recipients } }, { $set: { "reminders.off": true, "reminders.bounced": true } });
+    }
+    return;
+  }
+  await notice("support", {
+    type: "support.bounce",
+    priority: "normal",
+    title: `A mail didn't reach ${recipients[0] ?? "a member"}`.slice(0, 160),
+    reason: `Their mailbox refused it (wrong or closed address). Subject: ${mail.subject || "(none)"}.`,
+    effect: "Nothing to do unless they write again from another address.",
+    payload: { dedupeKey: `bounce:${recipients[0] ?? mail.messageId}` },
+    ref: { kind: "mail", id: String(doc._id) },
+  });
+};
+
 /**
  * Razorpay payments (last `days`) made with any of these emails or this mobile,
  * for refund requests from people with no account or no payment on it (e.g. they
@@ -341,6 +380,13 @@ const supersede = async (earlier, doc) => {
 const handleMail = async (config, m, delay) => {
   if (await OpsMail.exists({ uid: m.uid, messageId: m.messageId })) return;
   const doc = await OpsMail.create({ ...m, category: "unknown" });
+
+  if (isBounce(m)) {
+    doc.category = "company";
+    doc.status = "ignored";
+    await handleBounce(m, doc).catch((err) => console.error("[ops] bounce", err.message));
+    return doc.save();
+  }
 
   if (looksLikeCompany(m)) {
     doc.category = "company";

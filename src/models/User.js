@@ -179,6 +179,8 @@ const userSchema = new Schema(
       verifyCount: { type: Number },
       verifyLastAt: { type: Date },
       off: { type: Boolean },
+      // A reminder to their email bounced (wrong address): no more email reminders.
+      bounced: { type: Boolean },
     },
     // Set when the admin's auto-verify mode verified this member without OTPs.
     autoVerifiedAt: { type: Date },

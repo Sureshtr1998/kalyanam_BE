@@ -327,6 +327,23 @@ export const resolveHandledRepeats = async () => {
   return resolved;
 };
 
+/** The owner's "Mark as done" on an alert: it leaves Today. Returns the alert, or null. */
+export const dismissAlert = async (id, by) =>
+  OpsAction.findOneAndUpdate(
+    { _id: id, status: "info", "payload.resolvedAt": null },
+    { $set: { "payload.resolvedAt": new Date(), "payload.dismissedBy": by } },
+    { new: true }
+  );
+
+/** Once: urgent "delivery failure" alerts from before bounces were handled are closed. */
+export const closeBounceAlerts = async () =>
+  (
+    await OpsAction.updateMany(
+      { type: "support.vendor_alert", status: "info", "payload.resolvedAt": null, title: /^(mailer-daemon|postmaster)@/i },
+      { $set: { "payload.resolvedAt": new Date() } }
+    )
+  ).modifiedCount;
+
 /** A one-line notice in the feed (alerts, summaries). Shown even in shadow mode. */
 export const notice = (module, fields) => propose(module, { ...fields, status: "info" });
 

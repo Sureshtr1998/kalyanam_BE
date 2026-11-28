@@ -108,6 +108,7 @@ const dueVerify = (now, limit) =>
     isVerified: { $ne: true },
     isAdmin: { $ne: true },
     "reminders.off": { $ne: true },
+    "reminders.bounced": { $ne: true },
     "reminders.verifyCount": { $not: { $gte: REMINDER_LIMIT } },
     createdAt: { $lte: new Date(now - FIRST_VERIFY_AFTER_MS) },
     $or: [{ "reminders.verifyLastAt": null }, { "reminders.verifyLastAt": { $lte: new Date(now - REMINDER_GAP_MS) } }],
@@ -213,6 +214,26 @@ export const runReminders = async ({ now = Date.now() } = {}) => {
     unpaid: results.filter((r) => r.kind === "unpaid" && (r.email || r.whatsapp)).length,
     verify: results.filter((r) => r.kind === "verify" && r.email).length,
     failed: results.length - reached.length,
+  };
+};
+
+/** Reminders in the last 24 hours, for Ops → Settings. */
+export const reminderStats = async (now = Date.now()) => {
+  const since = new Date(now - DAY);
+  const rows = await OpsReminder.find({ createdAt: { $gte: since } }).select("kind email whatsapp error").lean();
+  const sent = (k) => rows.filter((r) => r.kind === k && (r.email || r.whatsapp)).length;
+  const [bounced, paidAfter] = await Promise.all([
+    User.countDocuments({ "reminders.bounced": true }),
+    AbandonedCheckout.countDocuments({ convertedAfterEmail: true, convertedAt: { $gte: since } }),
+  ]);
+  return {
+    unpaid: sent("unpaid"),
+    verify: sent("verify"),
+    whatsapp: rows.filter((r) => r.whatsapp).length,
+    failed: rows.filter((r) => !r.email && !r.whatsapp).length,
+    lastError: rows.filter((r) => r.error).at(-1)?.error ?? null,
+    bounced,
+    paidAfter,
   };
 };
 

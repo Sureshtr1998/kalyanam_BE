@@ -1,5 +1,5 @@
 import { OpsAction, OpsConfig, getConfig } from "./models.js";
-import { cancelOrphanCreatives, mergeLegacyPairs, notice, resolveHandledRepeats, runDue, tidyStaleAlerts } from "./actions.js";
+import { cancelOrphanCreatives, closeBounceAlerts, mergeLegacyPairs, notice, resolveHandledRepeats, runDue, tidyStaleAlerts } from "./actions.js";
 import { metaConfigured, pageConfigured, resolvePage, igConfigured } from "./meta.js";
 import { mailConfigured } from "./mail.js";
 import { claudeConfigured } from "./claude.js";
@@ -263,6 +263,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await refreshOpenRefunds()
       .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.refundCards20261127": new Date() } }))
       .catch((err) => console.error("[ops] refund cards", err.message));
+  }
+  // Once: delivery-failure alerts from before bounces were handled are closed.
+  if (!config.migrations?.bounceAlerts20261128) {
+    await closeBounceAlerts()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.bounceAlerts20261128": new Date() } }))
+      .catch((err) => console.error("[ops] bounce alerts", err.message));
   }
   // Once: ads of new-ads cards cancelled earlier stop showing as scheduled.
   if (!config.migrations?.orphanCreatives20261128) {
