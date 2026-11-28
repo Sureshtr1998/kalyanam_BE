@@ -277,6 +277,7 @@ const buildUnits = async (structure, yesterday, tz = TZ_FALLBACK, settings = {},
         lastLaunchAt: maxDate(ids.map((id) => changes.get(id)?.launch)),
         lastBrakeAt: changes.get(o.id)?.brake ?? null,
         rampUp: rampOn && rampLangs.has(language),
+        rampBase: settings.rampUp?.base?.[language] ?? null,
       });
     }
   }
@@ -398,22 +399,34 @@ export const raiseCeiling = async ({ config, settings, totalBudget, calib, yeste
     priority: "normal",
     title: `Daily budget ceiling raised: ₹${ceiling.toLocaleString("en-IN")} → ₹${next.toLocaleString("en-IN")}`,
     reason: `Budgets reached ${Math.round((totalBudget / ceiling) * 100)}% of the ceiling and the account earned ${ret.toFixed(2)}x over 14 days (target ${config.limits.scaleRoas}x).`,
-    effect: "Raises still go +10–15% at a time and at most +25% a week. To stop at a number, set it in Settings → Limits and turn off \"Raise the ceiling by itself\".",
+    effect: "Raises still go one step at a time, within the weekly growth limit. To stop at a fixed number, set the ceiling in Settings and turn off \"Raise the ceiling by itself\".",
     payload: { dedupeKey: `ceiling:${next}`, whatsapp: true },
   });
   return next;
 };
 
+/** Ramp-up: how much the base drops at a time, the lowest base, and when a language has caught up. */
+export const RAMP = { overRatio: 1.5, caughtUpRatio: 1.15, cut: 0.25, minBase: 1000, everyDays: 28 };
+
 /**
- * Ramp-up languages have no end date. A ramp-up language still costing more
- * than 1.5× the other languages per member for 4 weeks in a row gets a
- * WhatsApp to the owner, once a month. Nothing is cut.
+ * Every 4 weeks per ramp-up language, the agent decides by itself (owner, 28
+ * Nov 2026: "I don't want to handle or control this part"):
+ *  - still over 1.5× the others' cost per member in each of the last 4 weeks:
+ *    its protected base drops 25% (never under ₹1,000), so the normal rules
+ *    can move the money above it to cheaper languages;
+ *  - within 1.15× in each of those weeks: it has caught up and leaves ramp-up.
+ * Nothing on Meta changes here; the next ads run acts on the new base.
  */
 export const rampUpCheck = async ({ units, now = Date.now() }) => {
   const camps = units.filter((u) => u.level === "campaign");
   const ramp = camps.filter((u) => u.rampUp);
   const others = camps.filter((u) => !u.rampUp);
   if (!ramp.length || !others.length) return 0;
+  const config = await getConfig();
+  const settings = config.ads?.rampUp ?? {};
+  const base = { ...(settings.base ?? {}) };
+  const checkedAt = { ...(settings.checkedAt ?? {}) };
+  let languages = [...(settings.languages ?? [])];
   const day = (ms) => new Date(ms).toISOString().slice(0, 10);
   const rows = await AdSnapshot.find({ level: "campaign", entityId: { $in: camps.map((u) => u.id) }, date: { $gte: day(now - 28 * DAY), $lt: day(now) } }).lean();
   const cost = (ids, from, to) => {
@@ -423,25 +436,69 @@ export const rampUpCheck = async ({ units, now = Date.now() }) => {
     return paid ? spend / paid : null;
   };
   const weeks = [0, 1, 2, 3].map((w) => [now - (w + 1) * 7 * DAY, now - w * 7 * DAY]);
-  let sent = 0;
+  let acted = 0;
   for (const u of ramp) {
+    const l = u.language;
+    if (checkedAt[l] && now - new Date(checkedAt[l]).getTime() < RAMP.everyDays * DAY) continue;
     const ratios = weeks.map(([f, t]) => {
       const mine = cost([u.id], f, t);
       const ref = cost(others.map((o) => o.id), f, t);
       return mine && ref ? mine / ref : null;
     });
-    if (!ratios.every((r) => r != null && r > 1.5)) continue;
+    if (!ratios.every((r) => r != null)) continue;
+    const trail = ratios.map((r) => `${r.toFixed(1)}×`).join(", ");
+    if (ratios.every((r) => r <= RAMP.caughtUpRatio)) {
+      languages = languages.filter((x) => x !== l);
+      delete base[l];
+      checkedAt[l] = new Date(now);
+      await notice("ads", {
+        type: "ads.rampup_check",
+        title: `${l} has caught up: it now follows the normal rules`,
+        reason: `Cost per member vs the other languages, last 4 weeks (newest first): ${trail}.`,
+        effect: `${l} is no longer a ramp-up language. It's raised, cut or given money like any language, on its own numbers.`,
+        payload: { dedupeKey: `rampup_check:${u.id}:${day(now)}`, language: l, caughtUp: true },
+      });
+      acted++;
+      continue;
+    }
+    if (!ratios.every((r) => r > RAMP.overRatio)) continue;
+    const from = Number(base[l]) || u.dailyBudget || 0;
+    const to = Math.max(RAMP.minBase, Math.round((from * (1 - RAMP.cut)) / 10) * 10);
+    checkedAt[l] = new Date(now);
+    if (to < from) base[l] = to;
     await notice("ads", {
       type: "ads.rampup_check",
-      priority: "normal",
-      title: `${u.language} still costs ${ratios[0].toFixed(1)}× the other languages after 4 weeks`,
-      reason: `Cost per member vs the other languages, last 4 weeks (newest first): ${ratios.map((r) => `${r.toFixed(1)}×`).join(", ")}. It's a ramp-up language, so the agent doesn't cut it.`,
-      effect: "Your call: keep investing, or untick it under Ramp-up languages (Settings → Ads rules) so the normal rules apply.",
-      payload: { dedupeKey: `rampup_check:${u.id}:${day(now).slice(0, 7)}`, whatsapp: true },
+      title:
+        to < from
+          ? `${l} still costs ${ratios[0].toFixed(1)}× the others after 4 weeks: its protected base goes ₹${from.toLocaleString("en-IN")} → ₹${to.toLocaleString("en-IN")}/day`
+          : `${l} still costs ${ratios[0].toFixed(1)}× the others; its protected base is already at the lowest (₹${to.toLocaleString("en-IN")}/day)`,
+      reason: `Cost per member vs the other languages, last 4 weeks (newest first): ${trail}. It stays a ramp-up language.`,
+      effect: `Nothing changes on Meta now. Money above the base follows the normal rules from the next ads run, so it can move to cheaper languages. Checked again in 4 weeks.`,
+      payload: { dedupeKey: `rampup_check:${u.id}:${day(now)}`, language: l, from, to },
     });
-    sent++;
+    acted++;
   }
-  return sent;
+  if (acted) {
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "ads.rampUp.base": base, "ads.rampUp.checkedAt": checkedAt, "ads.rampUp.languages": languages } });
+  }
+  return acted;
+};
+
+/** Ramp-up languages without a base get today's campaign budget as their protected base. */
+export const setRampBases = async () => {
+  const config = await getConfig();
+  const ramp = adsSettings(config).rampUp ?? {};
+  const latest = await AdSnapshot.findOne({ level: "account" }).sort({ date: -1 }).lean();
+  if (!latest) return {};
+  const camps = await AdSnapshot.find({ level: "campaign", date: latest.date }).lean();
+  const base = { ...(ramp.base ?? {}) };
+  for (const l of ramp.languages ?? []) {
+    if (base[l]) continue;
+    const c = camps.find((x) => languageOf(x.name) === l && x.dailyBudget);
+    if (c) base[l] = c.dailyBudget;
+  }
+  await OpsConfig.updateOne({ _id: "ops" }, { $set: { "ads.rampUp.base": base } });
+  return base;
 };
 
 export const runAdsCycle = async ({ weekly = false, midweek = false } = {}) => {

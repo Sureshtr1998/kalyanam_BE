@@ -75,6 +75,10 @@ const ConfigSchema = new Schema(
         languages: { type: [String], default: ["Hindi", "Telugu", "Tamil"] },
         // No end date unless the owner sets one (owner, 28 Nov 2026).
         until: { type: Date, default: null },
+        // Each language's protected base (₹/day): never cut below it; money above follows the normal rules.
+        base: { type: Schema.Types.Mixed, default: {} },
+        // When the agent last judged each language's ramp-up (once per 4 weeks).
+        checkedAt: { type: Schema.Types.Mixed, default: {} },
       },
       // The daily budget ceiling raises itself (+25%) when budgets reach 90% of it and the account
       // earns its target return (owner, 28 Nov 2026: no top limit, grow gradually).

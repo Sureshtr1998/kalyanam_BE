@@ -246,7 +246,8 @@ Days already with an organic post: ${[...new Set(upcoming.map((p) => ist(p.publi
           // The agent's own ideas never undercut the engine's rules.
           const ramp = settings.rampUp ?? {};
           const ramping = (ramp.languages ?? []).includes(languageOf(e.name)) && (!ramp.until || new Date(ramp.until) > new Date());
-          if (ramping && to < e.dailyBudget) throw new Error(`${languageOf(e.name)} is a ramp-up language: its budget isn't cut.`);
+          const base = Number(ramp.base?.[languageOf(e.name)]) || e.dailyBudget;
+          if (ramping && to < base) throw new Error(`${languageOf(e.name)} is a ramp-up language: its base of ₹${base}/day isn't cut.`);
           if (await recentBudgetChange(e.id)) throw new Error("Its budget changed in the last 7 days (or a change is waiting); one step at a time so Meta's learning isn't reset.");
         }
         if (total - e.dailyBudget + to > config.limits.maxDailySpend) throw new Error(`Would pass the ₹${config.limits.maxDailySpend}/day limit`);

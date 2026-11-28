@@ -412,3 +412,28 @@ describe("per-language real joins from ad tags", () => {
     expect(decisions.some((d) => d.type === "ads.rebalance" && d.payload.moves[0].entityId === "te")).toBe(false);
   });
 });
+
+describe("ramp-up base: protected, extra money follows the rules (owner, 28 Nov 2026)", () => {
+  it("can give money above its base to a cheaper language, never below the base", () => {
+    const kn = unit("kn", 1700, { spend: 1700, paid: 10 }, { spend: 1700, paid: 10 });
+    const hi = unit("hi", 3000, { spend: 3000, paid: 6 }, { spend: 3000, paid: 6 }, { rampUp: true, rampBase: 2500 });
+    const { decisions } = decide({ units: [kn, hi], limits, settings: {}, now });
+    const move = decisions.find((d) => d.type === "ads.rebalance");
+    expect(move.payload.moves[0]).toMatchObject({ entityId: "hi", from: 3000 });
+    expect(move.payload.moves[0].to).toBeGreaterThanOrEqual(2500);
+  });
+
+  it("at its base it gives nothing and isn't cut", () => {
+    const kn = unit("kn", 1700, { spend: 1700, paid: 10 }, { spend: 1700, paid: 10 });
+    const hi = unit("hi", 2500, { spend: 2500, paid: 3 }, { spend: 2500, paid: 2 }, { rampUp: true, rampBase: 2500 });
+    const { decisions, evaluated } = decide({ units: [kn, hi], limits, settings: {}, now });
+    expect(decisions.filter((d) => d.unitId === "hi" || d.payload?.moves?.[0]?.entityId === "hi")).toHaveLength(0);
+    expect(evaluated.find((e) => e.unit.id === "hi").state).toBe("ramping");
+  });
+
+  it("losing above its base: cut toward the base, not below", () => {
+    const hi = unit("hi", 2800, { spend: 2800, paid: 3 }, { spend: 2800, paid: 2 }, { rampUp: true, rampBase: 2500 });
+    const { decisions } = decide({ units: [hi], limits, settings: {}, now });
+    expect(decisions[0]).toMatchObject({ type: "ads.budget", payload: { from: 2800, to: 2500 } });
+  });
+});

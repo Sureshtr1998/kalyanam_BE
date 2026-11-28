@@ -734,6 +734,13 @@ router.post(
         if (Array.isArray(ads.rampUp.languages)) {
           config.set("ads.rampUp.languages", ads.rampUp.languages.filter((l) => ["Kannada", "Telugu", "Tamil", "Hindi"].includes(l)));
         }
+        if (ads.rampUp.base && typeof ads.rampUp.base === "object") {
+          const base = {};
+          for (const [l, v] of Object.entries(ads.rampUp.base)) {
+            if (["Kannada", "Telugu", "Tamil", "Hindi"].includes(l) && Number.isFinite(Number(v)) && Number(v) >= 500) base[l] = Math.round(Number(v) / 10) * 10;
+          }
+          config.set("ads.rampUp.base", base);
+        }
         if ("until" in ads.rampUp) {
           const d = ads.rampUp.until ? new Date(ads.rampUp.until) : null;
           if (d && Number.isNaN(d.getTime())) return res.status(400).json({ msg: "Ramp-up date isn't a date" });

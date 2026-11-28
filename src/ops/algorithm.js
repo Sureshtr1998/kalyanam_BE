@@ -31,16 +31,16 @@ export const ownerRules = (config) => {
   return [
     "Ads run in Kannada, Telugu, Tamil and Hindi at all times.",
     (ramp.languages ?? []).length
-      ? `${ramp.languages.join(", ")} are ramp-up languages${until}: never cut or moved away for costing more than the others.`
-      : "No ramp-up languages are set.",
+      ? `${ramp.languages.join(", ")} are newer languages that may cost more for now${until}: each keeps a protected base (${ramp.languages.map((l) => `${l} ${ramp.base?.[l] ? inr(ramp.base[l]) : "today's budget"}`).join(", ")}); only money above it follows the normal rules. The agent manages this itself: every 4 weeks a language still over 1.5× the others' cost loses 25% of its base (never under ₹1,000), and one within 1.15× leaves ramp-up.`
+      : "No language is ramping up: all follow the normal rules.",
     "Prepaid funds never decide anything (Meta tops itself up).",
     "The agent never refunds money.",
     "Organic posts are never boosted or turned into ads.",
     "One campaign per language, with Parents and Young as its ad sets; no NRI, outside-state or new-language ad sets unless you ask.",
     "The Women safety campaign stays paused.",
     "Campaigns that work don't get changes that restart Meta's learning.",
-    `Daily budget ceiling: ${inr(config.limits?.maxDailySpend)} (Settings → Limits)${ads.autoCeiling !== false ? ". It raises itself by 25% when budgets reach 90% of it and the account earns its target return; you get a WhatsApp." : "."}`,
-    `Losing line: ${inr(config.limits?.losingCostPerMember)} per real member (Settings → Limits).`,
+    `Daily budget ceiling: ${inr(config.limits?.maxDailySpend)}, no top limit${ads.autoCeiling !== false ? ": it raises itself by 25% when budgets reach 90% of it and the account earns its target return" : ""}.`,
+    "Everything else (raises, cuts, moves, limits, the losing line) is the agent's to decide and tune.",
   ];
 };
 
@@ -48,7 +48,7 @@ export const ownerRules = (config) => {
 export const SAFETY_DEFAULTS = [
   "Every language keeps at least ₹500 a day and 2 running ads.",
   "24 hours' notice before every change, with Cancel and Undo (new ads are checked with Meta in that time).",
-  "Budget steps stay under 20%, and the total grows at most +25% a week, so Meta's learning isn't reset.",
+  "Budget steps stay under 20%, and the total grows at most 35% a week even after tuning, so Meta's learning isn't reset.",
   "Billing and payment settings are never touched.",
 ];
 

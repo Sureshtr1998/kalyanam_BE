@@ -97,7 +97,9 @@ export const TUNABLE = {
   winHold14: { where: "rules", group: "Winning and raises", label: "14-day return needed, as a share of the target", unit: "×", min: 0.8, max: 1, step: 0.05 },
   stepUpPct: { where: "limits", group: "Winning and raises", label: "Size of one raise", unit: "%", def: 10, min: 5, max: 15, step: 1 },
   slipRatio: { where: "rules", group: "Winning and raises", label: "Hold a winner whose last 3 days fall below this share of the 4 before", unit: "×", min: 0.6, max: 0.9, step: 0.05 },
+  maxWeeklyIncreasePct: { where: "limits", group: "Winning and raises", label: "Most the total daily budget may grow in 7 days", unit: "%", def: 25, min: 15, max: 35, step: 5 },
   maxUnitWeekPct: { where: "rules", group: "Winning and raises", label: "Most one language may grow in 7 days", unit: "%", min: 15, max: 30, step: 1 },
+  losingCostPerMember: { where: "limits", group: "Losing and cuts", label: "Cost per real member that counts as losing", unit: "₹", def: 420, min: 330, max: 520, step: 10 },
   loseHold14: { where: "rules", group: "Losing and cuts", label: "14-day confirmation of losing, as a share of that cost", unit: "×", min: 0.8, max: 1, step: 0.05 },
   stepDownPct: { where: "limits", group: "Losing and cuts", label: "Size of one cut", unit: "%", def: 15, min: 10, max: 20, step: 1 },
   donorRatio7: { where: "rules", group: "Moving money between languages", label: "A giver costs at least this × the average (7 days)", unit: "×", min: 1.1, max: 1.4, step: 0.05 },
@@ -276,7 +278,7 @@ export const classify = (unit, limits, now = new Date(), { calib: accountCalib =
   if (unit.rampUp) {
     const trend = prior7.paid && w7.paid ? w7.cpp / prior7.cpp : null;
     notes.push(
-      `Ramp-up language: ${money(w7.cpp)} per member this week vs ${money(prior7.cpp)} the week before${trend ? ` (${trend <= 1 ? "cheaper" : "dearer"} by ${pct(trend)})` : ""}. It never gives budget away and is never cut.`
+      `Ramp-up language: ${money(w7.cpp)} per member this week vs ${money(prior7.cpp)} the week before${trend ? ` (${trend <= 1 ? "cheaper" : "dearer"} by ${pct(trend)})` : ""}. Its base of ${money(unit.rampBase ?? unit.dailyBudget)}/day is protected; only money above it follows the normal rules.`
     );
   }
 
@@ -287,7 +289,10 @@ export const classify = (unit, limits, now = new Date(), { calib: accountCalib =
   }
 
   if (metrics.realCpp7 > losingLine && metrics.realCpp14 > losingLine * RULES.loseHold14) {
-    if (unit.rampUp) return result("ramping", [`Above the losing line (${money(metrics.realCpp7)} per real member), but it's ramping up: left alone.`]);
+    // At or below its protected base: left alone. Above it, the extra money is judged like any language's.
+    if (unit.rampUp && !(unit.dailyBudget > floorOf(unit))) {
+      return result("ramping", [`Above the losing line (${money(metrics.realCpp7)} per real member), but it's at its protected ramp-up base: left alone.`]);
+    }
     return result("losing", [
       `Real cost per member ${money(metrics.realCpp7)} over 7 days and ${money(metrics.realCpp14)} over 14 (losing above ${money(losingLine)}).`,
     ]);
@@ -302,6 +307,12 @@ export const classify = (unit, limits, now = new Date(), { calib: accountCalib =
 };
 
 const budgetFree = (u, now) => since(u.lastBudgetChangeAt, now) >= 7 * DAY;
+/**
+ * The lowest daily budget a unit may be taken to. A ramp-up language's base
+ * (its budget when ramp-up started) is protected; only money above it follows
+ * the normal rules (owner, 28 Nov 2026).
+ */
+export const floorOf = (u) => Math.max(RULES.minBudget, u.rampUp ? Number(u.rampBase) || u.dailyBudget || 0 : 0);
 const HOUR = 3600000;
 /** True when, by the time a step planned now goes live (after the notice), the last budget change is raiseGapDays old. */
 const raiseFree = (u, now, noticeHours = 24) => since(u.lastBudgetChangeAt, now) + noticeHours * HOUR >= RULES.raiseGapDays * DAY - 2 * HOUR;
@@ -352,10 +363,9 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
       .filter(
         (e) =>
           movable(e) &&
-          !e.unit.rampUp &&
           cost(e, 7) >= RULES.donorRatio7 * avg7 &&
           cost(e, 14) >= RULES.donorRatio14 * avg14 &&
-          e.unit.dailyBudget - RULES.minMove >= RULES.minBudget
+          e.unit.dailyBudget - RULES.minMove >= floorOf(e.unit)
       )
       .sort((a, b) => cost(b, 7) - cost(a, 7));
     const receivers = evaluated
@@ -381,7 +391,7 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
         continue;
       }
       let amount = roundTo(Math.min(d.unit.dailyBudget * RULES.moveShareDonor, r.unit.dailyBudget * RULES.moveShareReceiver), 50);
-      amount = Math.min(amount, d.unit.dailyBudget - RULES.minBudget);
+      amount = Math.min(amount, d.unit.dailyBudget - floorOf(d.unit));
       if (amount < RULES.minMove) continue;
       used.add(d.unit.id);
       used.add(r.unit.id);
@@ -409,10 +419,10 @@ export const decide = ({ units, limits, settings = {}, increasedThisWeek = 0, ca
   }
 
   // 2. Cuts for losing units whose money nobody took (Mondays only; ramp-up languages are never "losing").
-  for (const e of evaluated.filter((x) => weekly && x.state === "losing" && !x.unit.rampUp && !used.has(x.unit.id))) {
+  for (const e of evaluated.filter((x) => weekly && x.state === "losing" && !used.has(x.unit.id))) {
     const u = e.unit;
     if (!u.dailyBudget || !budgetFree(u, now)) continue;
-    const next = Math.max(RULES.minBudget, roundTo(u.dailyBudget * (1 - limits.stepDownPct / 100), 10));
+    const next = Math.max(floorOf(u), roundTo(u.dailyBudget * (1 - limits.stepDownPct / 100), 10));
     if (next >= u.dailyBudget) continue;
     used.add(u.id);
     decisions.push({
@@ -500,11 +510,12 @@ export const brakes = ({ units, limits, now = new Date(), noticeHours = limits.a
     // New or paused ads make costs wobble for a few days while Meta learns them: not a reason to brake.
     if (since(u.lastStructureChangeAt, now) < RULES.structureLearningDays * DAY) continue;
     const why = `Last 3 days: ${money(last3.spend)} for ${last3.paid} member${last3.paid === 1 ? "" : "s"}${last3.paid ? ` (${money(last3.cpp)} each)` : ""}, against ${money(w14.cpp)} per member over 14 days.`;
-    if (u.rampUp) {
+    // A ramp-up language at its protected base gets an alert; above it, the extra can be braked.
+    if (u.rampUp && !(u.dailyBudget > floorOf(u))) {
       alerts.push({ unit: u, why });
       continue;
     }
-    const next = Math.max(RULES.minBudget, roundTo(u.dailyBudget * (1 - limits.stepDownPct / 100), 10));
+    const next = Math.max(floorOf(u), roundTo(u.dailyBudget * (1 - limits.stepDownPct / 100), 10));
     if (next >= u.dailyBudget) continue;
     decisions.push({
       type: "ads.budget",

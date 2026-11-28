@@ -6,6 +6,7 @@ import { claudeConfigured } from "./claude.js";
 import { runAdsCycle } from "./ads.js";
 import { refreshOpenRefunds, runSupportCycle } from "./support.js";
 import { runReminders } from "./reminders.js";
+import { setRampBases } from "./ads.js";
 import { runAlgorithmCycle, startAlgorithm } from "./algorithm.js";
 import { runCommentsCycle } from "./comments.js";
 import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
@@ -304,6 +305,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
     await OpsConfig.updateOne({ _id: "ops" }, { $set: { "ads.rampUp.until": null, "migrations.rampUpNoEnd20261128": new Date() } }).catch((err) =>
       console.error("[ops] ramp-up end", err.message)
     );
+  }
+  // Once: each ramp-up language's base is its budget today (owner, 28 Nov 2026).
+  if (!config.migrations?.rampBase20261128) {
+    await setRampBases()
+      .then(() => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.rampBase20261128": new Date() } }))
+      .catch((err) => console.error("[ops] ramp base", err.message));
   }
   // Once: delivery-failure alerts from before bounces were handled are closed.
   if (!config.migrations?.bounceAlerts20261128) {

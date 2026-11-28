@@ -9,14 +9,15 @@ import { signRenderToken } from "./renderToken.js";
  *  - write: makes the change on a branch and opens a PR; Vercel builds a
  *           preview of that branch
  * "Deploy" merges the PR into master, which Vercel deploys to production.
- * Merging only ever happens from an admin's click.
+ * Merging happens from an admin's click, or by itself for the SEO agent's
+ * blog-only changes (seo.js checks every changed file is under the blogs).
  */
 
 const OWNER = () => process.env.GITHUB_OWNER || "Sureshtr1998";
 export const REPOS = { fe: () => process.env.GITHUB_REPO_FE || "kalyanam_FE", be: () => process.env.GITHUB_REPO_BE || "kalyanam_BE" };
 export const devConfigured = () => !!process.env.GITHUB_TOKEN;
 
-const gh = async (method, path, body) => {
+export const gh = async (method, path, body) => {
   const res = await fetch(`https://api.github.com${path}`, {
     method,
     headers: {
@@ -33,7 +34,7 @@ const gh = async (method, path, body) => {
   return data;
 };
 
-const repoPath = (repo) => {
+export const repoPath = (repo) => {
   const name = REPOS[repo]?.();
   if (!name) throw new Error("Choose the website (fe) or backend (be)");
   return `/repos/${OWNER()}/${name}`;
@@ -52,7 +53,7 @@ export const createRequest = async ({ repo, mode, request, by }) => {
 };
 
 /** A Vercel preview URL for a commit, from the GitHub deployments Vercel creates. */
-const previewFor = async (path, sha) => {
+export const previewFor = async (path, sha) => {
   const deps = await gh("GET", `${path}/deployments?sha=${sha}&per_page=5`);
   for (const d of deps) {
     const statuses = await gh("GET", `${path}/deployments/${d.id}/statuses?per_page=5`);
@@ -110,7 +111,7 @@ export const listRequests = async () => {
 };
 
 /** The newest claude/issue-N-… branch the Action pushed for an issue. */
-const agentBranch = async (path, number) => {
+export const agentBranch = async (path, number) => {
   const refs = await gh("GET", `${path}/git/matching-refs/heads/claude/issue-${number}-`).catch(() => []);
   const ref = refs.at(-1);
   return ref ? { name: ref.ref.replace("refs/heads/", ""), sha: ref.object.sha } : null;
@@ -124,7 +125,7 @@ export const followUp = (repo, number, text) =>
  * Deploy = squash-merge the request's change into master. Admin click only.
  * Uses the PR if the agent opened one, otherwise opens it from the agent's branch.
  */
-export const deploy = async (repo, issueNumber) => {
+export const deploy = async (repo, issueNumber, { sha } = {}) => {
   const path = repoPath(repo);
   const issue = await gh("GET", `${path}/issues/${issueNumber}`);
   const pulls = await gh("GET", `${path}/pulls?state=open&per_page=50`);
@@ -143,7 +144,8 @@ export const deploy = async (repo, issueNumber) => {
   pr = await gh("GET", `${path}/pulls/${prNumber}`);
   if (pr.state !== "open") throw new Error("This PR is not open");
   if (pr.base.ref !== "master") throw new Error(`This PR targets ${pr.base.ref}, not master`);
-  const r = await gh("PUT", `${path}/pulls/${prNumber}/merge`, { merge_method: "squash" });
+  // With a sha, GitHub refuses the merge if the branch moved since it was checked.
+  const r = await gh("PUT", `${path}/pulls/${prNumber}/merge`, { merge_method: "squash", ...(sha ? { sha } : {}) });
   return { merged: r.merged, sha: r.sha };
 };
 
@@ -157,6 +159,9 @@ export const dispatchRender = () =>
 
 /** Scheduled SEO/dev ideas become requests when they run. */
 handle("dev.request", async (action) => {
-  const { repo = "fe", mode = "write", request } = action.payload;
-  return createRequest({ repo, mode, request, by: "Ops agent (scheduled idea)" });
+  const { repo = "fe", mode = "write", request, seo } = action.payload;
+  const made = await createRequest({ repo, mode, request, by: seo ? "Ops SEO agent" : "Ops agent (scheduled idea)" });
+  // An SEO change is checked and deployed by itself (seo.deploy in seo.js).
+  if (seo) return { ...made, next: { type: "seo.deploy", runAt: new Date(Date.now() + 3600000), payload: { issue: made.number, requestedAt: new Date() } } };
+  return made;
 });

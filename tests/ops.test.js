@@ -2051,9 +2051,9 @@ describe("the monthly algorithm review (owner asked 28 Nov 2026)", () => {
     expect(page.status).toBe(200);
     expect(page.body.rules.find((r) => r.key === "brakeRatio")).toMatchObject({ value: 2, min: 1.6, max: 2.5, group: "Mid-week brake" });
     expect(page.body.ownerRules.join(" ")).toMatch(/all times/);
-    expect(page.body.ownerRules.join(" ")).toMatch(/Daily budget ceiling: ₹10,000 .*raises itself by 25%/);
+    expect(page.body.ownerRules.join(" ")).toMatch(/Daily budget ceiling: ₹10,000, no top limit: it raises itself by 25%/);
     expect(page.body.safetyDefaults.join(" ")).toMatch(/₹500 a day/);
-    expect(page.body.rules.some((r) => r.key === "losingCostPerMember")).toBe(false);
+    expect(page.body.rules.some((r) => r.key === "losingCostPerMember")).toBe(true);
     expect((await api().post("/api/manage/ops/algorithm").set("x-auth-token", t).send({ everyDays: 7 })).status).toBe(400);
     const ok = await api().post("/api/manage/ops/algorithm").set("x-auth-token", t).send({ everyDays: 14 });
     expect(ok.body.everyDays).toBe(14);
@@ -2096,10 +2096,15 @@ describe("no top limit: the ceiling raises itself (owner, 28 Nov 2026)", () => {
   });
 });
 
-describe("ramp-up languages have no end date", () => {
-  it("WhatsApps the owner when one still costs > 1.5x the others for 4 weeks (nothing is cut)", async () => {
+describe("ramp-up languages are managed by the agent", () => {
+  it("lowers the protected base of one still costing > 1.5x the others for 4 weeks, once per 4 weeks; nothing on Meta changes", async () => {
     const { rampUpCheck } = await import("../src/ops/ads.js");
     const { AdSnapshot } = await import("../src/ops/models.js");
+    await OpsConfig.updateOne(
+      { _id: "ops" },
+      { $set: { "ads.rampUp.languages": ["Hindi", "Tamil"], "ads.rampUp.base": { Hindi: 2000, Tamil: 1500 }, "ads.rampUp.checkedAt": {} } },
+      { upsert: true }
+    );
     await AdSnapshot.deleteMany({ level: "campaign" });
     const rows = [];
     for (let i = 1; i <= 28; i++) {
@@ -2114,7 +2119,143 @@ describe("ramp-up languages have no end date", () => {
     ];
     expect(await rampUpCheck({ units })).toBe(1);
     const n = await OpsAction.findOne({ type: "ads.rampup_check" });
-    expect(n.title).toMatch(/^Hindi still costs 2\.4× the other languages after 4 weeks/);
-    expect(n.payload.whatsapp).toBe(true);
+    expect(n.title).toMatch(/^Hindi still costs 2\.4× the others after 4 weeks: its protected base goes ₹2,000 → ₹1,500/);
+    expect(n.payload.whatsapp).toBeUndefined();
+    let c = (await OpsConfig.findById("ops").lean()).ads.rampUp;
+    expect(c.base).toEqual({ Hindi: 1500, Tamil: 1500 });
+    expect(c.languages).toEqual(["Hindi", "Tamil"]);
+    // Not again within 4 weeks.
+    expect(await rampUpCheck({ units })).toBe(0);
+    // A month later it goes down again, but never under ₹1,000.
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "ads.rampUp.checkedAt": {}, "ads.rampUp.base.Hindi": 1100 } });
+    expect(await rampUpCheck({ units })).toBe(1);
+    c = (await OpsConfig.findById("ops").lean()).ads.rampUp;
+    expect(c.base.Hindi).toBe(1000);
+  });
+
+  it("takes a language out of ramp-up once it costs within 1.15x the others for 4 weeks", async () => {
+    const { rampUpCheck } = await import("../src/ops/ads.js");
+    const { AdSnapshot } = await import("../src/ops/models.js");
+    await OpsConfig.updateOne(
+      { _id: "ops" },
+      { $set: { "ads.rampUp.languages": ["Telugu"], "ads.rampUp.base": { Telugu: 1500 }, "ads.rampUp.checkedAt": {} } },
+      { upsert: true }
+    );
+    await AdSnapshot.deleteMany({ level: "campaign" });
+    const rows = [];
+    for (let i = 1; i <= 28; i++) {
+      const date = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+      rows.push({ level: "campaign", entityId: "c_kn", date, spend: 1700, paid: 8 }, { level: "campaign", entityId: "c_te", date, spend: 1600, paid: 7 });
+    }
+    await AdSnapshot.insertMany(rows);
+    const units = [
+      { id: "c_kn", level: "campaign", language: "Kannada", rampUp: false },
+      { id: "c_te", level: "campaign", language: "Telugu", rampUp: true },
+    ];
+    expect(await rampUpCheck({ units })).toBe(1);
+    const c = (await OpsConfig.findById("ops").lean()).ads.rampUp;
+    expect(c.languages).toEqual([]);
+    expect(c.base.Telugu).toBeUndefined();
+  });
+});
+
+describe("SEO changes deploy by themselves, blogs only", () => {
+  it("accepts only changes whose every file is under src/screens/blogs/", async () => {
+    const { blogOnly } = await import("../src/ops/seo.js");
+    expect(blogOnly([{ filename: "src/screens/blogs/longPosts.tsx" }, { filename: "src/screens/blogs/blogsContents.tsx" }])).toBe(true);
+    expect(blogOnly([{ filename: "src/screens/blogs/longPosts.tsx" }, { filename: "package.json" }])).toBe(false);
+    expect(blogOnly([{ filename: "src/screens/blogs/x.tsx", previous_filename: "src/App.tsx" }])).toBe(false);
+    expect(blogOnly([{ filename: "src/screens/blogsX/a.tsx" }])).toBe(false);
+    expect(blogOnly([])).toBe(false);
+  });
+
+  /** A fake GitHub: one agent branch for issue 77 with the given files and preview state. */
+  const fakeGithub = (files, previewState) => {
+    const calls = [];
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
+    const fn = vi.fn(async (url, init = {}) => {
+      const u = String(url).replace("https://api.github.com/repos/Sureshtr1998/kalyanam_FE", "");
+      const method = init.method ?? "GET";
+      calls.push({ method, u, body: init.body ? JSON.parse(init.body) : null });
+      if (u.startsWith("/git/matching-refs/heads/claude/issue-77-")) return json([{ ref: "refs/heads/claude/issue-77-seo", object: { sha: "abc123" } }]);
+      if (u.startsWith("/compare/")) return json({ files });
+      if (u.startsWith("/deployments?")) return json([{ id: 5 }]);
+      if (u.startsWith("/deployments/5/statuses")) return json([{ state: previewState, environment_url: "https://preview.example.test" }]);
+      if (u === "/issues/77") return json({ title: "[Ops write] SEO blog change" });
+      if (u.startsWith("/pulls?")) return json([]);
+      if (u === "/pulls" && method === "POST") return json({ number: 9 });
+      if (u === "/pulls/9" && method === "GET") return json({ number: 9, state: "open", base: { ref: "master" } });
+      if (u === "/pulls/9/merge") return json({ merged: true, sha: "m1" });
+      return json({});
+    });
+    return { fn, calls };
+  };
+  const seoCard = () =>
+    OpsAction.create({ module: "seo", type: "seo.deploy", status: "scheduled", runAt: new Date(), title: "SEO: Kannada wedding rituals post", reason: "r", payload: { issue: 77, requestedAt: new Date() } });
+
+  it("deploys a blog-only change once the branch has settled and its preview built", async () => {
+    process.env.GITHUB_TOKEN = "t";
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const gh = fakeGithub([{ filename: "src/screens/blogs/longPosts.tsx" }], "success");
+    const before = globalThis.fetch;
+    globalThis.fetch = gh.fn;
+    try {
+      const card = await seoCard();
+      await execute(card._id); // first look: remembers the branch tip and waits 30 minutes
+      let a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("scheduled");
+      expect(a.payload.lastSha).toBe("abc123");
+      await OpsAction.updateOne({ _id: card._id }, { runAt: new Date() });
+      await execute(card._id);
+      a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("done");
+      expect(a.result).toMatchObject({ deployed: true });
+      expect(gh.calls.find((c) => c.u === "/pulls/9/merge").body).toMatchObject({ merge_method: "squash", sha: "abc123" });
+      expect(await OpsAction.findOne({ type: "seo.deployed" })).toBeTruthy();
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
+  it("refuses and closes a change that touches anything outside the blogs, without merging", async () => {
+    process.env.GITHUB_TOKEN = "t";
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const gh = fakeGithub([{ filename: "src/screens/blogs/longPosts.tsx" }, { filename: "src/App.tsx" }], "success");
+    const before = globalThis.fetch;
+    globalThis.fetch = gh.fn;
+    try {
+      const card = await seoCard();
+      await execute(card._id);
+      const a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("done");
+      expect(a.result.deployed).toBe(false);
+      expect(a.result.why).toMatch(/outside the blogs \(src\/App\.tsx\)/);
+      expect(gh.calls.some((c) => c.u.endsWith("/merge"))).toBe(false);
+      expect(gh.calls.some((c) => c.u === "/issues/77" && c.method === "PATCH")).toBe(true);
+      expect(await OpsAction.findOne({ type: "seo.refused" })).toBeTruthy();
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
+  it("refuses a change whose preview build failed", async () => {
+    process.env.GITHUB_TOKEN = "t";
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const gh = fakeGithub([{ filename: "src/screens/blogs/longPosts.tsx" }], "failure");
+    const before = globalThis.fetch;
+    globalThis.fetch = gh.fn;
+    try {
+      const card = await OpsAction.create({ module: "seo", type: "seo.deploy", status: "scheduled", runAt: new Date(), title: "SEO: x", payload: { issue: 77, requestedAt: new Date(), lastSha: "abc123" } });
+      await execute(card._id);
+      const a = await OpsAction.findById(card._id);
+      expect(a.result).toMatchObject({ deployed: false });
+      expect(a.result.why).toMatch(/preview build failed/);
+      expect(gh.calls.some((c) => c.u.endsWith("/merge"))).toBe(false);
+    } finally {
+      globalThis.fetch = before;
+    }
   });
 });
