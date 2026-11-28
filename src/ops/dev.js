@@ -159,7 +159,10 @@ export const dispatchRender = () =>
 
 /** Scheduled SEO/dev ideas become requests when they run. */
 handle("dev.request", async (action) => {
-  const { repo = "fe", mode = "write", request, seo } = action.payload;
+  const { repo = "fe", request, seo } = action.payload;
+  // payload.mode is the agent module's mode ("live"/"shadow"), stamped by propose(); the request's own
+  // read/write mode is devMode (older cards kept it in mode, so a read/write mode is still honoured).
+  const mode = ["read", "write"].includes(action.payload.devMode) ? action.payload.devMode : action.payload.mode === "read" ? "read" : "write";
   const made = await createRequest({ repo, mode, request, by: seo ? "Ops SEO agent" : "Ops agent (scheduled idea)" });
   // An SEO change is checked and deployed by itself (seo.deploy in seo.js).
   if (seo) return { ...made, next: { type: "seo.deploy", runAt: new Date(Date.now() + 3600000), payload: { issue: made.number, requestedAt: new Date() } } };

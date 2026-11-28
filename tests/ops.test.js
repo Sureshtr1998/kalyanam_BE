@@ -2261,6 +2261,38 @@ describe("SEO changes deploy by themselves, blogs only", () => {
     }
   });
 
+  it("a scheduled SEO change (made through propose) opens a write request and moves on to the deploy check", async () => {
+    process.env.GITHUB_TOKEN = "t";
+    await import("../src/ops/seo.js");
+    await import("../src/ops/dev.js");
+    const { execute, propose } = await import("../src/ops/actions.js");
+    await OpsConfig.updateOne({ _id: "ops" }, { $set: { "modes.seo": "live" } }, { upsert: true });
+    const calls = [];
+    const before = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url, init = {}) => {
+      calls.push({ u: String(url), method: init.method, body: init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ number: 77, html_url: "https://github.test/77" }), { status: 201, headers: { "Content-Type": "application/json" } });
+    });
+    try {
+      const card = await propose("seo", { type: "dev.request", status: "scheduled", runAt: new Date(), title: "SEO: x", payload: { repo: "fe", devMode: "write", seo: true, request: "Write a blog post" } });
+      expect(card.payload.mode).toBe("live"); // the agent's mode, stamped by propose
+      await execute(card._id);
+      const a = await OpsAction.findById(card._id);
+      expect(a.error ?? null).toBeNull();
+      expect(a.type).toBe("seo.deploy");
+      expect(a.payload.issue).toBe(77);
+      const issue = calls.find((c) => c.method === "POST" && c.u.endsWith("/issues"));
+      expect(issue.body.labels).toEqual(["ops-write"]);
+
+      // An older card that only has the stamped mode still opens a write request.
+      const old = await OpsAction.create({ module: "seo", type: "dev.request", status: "scheduled", runAt: new Date(), title: "old idea", payload: { repo: "fe", mode: "live", request: "Old idea text" } });
+      await execute(old._id);
+      expect((await OpsAction.findById(old._id)).status).toBe("done");
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
   it("finds the pages whose sitemap date changed", async () => {
     const { changedUrls } = await import("../src/ops/seo.js");
     const before = { "https://x/blog/a": "2026-11-08", "https://x/blog/b": "2026-11-08" };

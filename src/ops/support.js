@@ -26,6 +26,15 @@ const COMPANY_DOMAINS = [
 const AUTOMATED = /(no-?reply|noreply|do-?not-?reply|notifications?|mailer-daemon|postmaster|bounce|alerts?|newsletter|billing|marketing)@/i;
 
 /** Company and automated mail is recognised without calling Claude. */
+/** Fallback reply for a verification the agent carries out. */
+export const verifiedReply = (name) =>
+  `Dear ${name || "member"},
+
+Thank you for your patience. Your profile is now verified, and you can log in with your registered email and password. If you don't remember your password, use "Forgot password" on the login page.
+
+Warm regards,
+Team Seetha Rama Kalyana`;
+
 export const looksLikeCompany = (mail) => {
   const domain = mail.from.email.split("@")[1] || "";
   return (
@@ -470,12 +479,15 @@ const handleMail = async (config, m, delay) => {
     } else if (byMobile && matches) {
       doc.matchedUser = byMobile._id;
       doc.draft = await draftReply(config, mail, "Tell them their account is now verified and they can log in with their registered email and password (use 'Forgot password' if needed). Thank them for their patience. Never include a password.");
+      // The reply must say the account is verified (a draft that explains OTPs instead would contradict the action).
+      if (!/\b(is|has been|have been|was|now)\s+(now\s+|been\s+)?verified\b/i.test(doc.draft || "")) doc.draft = verifiedReply(byMobile.basic.fullName);
       await propose("support", {
         type: "support.verify",
         title: `Verify ${byMobile.basic.fullName} (${mobile})`,
         reason: `${t.summary} The mobile ${mobile} and email ${byMobile.basic.email} in the mail match one unverified account.`,
         effect: `Marks the account verified, sends the usual "profile verified" email and this reply in ${t.language}.`,
-        payload: { userId: String(byMobile._id), to: m.from.email, subject: m.subject, inReplyTo: m.messageId, draft: doc.draft },
+        // One verification per member, however many times they write.
+        payload: { userId: String(byMobile._id), to: m.from.email, subject: m.subject, inReplyTo: m.messageId, draft: doc.draft, dedupeKey: `support.verify:${byMobile._id}` },
         ref,
         runAt: hoursFromNow(delay),
       });

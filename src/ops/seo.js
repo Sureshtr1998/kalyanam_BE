@@ -272,7 +272,7 @@ Is a blog change worth making this week? If so, give the change as up to 3 concr
     effect: `The Developer agent writes it in the blogs only, and it goes live by itself once the preview builds; then Bing is pinged and Google's indexing is checked. Anything touching a file outside the blogs is refused. ${changes.map((c) => c.what).join("; ")}`,
     payload: {
       repo: "fe",
-      mode: "write",
+      devMode: "write",
       seo: true,
       request: `SEO blog change: ${out.title}\n\n${changes.map((c, n) => `${n + 1}. ${c.what}: ${c.detail}`).join("\n")}\n\n${SEO_RULE}`,
       dedupeKey: `seo:${data.range.endDate}`,
@@ -412,7 +412,7 @@ export const checkIndexing = async (action) => {
     effect: "Adds links to them from blog posts that already rank and strengthens their direct answers and FAQs. Blogs only; goes live by itself.",
     payload: {
       repo: "fe",
-      mode: "write",
+      devMode: "write",
       seo: true,
       indexFix: true,
       request: `SEO: Google hasn't indexed these blog posts ${INDEX_CHECK_DAYS.at(-1)} days after they went live: ${list}.
