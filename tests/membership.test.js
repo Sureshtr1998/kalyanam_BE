@@ -16,6 +16,7 @@ import {
   membershipStage,
   reminderDue,
   runMembershipCycle,
+  showInactivityHidden,
 } from "../src/utils/membership.js";
 import { DEFAULT_PRICING_LEVEL, PRICING_LEVELS } from "../src/utils/pricing.js";
 import { PASSWORD, api, createUser, paidOrder, tokenFor } from "./helpers.js";
@@ -65,7 +66,7 @@ describe("end dates and stages", () => {
 });
 
 describe("daily membership job", () => {
-  it("before the launch only backfills end dates and hides 90-day inactive profiles", async () => {
+  it("before the launch only backfills end dates, and never hides inactive profiles", async () => {
     setNow("2026-12-01T05:00:00Z");
     const active = await groom({ lastActiveAt: at("2026-11-20T00:00:00Z") });
     const away = await groom({ lastActiveAt: at("2026-08-01T00:00:00Z") });
@@ -75,23 +76,36 @@ describe("daily membership job", () => {
     const out = await runMembershipCycle();
 
     expect(out.backfilled).toBe(2);
-    expect(out.hiddenInactive).toBe(1);
     const a = await User.findById(active._id);
     const b = await User.findById(away._id);
     expect(a.membershipEndsAt).toEqual(LEGACY_END);
     expect(a.isHidden).toBe(false);
-    expect(b.isHidden).toBe(true);
-    expect(b.hiddenForInactivityAt).toBeTruthy();
+    expect(b.isHidden).toBe(false);
+    expect(b.hiddenForInactivityAt).toBeUndefined();
     expect(sendWhatsappTemplate).not.toHaveBeenCalled();
   });
 
-  it("logging in shows an inactivity-hidden profile again", async () => {
+  it("shows again every profile the removed 90-day rule hid, and nothing else", async () => {
     const away = await groom({ isHidden: true, hiddenForInactivityAt: new Date() });
-    const res = await api().post("/api/login").send({ email: away.basic.email, password: PASSWORD });
+    const ownChoice = await groom({ isHidden: true });
+    const married = await groom({ isHidden: true, hiddenForInactivityAt: new Date(), marriedAt: new Date() });
+    expect(await showInactivityHidden()).toBe(1);
+    expect((await User.findById(away._id)).isHidden).toBe(false);
+    expect((await User.findById(away._id)).hiddenForInactivityAt).toBeUndefined();
+    expect((await User.findById(ownChoice._id)).isHidden).toBe(true);
+    expect((await User.findById(married._id)).isHidden).toBe(true);
+  });
+
+  it("logging in shows a member's own hidden profile again, but not one an admin hid", async () => {
+    const own = await groom({ isHidden: true });
+    let res = await api().post("/api/login").send({ email: own.basic.email, password: PASSWORD });
     expect(res.status).toBe(200);
-    const fresh = await User.findById(away._id);
-    expect(fresh.isHidden).toBe(false);
-    expect(fresh.hiddenForInactivityAt).toBeUndefined();
+    expect((await User.findById(own._id)).isHidden).toBe(false);
+
+    const byAdmin = await groom({ isHidden: true, hiddenByAdmin: true });
+    res = await api().post("/api/login").send({ email: byAdmin.basic.email, password: PASSWORD });
+    expect(res.status).toBe(200);
+    expect((await User.findById(byAdmin._id)).isHidden).toBe(true);
   });
 
   it("sends each reminder once per end date, and pauses after the grace period", async () => {

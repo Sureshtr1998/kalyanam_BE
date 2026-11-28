@@ -245,8 +245,10 @@ const userSchema = new Schema(
       ],
       default: [],
     },
-    // isHidden was set by the daily job after INACTIVE_DAYS without a visit.
+    // Set by the 90-day inactivity rule, removed on 28 Nov 2026 (those profiles were shown again).
     hiddenForInactivityAt: { type: Date },
+    // Hidden by an admin from Members: logging in doesn't show it again (a member's own hide does).
+    hiddenByAdmin: { type: Boolean, default: false },
     // "Marriage fixed": profile closed by the member, no reminders.
     marriedAt: { type: Date },
     marriageNote: { type: String },

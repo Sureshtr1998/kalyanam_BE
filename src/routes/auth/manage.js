@@ -522,6 +522,8 @@ router.post(
   "/manage/users/:id/hidden",
   withMember(async (req, res, user) => {
     user.isHidden = req.body?.value !== false;
+    // An admin's hide stays on when the member logs in; unhiding clears it.
+    user.hiddenByAdmin = user.isHidden;
     await user.save();
     return res.json({
       msg: user.isHidden ? "Profile hidden from everyone" : "Profile visible again",

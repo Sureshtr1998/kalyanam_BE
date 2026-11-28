@@ -25,8 +25,9 @@ import { acceptsViewerQuery } from "./matching.js";
  * ends on 29 Feb 2028 (one year from 1 March 2027); later members get one
  * year from the day they joined.
  *
- * Separately, any profile with no visit for 90 days is hidden (isHidden), and
- * logging in shows it again, like a member's own "hide profile".
+ * Inactive profiles are never hidden (owner, 28 Nov 2026; the 90-day rule was
+ * removed the day it started): members see who is active through the "active
+ * within" filter and sort, and the yearly membership pauses those who don't renew.
  */
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -38,7 +39,6 @@ export const LEGACY_END = new Date("2028-02-29T18:29:59.999Z");
 
 export const RENEWAL_WINDOW_DAYS = 30;
 export const GRACE_DAYS = 15;
-export const INACTIVE_DAYS = 90;
 export const DORMANT_DAYS = 730;
 const FINAL_WARNING_AFTER_DAYS = 28;
 const DELETE_AFTER_FINAL_HOURS = 48;
@@ -297,6 +297,19 @@ const lastSeenBefore = (cutoff) => ({
   $or: [{ lastActiveAt: { $lt: cutoff } }, { lastActiveAt: null, createdAt: { $lt: cutoff } }],
 });
 
+/**
+ * Shows again every profile the removed 90-day rule hid (it ran once, on
+ * 28 Nov 2026, and counted members with no recorded visit from the day they
+ * joined, because visits were only recorded from 31 Oct 2026). Returns how many.
+ */
+export const showInactivityHidden = async () => {
+  const res = await User.updateMany(
+    { hiddenForInactivityAt: { $ne: null }, marriedAt: null },
+    { $set: { isHidden: false }, $unset: { hiddenForInactivityAt: 1 } }
+  );
+  return res.modifiedCount;
+};
+
 /** Moves dormant accounts through 30-day warning → 48-hour warning → deletion. */
 const runDormantCleanup = async (now, deadline) => {
   const out = { warned: 0, finalWarned: 0, deleted: 0, cleared: 0 };
@@ -349,22 +362,9 @@ const runDormantCleanup = async (now, deadline) => {
  */
 export const runMembershipCycle = async ({ now = new Date(), budgetMs = 40000 } = {}) => {
   const deadline = Date.now() + budgetMs;
-  const out = { backfilled: 0, paused: 0, hiddenInactive: 0, reminders: {}, dormant: null };
+  const out = { backfilled: 0, paused: 0, reminders: {}, dormant: null };
 
   out.backfilled = await backfillEndDates();
-
-  // Inactivity: hidden until their next login (credentials.js clears isHidden).
-  const inactiveCutoff = new Date(now.getTime() - INACTIVE_DAYS * DAY);
-  const hidden = await User.updateMany(
-    {
-      isHidden: false,
-      isAdmin: { $ne: true },
-      marriedAt: null,
-      ...lastSeenBefore(inactiveCutoff),
-    },
-    { $set: { isHidden: true, hiddenForInactivityAt: now } }
-  );
-  out.hiddenInactive = hidden.modifiedCount;
 
   if (!isLaunched(now)) return out;
 

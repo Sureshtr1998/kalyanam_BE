@@ -392,9 +392,9 @@ router.post("/login", loginLimiter, async (req, res) => {
       });
     }
 
-    // Logging in shows a hidden profile again (own choice or 90 days away),
-    // but not one closed after "Marriage fixed": that reopens from Account.
-    if (user.isHidden && !user.marriedAt) {
+    // Logging in shows a profile the member hid themselves ("Hide & sign out") again,
+    // but not one an admin hid, or one closed after "Marriage fixed" (that reopens from Account).
+    if (user.isHidden && !user.marriedAt && !user.hiddenByAdmin) {
       user.isHidden = false;
       user.hiddenForInactivityAt = undefined;
       await user.save();

@@ -18,7 +18,7 @@ import { preflightLaunches, tagIdeaCreatives } from "./adsCreative.js";
 import { autoPlanIdeas } from "./ideas.js";
 import { ensureAutomation } from "./automation.js";
 import { autoVerifyDue, getAutoVerifySettings } from "../utils/autoVerify.js";
-import { runMembershipCycle } from "../utils/membership.js";
+import { runMembershipCycle, showInactivityHidden } from "../utils/membership.js";
 
 // Handlers register themselves on import.
 import "./dev.js";
@@ -266,6 +266,12 @@ const runTick = async ({ config, t, done, deadline, source }) => {
   // Find the Facebook Page / Instagram account from the token (cached for an hour).
   await resolvePage().catch(() => {});
 
+  // Once: profiles hidden by the removed 90-day inactivity rule are shown again (owner, 28 Nov 2026).
+  if (!config.migrations?.unhideInactive20261128) {
+    await showInactivityHidden()
+      .then((n) => OpsConfig.updateOne({ _id: "ops" }, { $set: { "migrations.unhideInactive20261128": new Date(), "migrations.unhideInactiveCount": n } }))
+      .catch((err) => console.error("[ops] unhide inactive", err.message));
+  }
   // Once: alerts that no longer apply leave Today.
   if (!config.migrations?.staleAlerts20261127) {
     await tidyStaleAlerts()
