@@ -2209,8 +2209,10 @@ describe("SEO changes deploy by themselves, blogs only", () => {
       await OpsAction.updateOne({ _id: card._id }, { runAt: new Date() });
       await execute(card._id);
       a = await OpsAction.findById(card._id);
-      expect(a.status).toBe("done");
-      expect(a.result).toMatchObject({ deployed: true });
+      // Merged; the same card moves on to pinging search engines once the change is live.
+      expect(a.status).toBe("scheduled");
+      expect(a.type).toBe("seo.ping");
+      expect(a.result.steps[0].result).toMatchObject({ deployed: true });
       expect(gh.calls.find((c) => c.u === "/pulls/9/merge").body).toMatchObject({ merge_method: "squash", sha: "abc123" });
       expect(await OpsAction.findOne({ type: "seo.deployed" })).toBeTruthy();
     } finally {
@@ -2254,6 +2256,169 @@ describe("SEO changes deploy by themselves, blogs only", () => {
       expect(a.result).toMatchObject({ deployed: false });
       expect(a.result.why).toMatch(/preview build failed/);
       expect(gh.calls.some((c) => c.u.endsWith("/merge"))).toBe(false);
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
+  it("finds the pages whose sitemap date changed", async () => {
+    const { changedUrls } = await import("../src/ops/seo.js");
+    const before = { "https://x/blog/a": "2026-11-08", "https://x/blog/b": "2026-11-08" };
+    const after = { "https://x/blog/a": "2026-12-01", "https://x/blog/b": "2026-11-08", "https://x/blog/new": "2026-12-01" };
+    expect(changedUrls(before, after)).toEqual(["https://x/blog/a", "https://x/blog/new"]);
+  });
+
+  /** A fake site + IndexNow + Google (token and URL inspection). */
+  const fakeSearch = ({ sitemap = "", indexed = () => true } = {}) => {
+    const calls = [];
+    const fn = vi.fn(async (url, init = {}) => {
+      const u = String(url);
+      const body = init.body && typeof init.body === "string" && init.body.startsWith("{") ? JSON.parse(init.body) : null;
+      calls.push({ u, body });
+      const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
+      if (u.endsWith("/sitemap.xml")) return new Response(sitemap, { status: 200 });
+      if (u.startsWith("https://api.indexnow.org/")) return new Response("", { status: 200 });
+      if (u.startsWith("https://oauth2.googleapis.com/token")) return json({ access_token: "tok", expires_in: 3600 });
+      if (u.includes("urlInspection/index:inspect")) {
+        const ok = indexed(body.inspectionUrl);
+        return json({ inspectionResult: { indexStatusResult: { verdict: ok ? "PASS" : "NEUTRAL", coverageState: ok ? "Submitted and indexed" : "Discovered - currently not indexed" } } });
+      }
+      return json({});
+    });
+    return { fn, calls };
+  };
+  const sitemapXml = (rows) =>
+    `<?xml version="1.0"?><urlset>${rows.map(([loc, lastmod]) => `<url><loc>${loc}</loc><lastmod>${lastmod}</lastmod></url>`).join("")}</urlset>`;
+  const serviceAccount = async () => {
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    process.env.GSC_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: "sa@test.iam.gserviceaccount.com", private_key: privateKey });
+  };
+
+  it("once live, pings IndexNow with only the changed pages and schedules Google's indexing check", async () => {
+    await serviceAccount();
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const S = "https://www.seetharamakalyana.in";
+    const net = fakeSearch({ sitemap: sitemapXml([[`${S}/blog/a`, "2026-12-01"], [`${S}/blog/b`, "2026-11-08"], [`${S}/blog/new-post`, "2026-12-01"]]) });
+    const before = globalThis.fetch;
+    globalThis.fetch = net.fn;
+    try {
+      const deployedAt = new Date();
+      const card = await OpsAction.create({
+        module: "seo",
+        type: "seo.ping",
+        status: "scheduled",
+        runAt: new Date(),
+        title: "SEO: Tamil matrimony guide",
+        payload: { deployedAt, sitemapBefore: [[`${S}/blog/a`, "2026-11-08"], [`${S}/blog/b`, "2026-11-08"]] },
+      });
+      await execute(card._id);
+      const a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("done");
+      expect(a.result.pinged).toEqual([`${S}/blog/a`, `${S}/blog/new-post`]);
+      const ping = net.calls.find((c) => c.u.startsWith("https://api.indexnow.org/"));
+      expect(ping.body).toMatchObject({ host: "www.seetharamakalyana.in", urlList: [`${S}/blog/a`, `${S}/blog/new-post`] });
+      const check = await OpsAction.findOne({ type: "seo.index_check" });
+      expect(check.status).toBe("scheduled");
+      expect(check.payload.urls).toEqual([`${S}/blog/a`, `${S}/blog/new-post`]);
+      expect(Math.round((check.runAt - deployedAt) / 86400000)).toBe(3);
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
+  it("waits while the change isn't live yet (sitemap unchanged)", async () => {
+    await serviceAccount();
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const S = "https://www.seetharamakalyana.in";
+    const net = fakeSearch({ sitemap: sitemapXml([[`${S}/blog/a`, "2026-11-08"]]) });
+    const before = globalThis.fetch;
+    globalThis.fetch = net.fn;
+    try {
+      const card = await OpsAction.create({ module: "seo", type: "seo.ping", status: "scheduled", runAt: new Date(), title: "SEO: x", payload: { deployedAt: new Date(), sitemapBefore: [[`${S}/blog/a`, "2026-11-08"]] } });
+      await execute(card._id);
+      const a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("scheduled");
+      expect(net.calls.some((c) => c.u.startsWith("https://api.indexnow.org/"))).toBe(false);
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
+  it("checks Google at 3, 7 and 14 days; still missing at 14 days → one follow-up change, never a follow-up of a follow-up", async () => {
+    await serviceAccount();
+    process.env.GITHUB_TOKEN = "t";
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const S = "https://www.seetharamakalyana.in";
+    const net = fakeSearch({ indexed: (u) => !u.endsWith("/blog/new-post") });
+    const before = globalThis.fetch;
+    globalThis.fetch = net.fn;
+    try {
+      const deployedAt = new Date(Date.now() - 3 * 86400000);
+      const card = await OpsAction.create({
+        module: "seo",
+        type: "seo.index_check",
+        status: "scheduled",
+        runAt: new Date(),
+        title: "Google indexing check",
+        payload: { urls: [`${S}/blog/a`, `${S}/blog/new-post`], deployedAt, round: 0 },
+      });
+      await execute(card._id); // day 3: not yet → waits for day 7
+      let a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("scheduled");
+      expect(a.payload.round).toBe(1);
+      expect(Math.round((a.runAt - deployedAt) / 86400000)).toBe(7);
+
+      await OpsAction.updateOne({ _id: card._id }, { runAt: new Date(), "payload.round": 2 });
+      await execute(card._id); // day 14: still missing → follow-up
+      a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("done");
+      expect(a.result.followUp).toBe(true);
+      const fix = await OpsAction.findOne({ type: "dev.request", "payload.indexFix": true });
+      expect(fix.payload.request).toMatch(/\/blog\/new-post/);
+      expect(fix.payload.request).toMatch(/src\/screens\/blogs\/ only/);
+
+      // A check that comes from a follow-up never asks for another one.
+      await OpsAction.deleteMany({ type: "dev.request" });
+      const again = await OpsAction.create({
+        module: "seo",
+        type: "seo.index_check",
+        status: "scheduled",
+        runAt: new Date(),
+        title: "Google indexing check",
+        payload: { urls: [`${S}/blog/new-post`], deployedAt, round: 2, indexFix: true },
+      });
+      await execute(again._id);
+      expect((await OpsAction.findById(again._id)).status).toBe("done");
+      expect(await OpsAction.countDocuments({ type: "dev.request" })).toBe(0);
+    } finally {
+      globalThis.fetch = before;
+    }
+  });
+
+  it("is done at the first check when Google has indexed everything", async () => {
+    await serviceAccount();
+    await import("../src/ops/seo.js");
+    const { execute } = await import("../src/ops/actions.js");
+    const net = fakeSearch();
+    const before = globalThis.fetch;
+    globalThis.fetch = net.fn;
+    try {
+      const card = await OpsAction.create({
+        module: "seo",
+        type: "seo.index_check",
+        status: "scheduled",
+        runAt: new Date(),
+        title: "Google indexing check",
+        payload: { urls: ["https://www.seetharamakalyana.in/blog/a"], deployedAt: new Date(Date.now() - 3 * 86400000), round: 0 },
+      });
+      await execute(card._id);
+      const a = await OpsAction.findById(card._id);
+      expect(a.status).toBe("done");
+      expect(a.result.indexed).toBe(1);
     } finally {
       globalThis.fetch = before;
     }

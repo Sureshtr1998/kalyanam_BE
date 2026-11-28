@@ -102,6 +102,8 @@ const ConfigSchema = new Schema(
     // The monthly algorithm review (src/ops/algorithm.js): { version, everyDays, nextReviewAt,
     // lastReviewAt, lastSummary, tuning: { RULES key: value }, history: [...] }.
     algorithm: { type: Schema.Types.Mixed, default: {} },
+    // Which blog posts Google has indexed (seo.js runSeoIndex, Mondays): { at, results: [{ url, indexed, state }] }.
+    seoIndex: { type: Schema.Types.Mixed, default: null },
     // Vital flows (e.g. registration OTPs): consecutive failures, so a breakage is noticed.
     health: { type: Schema.Types.Mixed, default: {} },
     // Monthly targets, e.g. [{ month: "2026-12", members: 600, revenue: 210000, spend: 200000 }].

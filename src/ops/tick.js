@@ -11,7 +11,7 @@ import { runAlgorithmCycle, startAlgorithm } from "./algorithm.js";
 import { runCommentsCycle } from "./comments.js";
 import { planWeek, recordOrganicStats, recordStoryStats, requestRenders, settlePublished, sweepCancelled } from "./organic.js";
 import { readTools } from "./tools.js";
-import { runSeoWeekly, seoConfigured } from "./seo.js";
+import { runSeoIndex, runSeoWeekly, seoConfigured } from "./seo.js";
 import { runWeeklyReview } from "./review.js";
 import { proposeMergeTest, runAdsPlanning, scheduleMergeTest } from "./adsGrowth.js";
 import { preflightLaunches, tagIdeaCreatives } from "./adsCreative.js";
@@ -105,6 +105,13 @@ const JOBS = [
     run: () => recordStoryStats(),
   },
   {
+    // Which blog posts Google has indexed, ready for the 11:00 read.
+    name: "seoIndex",
+    ready: (c) => c.modes.seo !== "off" && seoConfigured(),
+    due: (last, t) => t.day === 1 && t.hour >= 9 && last?.date !== t.date,
+    run: () => runSeoIndex(),
+  },
+  {
     name: "seoWeekly",
     ready: (c) => c.modes.seo !== "off" && seoConfigured() && claudeConfigured(),
     due: (last, t) => t.day === 1 && t.hour >= 11 && last?.date !== t.date,
@@ -143,6 +150,7 @@ const JOB_LABEL = {
   organicStats: "Reading post results",
   storyStats: "Reading story results",
   seoWeekly: "The Search Console read",
+  seoIndex: "The blog indexing check (Google)",
   ideasAuto: "Planning waiting ideas",
   tools: "Reading the tools' balances",
   reminders: "Sending reminders to unpaid sign-ups and unverified members",
@@ -153,7 +161,7 @@ const JOB_LABEL = {
  * run again for a week, so one failure is enough; jobs that run every 15 minutes
  * get 3 tries (45 min) so a passing hiccup stays quiet.
  */
-const ALERT_AFTER = { adsWeekly: 1, adsMidweek: 1, algorithmReview: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
+const ALERT_AFTER = { adsWeekly: 1, adsMidweek: 1, algorithmReview: 1, adsPlan: 1, weeklyReview: 1, organicPlan: 1, seoWeekly: 1, seoIndex: 1, adsSnapshot: 2, organicStats: 2, tools: 2 };
 
 /** Alerts once when a job keeps failing; marks the alert resolved when it works again. */
 const watchFailures = async (name, prev, failed, error) => {
